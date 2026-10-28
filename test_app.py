@@ -468,6 +468,61 @@ def test_ui_restores_submit_button_on_pageshow():
             assert.equal(button.textContent, 'Analyze question');
         }
     """], check=True, capture_output=True, text=True)
+def test_evidence_dialog_preserves_exact_integers(monkeypatch):
+    values = [9007199254740993, -9007199254740993, 10**37 + 1,
+              9007199254740991, 0, 42, 1.25, None, True, False, "text"]
+    result = {
+        "region": "West", "claims": [],
+        "evidence": {"E1": {"kind": "sql", "sql": "SELECT ...", "params": {},
+                            "rows": [{"units": value} for value in values]}},
+    }
+    original = copy.deepcopy(result)
+    monkeypatch.setattr("app.answer_question", lambda _: result)
+    response = app.test_client().post("/", data={"question": "West"})
+    assert response.status_code == 200
+    assert result == original  # Rendering must not change the critic's evidence.
+    script = response.get_data(as_text=True).split("<script>", 1)[1].split("</script>", 1)[0]
+    check = subprocess.run(["node", "-e", """
+        const assert = require('node:assert/strict');
+        const cells = [];
+        let openEvidence;
+        const button = {
+            dataset: {evidence: 'E1'},
+            addEventListener: (_, handler) => { openEvidence = handler; },
+        };
+        const table = {
+            createTHead: () => ({insertRow: () => ({append() {}})}),
+            createTBody: () => ({insertRow: () => ({insertCell: () => {
+                const cell = {};
+                cells.push(cell);
+                return cell;
+            }})}),
+        };
+        const element = {
+            addEventListener() {}, replaceChildren() {}, showModal() {},
+            querySelector: () => null,
+        };
+        global.document = {
+            getElementById: () => element,
+            querySelectorAll: () => [button],
+            createElement: tag => tag === 'table' ? table : {},
+        };
+    """ + script + """
+        openEvidence();
+        assert.deepEqual(cells.map(cell => String(cell.textContent)), [
+            '9007199254740993', '-9007199254740993',
+            '10000000000000000000000000000000000001', '9007199254740991',
+            '0', '42', '1.25', 'NULL', 'true', 'false', 'text',
+        ]);
+        assert.deepEqual(evidence.E1.rows.map(row => row.units), [
+            '9007199254740993', '-9007199254740993',
+            '10000000000000000000000000000000000001', '9007199254740991',
+            '0', '42', 1.25, null, true, false, 'text',
+        ]);
+    """], capture_output=True, text=True)
+    assert check.returncode == 0, check.stderr
+
+
 def test_evidence_dialog_identifies_cited_cell(monkeypatch):
     monkeypatch.setattr("app.answer_question", lambda _: {
         "region": "West", "claims": [], "evidence": {},
