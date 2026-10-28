@@ -108,14 +108,14 @@
     <div class="table-wrap">
       <table id="monthly-trend">
         <caption>{{ result.region }} monthly trend</caption>
-        <thead><tr><th scope="col">Month</th><th scope="col">Gross margin (%)</th><th scope="col">Discount (%)</th><th scope="col">Freight per unit ($)</th></tr></thead>
+        <thead><tr><th scope="col">Month</th><th scope="col">Revenue ($)</th><th scope="col">Units</th><th scope="col">Gross margin (%)</th><th scope="col">Discount (%)</th><th scope="col">Freight per unit ($)</th></tr></thead>
         <tbody>
         {% for row in monthly_rows %}
           {% if row.get('region_name') == result.region %}
           {% set row_index = loop.index0 %}
           <tr>
             <th scope="row">{% if row.get('sale_month') is not none %}<button type="button" class="number" data-evidence="E1" data-row="{{ row_index }}" data-column="sale_month" aria-label="Evidence for {{ result.region }} {{ row.sale_month }}">{{ row.sale_month }}</button>{% else %}Unavailable{% endif %}</th>
-            {% for column, label, prefix, suffix in [('margin_pct', 'gross margin', '', '%'), ('discount_pct', 'discount', '', '%'), ('freight_per_unit', 'freight per unit', '$', '')] %}
+            {% for column, label, prefix, suffix in [('revenue', 'revenue', '$', ''), ('units', 'units', '', ''), ('margin_pct', 'gross margin', '', '%'), ('discount_pct', 'discount', '', '%'), ('freight_per_unit', 'freight per unit', '$', '')] %}
             <td>{% if row.get(column) is not none %}<button type="button" class="number" data-evidence="E1" data-row="{{ row_index }}" data-column="{{ column }}" aria-label="Evidence for {{ result.region }} {{ row.sale_month }} {{ label }}: {{ prefix }}{{ row[column] }}{{ suffix }}">{{ prefix }}{{ row[column] }}{{ suffix }}</button>{% else %}Unavailable{% endif %}</td>
             {% endfor %}
           </tr>
