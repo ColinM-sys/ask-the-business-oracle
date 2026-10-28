@@ -6,6 +6,7 @@ import runpy
 import subprocess
 import sqlite3
 from contextlib import nullcontext
+from decimal import Decimal
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
@@ -1028,6 +1029,49 @@ def test_select_preserves_semicolon_in_string():
     result = tools.run_sql("SELECT 'West; -- report' AS label FROM regions WHERE region_name=:name; -- report",
                            {"name": "West"})
     assert result["rows"] == [{"label": "West; -- report"}]
+
+
+def test_oracle_decimals_remain_exact_through_verification_and_ui(monkeypatch):
+    result = tools.run_sql(
+        "SELECT 9007199254740992.01 AS amount, 9007199254740992.02 AS next_amount, "
+        "123456789012345678901234567890123456.78 AS large_amount, "
+        "-0.01 AS negative_amount, 42 AS units, NULL AS missing, 'West' AS label "
+        "FROM regions WHERE region_name=:name", {"name": "West"})
+    row = result["rows"][0]
+    expected = {
+        "amount": Decimal("9007199254740992.01"),
+        "next_amount": Decimal("9007199254740992.02"),
+        "large_amount": Decimal("123456789012345678901234567890123456.78"),
+        "negative_amount": Decimal("-0.01"),
+        "units": Decimal("42"),
+    }
+    for column, value in expected.items():
+        assert isinstance(row[column], Decimal)
+        assert row[column] == value
+    assert row["amount"] != row["next_amount"]
+    assert row["missing"] is None and row["label"] == "West"
+
+    evidence = {"E1": {"kind": "sql", **result}}
+    part = {"value": row["amount"], "evidence": "E1", "row": 0, "column": "amount"}
+    assert supported(part, evidence)
+    assert supported({**part, "value": str(row["amount"])}, evidence)
+    claim = {"kind": "finding", "parts": [part], "policy_ids": []}
+    assert critique([claim], evidence) == ([claim], [])
+    rounded = {**claim, "parts": [{**part, "value": float(row["amount"])}]}
+    assert critique([rounded], evidence) == ([], [rounded])
+
+    monkeypatch.setattr("app.answer_question", lambda _: {
+        "region": "West", "claims": [claim], "evidence": evidence, "dropped_count": 0})
+    response = app.test_client().post("/", data={"question": "West"})
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert '>9007199254740992.01</button>' in html
+    serialized = html.split("const evidence = ", 1)[1].split(";", 1)[0]
+    browser_row = json.loads(serialized)["E1"]["rows"][0]
+    assert {column: browser_row[column] for column in expected} == {
+        column: str(value) for column, value in expected.items()}
+    assert browser_row["missing"] is None and browser_row["label"] == "West"
+    assert row["amount"] == expected["amount"] and isinstance(row["amount"], Decimal)
 
 
 def test_flask_live_brief_and_evidence():
