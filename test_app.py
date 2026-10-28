@@ -847,7 +847,7 @@ def test_concurrent_policy_refreshes_do_not_overwrite_newer_content(tmp_path, mo
             sql = " ".join(sql.upper().split())
             if sql.startswith("SELECT TABLE_NAME FROM USER_TABLES"):
                 self.result = [("POLICY_CHUNKS",)]
-            elif sql == "LOCK TABLE POLICY_CHUNKS IN EXCLUSIVE MODE":
+            elif re.fullmatch(r"LOCK TABLE POLICY_CHUNKS IN EXCLUSIVE MODE WAIT [1-9][0-9]*", sql):
                 if worker.name == "new" and database_lock.locked():
                     second_waiting.set()
                     second_progress.set()
@@ -937,8 +937,8 @@ def test_policy_table_creation_race(code, tmp_path, monkeypatch):
 
     if code == 955:
         assert ensure_policies() == "hash-v1-512"
-        assert any(" ".join(call.args[0].upper().split()) ==
-                   "LOCK TABLE POLICY_CHUNKS IN EXCLUSIVE MODE"
+        assert any(re.fullmatch(r"LOCK TABLE POLICY_CHUNKS IN EXCLUSIVE MODE WAIT [1-9][0-9]*",
+                                " ".join(call.args[0].upper().split()))
                    for call in cursor.execute.call_args_list)
         connection.commit.assert_called_once()
     else:
@@ -948,6 +948,48 @@ def test_policy_table_creation_race(code, tmp_path, monkeypatch):
         assert not any(call.args[0].upper().startswith("LOCK TABLE")
                        for call in cursor.execute.call_args_list)
         connection.commit.assert_not_called()
+
+
+@pytest.mark.parametrize("code", [54, 30006])
+def test_policy_lock_timeout_returns_temporary_failure_and_allows_retry(code, tmp_path, monkeypatch):
+    (tmp_path / "policy.md").write_text("Policy", encoding="utf-8")
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.fetchone.return_value = ("POLICY_CHUNKS",)
+    cursor.fetchall.return_value = []
+    lock_attempts = []
+
+    def execute(sql, **params):
+        normalized = " ".join(sql.upper().split())
+        if normalized.startswith("LOCK TABLE"):
+            lock_attempts.append(normalized)
+            if len(lock_attempts) == 1:
+                raise oracledb.DatabaseError(SimpleNamespace(
+                    code=code, message="private-driver-details"))
+        return cursor
+
+    cursor.execute.side_effect = execute
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+    monkeypatch.setattr("app.answer_question", lambda _: tools.search_policies("Policy"))
+
+    response = app.test_client().post("/", data={"question": "West"})
+
+    assert response.status_code == 503
+    assert b"retry" in response.data
+    assert b"private-driver-details" not in response.data
+    wait = re.fullmatch(r"LOCK TABLE POLICY_CHUNKS IN EXCLUSIVE MODE WAIT ([1-9][0-9]*)",
+                        lock_attempts[0])
+    assert wait and int(wait.group(1)) <= 30
+    connection.__exit__.assert_called_once()
+    connection.commit.assert_not_called()
+    assert not any(call.args[0].lstrip().upper().startswith(("DELETE", "INSERT"))
+                   for call in cursor.execute.call_args_list)
+
+    assert ensure_policies() == "hash-v1-512"
+    assert len(lock_attempts) == 2
+    connection.commit.assert_called_once()
 
 
 def test_policy_search_handles_empty_table(monkeypatch):
