@@ -1,10 +1,29 @@
 """Local Flask UI: python app.py, then http://127.0.0.1:5055."""
-from flask import Flask, render_template, request
+import warnings
+from getpass import GetPassWarning, getpass
+from hmac import compare_digest
+
+from flask import Flask, abort, render_template, request
 
 from agent import QuestionValidationError, answer_question
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024
+
+
+@app.before_request
+def protect_local_server():
+    host = request.headers.get("Host", "").lower()
+    if host not in {"localhost", "localhost:5055", "127.0.0.1", "127.0.0.1:5055"}:
+        abort(400)
+    password = app.config.get("LOCAL_AUTH_PASSWORD")
+    if not password:
+        abort(503)
+    auth = request.authorization
+    if (not auth or auth.type != "basic" or auth.username != "atb"
+            or not isinstance(auth.password, str)
+            or not compare_digest(auth.password.encode("utf-8"), password.encode("utf-8"))):
+        return "Authentication required", 401, {"WWW-Authenticate": 'Basic realm="Ask the Business", charset="UTF-8"'}
 
 
 @app.template_filter()
@@ -46,4 +65,13 @@ def index():
 
 
 if __name__ == "__main__":
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", GetPassWarning)
+        try:
+            password = getpass("Set a local web password (at least 16 characters): ")
+        except GetPassWarning:
+            raise SystemExit("A terminal that can hide password input is required.") from None
+    if len(password) < 16:
+        raise SystemExit("The local web password must contain at least 16 characters.")
+    app.config["LOCAL_AUTH_PASSWORD"] = password
     app.run(host="127.0.0.1", port=5055, debug=False)

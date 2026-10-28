@@ -1,5 +1,7 @@
 """Unit checks and live integration against the existing local Oracle tables."""
+import base64
 import copy
+import getpass
 import json
 import re
 import runpy
@@ -7,6 +9,7 @@ import subprocess
 import sqlite3
 from contextlib import nullcontext
 import threading
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
 from pathlib import Path
@@ -23,6 +26,73 @@ from agent import answer_question, parse_question, summary_sql
 from app import app
 from critic import critique, supported
 from policies import ensure_policies, hash_embedding
+
+
+TEST_WEB_PASSWORD = "test-passphrase-for-web"
+
+
+def web_auth(password=TEST_WEB_PASSWORD, username="atb"):
+    token = base64.b64encode(f"{username}:{password}".encode()).decode()
+    return f"Basic {token}"
+
+
+def authenticated_client(server=app):
+    server.config["LOCAL_AUTH_PASSWORD"] = TEST_WEB_PASSWORD
+    client = server.test_client()
+    client.environ_base["HTTP_AUTHORIZATION"] = web_auth()
+    return client
+
+
+@pytest.mark.parametrize("host", [
+    "attacker.example:5055", "localhost.attacker.example:5055",
+    "127.0.0.1.attacker.example:5055", "attacker.example@localhost:5055",
+    "localhost:5056", "localhost:5055, attacker.example:5055", "",
+])
+@pytest.mark.parametrize("method", ["GET", "POST"])
+def test_web_rejects_untrusted_hosts_before_analysis(monkeypatch, host, method):
+    monkeypatch.setitem(app.config, "LOCAL_AUTH_PASSWORD", TEST_WEB_PASSWORD)
+    analysis = MagicMock()
+    monkeypatch.setattr("app.answer_question", analysis)
+    response = app.test_client().open(
+        "/", method=method, data={"question": "West"},
+        headers={"Host": host, "Authorization": web_auth()},
+    )
+    assert response.status_code == 400
+    analysis.assert_not_called()
+
+
+@pytest.mark.parametrize("host", ["localhost", "localhost:5055", "127.0.0.1", "127.0.0.1:5055"])
+def test_web_accepts_authenticated_loopback_hosts(monkeypatch, host):
+    monkeypatch.setitem(app.config, "LOCAL_AUTH_PASSWORD", TEST_WEB_PASSWORD)
+    response = app.test_client().get("/", headers={"Host": host, "Authorization": web_auth()})
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize("authorization", [None, "Bearer invalid", web_auth("wrong"), web_auth(username="wrong")])
+@pytest.mark.parametrize("method", ["GET", "POST"])
+def test_web_requires_authentication_before_analysis(monkeypatch, authorization, method):
+    monkeypatch.setitem(app.config, "LOCAL_AUTH_PASSWORD", TEST_WEB_PASSWORD)
+    analysis = MagicMock()
+    monkeypatch.setattr("app.answer_question", analysis)
+    headers = {"Authorization": authorization} if authorization else {}
+    response = app.test_client().open("/", method=method, data={"question": "West"}, headers=headers)
+    assert response.status_code == 401
+    assert response.headers["WWW-Authenticate"].startswith("Basic ")
+    analysis.assert_not_called()
+
+
+@pytest.mark.parametrize("password", [None, ""])
+def test_web_fails_closed_without_configured_password(monkeypatch, password):
+    monkeypatch.setitem(app.config, "LOCAL_AUTH_PASSWORD", password)
+    response = app.test_client().get("/", headers={"Authorization": web_auth("")})
+    assert response.status_code == 503
+
+
+def test_web_authentication_accepts_unicode_password(monkeypatch):
+    password = "test-passphrase-\u00e9\u00e9"
+    monkeypatch.setitem(app.config, "LOCAL_AUTH_PASSWORD", password)
+    response = app.test_client().get("/", headers={"Authorization": web_auth(password)})
+    assert response.status_code == 200
 
 
 @pytest.mark.parametrize("wallet", [None, "test-wallet"])
@@ -527,7 +597,7 @@ def test_missing_monthly_costs_reject_incomplete_analysis(region_id, month, prod
         with pytest.raises(ValueError, match="Missing monthly costs"):
             answer_question("West since July 2025")
         policies.assert_not_called()
-        response = app.test_client().post("/", data={"question": "West since July 2025"})
+        response = authenticated_client().post("/", data={"question": "West since July 2025"})
         assert response.status_code == 503
         assert b"Missing monthly costs" not in response.data
 
@@ -649,7 +719,7 @@ def test_missing_region_has_descriptive_validation_error(monkeypatch, rows):
         "sql": sql, "params": params or {}, "rows": rows})
     with pytest.raises(ValueError, match="No sales/cost data found for West"):
         answer_question("Why did West margin fall since July 2025?")
-    response = app.test_client().post("/", data={"question": "West"})
+    response = authenticated_client().post("/", data={"question": "West"})
     assert response.status_code == 400
     assert b"No sales/cost data found for West" in response.data
 @pytest.mark.parametrize("before,after,direction,below_precision", [
@@ -1031,7 +1101,7 @@ def test_select_preserves_semicolon_in_string():
 
 
 def test_flask_live_brief_and_evidence():
-    client = app.test_client()
+    client = authenticated_client()
     assert client.get("/").status_code == 200
     response = client.post("/", data={"question": "Why did West margin fall since July 2025?"})
     assert response.status_code == 200
@@ -1052,7 +1122,7 @@ def test_ui_discloses_dropped_claims_and_empty_brief(monkeypatch, has_claims, dr
     }
     monkeypatch.setattr("app.answer_question", lambda _: result)
 
-    response = app.test_client().post("/", data={"question": "West"})
+    response = authenticated_client().post("/", data={"question": "West"})
 
     assert response.status_code == 200
     assert (b"2 claims were omitted because they failed verification." in response.data) == bool(dropped_count)
@@ -1082,7 +1152,7 @@ def test_ui_reports_unavailable_policy_claims(
             if policy["doc"] in unavailable:
                 policy["chunk"] = "This policy has changed."
 
-    response = app.test_client().post("/", data={"question": question})
+    response = authenticated_client().post("/", data={"question": question})
 
     assert response.status_code == 200
     assert b'data-evidence="E2"' in response.data
@@ -1113,7 +1183,7 @@ def test_ui_discloses_missing_policy_backed_sections(
             if row["doc"] in missing_docs:
                 row["chunk"] = "Changed policy content."
 
-    response = app.test_client().post("/", data={"question": "West since July 2025"})
+    response = authenticated_client().post("/", data={"question": "West since July 2025"})
 
     assert response.status_code == 200
     assert (b"Explanation unavailable" in response.data) == (not reason_available)
@@ -1129,12 +1199,12 @@ def test_ui_missing_question_rejected_before_querying(monkeypatch, data):
         pytest.fail("Missing questions must be rejected before querying")
 
     monkeypatch.setattr("agent.run_sql", forbidden_query)
-    response = app.test_client().post("/", data=data)
+    response = authenticated_client().post("/", data=data)
     assert response.status_code == 400
 
 
 def test_focus_indicator_contrasts_with_page_and_cards():
-    html = app.test_client().get("/").get_data(as_text=True)
+    html = authenticated_client().get("/").get_data(as_text=True)
 
     def declaration(selector, name):
         rule = re.search(rf"{re.escape(selector)}\s*\{{([^}}]*)\}}", html)
@@ -1159,7 +1229,7 @@ def test_focus_indicator_contrasts_with_page_and_cards():
 
 
 def test_ui_restores_submit_button_on_pageshow():
-    html = app.test_client().get("/").get_data(as_text=True)
+    html = authenticated_client().get("/").get_data(as_text=True)
     script = html.rsplit("<script>", 1)[1].split("</script>", 1)[0]
     subprocess.run(["node", "-e", """
         const assert = require('node:assert/strict');
@@ -1191,7 +1261,7 @@ def test_evidence_dialog_preserves_exact_integers(monkeypatch):
     }
     original = copy.deepcopy(result)
     monkeypatch.setattr("app.answer_question", lambda _: result)
-    response = app.test_client().post("/", data={"question": "West"})
+    response = authenticated_client().post("/", data={"question": "West"})
     assert response.status_code == 200
     assert result == original  # Rendering must not change the critic's evidence.
     script = response.get_data(as_text=True).split("<script>", 1)[1].split("</script>", 1)[0]
@@ -1240,7 +1310,7 @@ def test_evidence_dialog_identifies_cited_cell(monkeypatch):
     monkeypatch.setattr("app.answer_question", lambda _: {
         "region": "West", "claims": [], "evidence": {},
     })
-    html = app.test_client().post("/", data={"question": "West"}).get_data(as_text=True)
+    html = authenticated_client().post("/", data={"question": "West"}).get_data(as_text=True)
 
     assert 'aria-describedby="evidence-description"' in html
     assert '<p id="evidence-description"></p>' in html
@@ -1270,7 +1340,7 @@ def test_policy_citations_have_descriptive_accessible_names(monkeypatch):
             if tag == "button" and attrs.get("class") == "citation":
                 self.buttons.append(attrs)
 
-    response = app.test_client().post("/", data={"question": "West"})
+    response = authenticated_client().post("/", data={"question": "West"})
     assert response.status_code == 200
     parser = CitationParser()
     parser.feed(response.get_data(as_text=True))
@@ -1312,7 +1382,7 @@ def test_question_validation_errors_are_associated_and_focused(monkeypatch):
         parser.feed(response.get_data(as_text=True))
         return parser
 
-    client = app.test_client()
+    client = authenticated_client()
     for data, status, message in [
         ({"question": ""}, 400, "Enter a business question"),
         ({"question": "North"}, 400, "Unsupported region"),
@@ -1339,7 +1409,7 @@ def test_question_validation_errors_are_associated_and_focused(monkeypatch):
 
 
 def test_ui_validation_and_safe_error(monkeypatch):
-    client = app.test_client()
+    client = authenticated_client()
     assert client.post("/", data={"question": ""}).status_code == 400
     assert client.post("/", data={"question": "West since July 2030"}).status_code == 400
     def failure(_):
@@ -1358,7 +1428,7 @@ def test_ui_sanitizes_invalid_policy_encoding(tmp_path, monkeypatch):
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
         "sql": sql, "params": params or {}, "rows": [row]})
 
-    response = app.test_client().post("/", data={"question": "West since July 2025"})
+    response = authenticated_client().post("/", data={"question": "West since July 2025"})
 
     assert response.status_code == 503
     assert b"Analysis unavailable. Check the local Oracle connection and policy setup, then retry." in response.data
@@ -1370,7 +1440,7 @@ def test_ui_sanitizes_downstream_value_error(monkeypatch):
         raise ValueError("private-internal-details")
 
     monkeypatch.setattr("agent.run_sql", failure)
-    response = app.test_client().post("/", data={"question": "West"})
+    response = authenticated_client().post("/", data={"question": "West"})
 
     assert response.status_code == 503
     assert b"Analysis unavailable. Check the local Oracle connection and policy setup, then retry." in response.data
@@ -1383,11 +1453,14 @@ def test_script_starts_and_shows_unavailable_when_setup_fails(monkeypatch):
 
     monkeypatch.setattr("policies.ensure_policies", failure)
     monkeypatch.setattr("tools.connect", failure)
+    monkeypatch.setattr("getpass.getpass", lambda _: TEST_WEB_PASSWORD)
     started = []
 
     def run(server, **kwargs):
         started.append(server)
+        assert server.config["LOCAL_AUTH_PASSWORD"] == TEST_WEB_PASSWORD
         client = server.test_client()
+        client.environ_base["HTTP_AUTHORIZATION"] = web_auth()
         assert client.get("/").status_code == 200
         response = client.post("/", data={"question": "West"})
         assert response.status_code == 503
@@ -1397,12 +1470,36 @@ def test_script_starts_and_shows_unavailable_when_setup_fails(monkeypatch):
     monkeypatch.setattr("flask.Flask.run", run)
     runpy.run_path(str(Path(__file__).with_name("app.py")), run_name="__main__")
     assert len(started) == 1
+
+
+def test_script_refuses_short_web_password(monkeypatch):
+    monkeypatch.setattr("getpass.getpass", lambda _: "short")
+    run = MagicMock()
+    monkeypatch.setattr("flask.Flask.run", run)
+    with pytest.raises(SystemExit, match="at least 16 characters"):
+        runpy.run_path(str(Path(__file__).with_name("app.py")), run_name="__main__")
+    run.assert_not_called()
+
+
+def test_script_refuses_password_prompt_that_cannot_hide_input(monkeypatch):
+    def insecure_prompt(_):
+        warnings.warn("Cannot hide input", getpass.GetPassWarning)
+        pytest.fail("An insecure password prompt must not read input")
+
+    monkeypatch.setattr("getpass.getpass", insecure_prompt)
+    run = MagicMock()
+    monkeypatch.setattr("flask.Flask.run", run)
+    with pytest.raises(SystemExit, match="hide password input"):
+        runpy.run_path(str(Path(__file__).with_name("app.py")), run_name="__main__")
+    run.assert_not_called()
+
+
 def test_ui_oversized_submission(monkeypatch):
     def unexpected_analysis(_):
         pytest.fail("Oversized submissions must not run analysis")
 
     monkeypatch.setattr("app.answer_question", unexpected_analysis)
-    response = app.test_client().post(
+    response = authenticated_client().post(
         "/", data={"question": "x" * (app.config["MAX_CONTENT_LENGTH"] + 1)}
     )
     assert response.status_code == 413
@@ -1412,6 +1509,6 @@ def test_ui_oversized_submission(monkeypatch):
 
 
 def test_ui_escapes_question():
-    response = app.test_client().post("/", data={"question": '<script>alert("x")</script> West'})
+    response = authenticated_client().post("/", data={"question": '<script>alert("x")</script> West'})
     assert response.status_code == 200
     assert b'<script>alert("x")</script>' not in response.data
