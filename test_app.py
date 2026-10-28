@@ -352,6 +352,77 @@ def west_answer():
     return answer_question("Why did West margin fall since July 2025?")
 
 
+@pytest.fixture
+def retrieved_policy_rows(monkeypatch):
+    summary = {
+        "region_name": "West", "first_month": "2025-01", "last_month": "2025-09",
+        "before_last_month": "2025-06", "after_first_month": "2025-07",
+        "before_margin_pct": 40, "after_margin_pct": 25, "margin_drop_pts": 15,
+        "margin_direction": "fell", "before_discount_pct": 3, "after_discount_pct": 18,
+        "before_freight_per_unit": 5, "after_freight_per_unit": 8,
+        "freight_increase_pct": 60,
+    }
+    monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
+        "sql": sql, "params": params or {}, "rows": [summary]})
+    rows = [{"id": index, "doc": path.name, "chunk": path.read_text(encoding="utf-8")}
+            for index, path in enumerate(sorted(Path(__file__).with_name("docs").glob("*.md")), 1)]
+    monkeypatch.setattr("agent.search_policies", lambda _: {
+        "sql": "SELECT ...", "params": {}, "rows": rows})
+    return rows
+
+
+@pytest.mark.parametrize("content", [
+    "original", "whitespace", "unrelated", "missing", "empty", "null", "changed", "revoked",
+])
+def test_policy_claims_require_reviewed_content(retrieved_policy_rows, content):
+    changes = {
+        "west_q3_volume_push.md": ("It was not sent", "It was sent"),
+        "freight_contract_memo.md": ("the West region moves", "the West region does not move"),
+        "pricing_policy.md": ("may be added", "must not be added"),
+        "regional_playbook.md": ("Re-tender freight lanes", "Do not re-tender freight lanes"),
+    }
+    for row in retrieved_policy_rows:
+        if content == "whitespace":
+            row["chunk"] = "\r\n  ".join(row["chunk"].split())
+        elif content == "unrelated":
+            row["chunk"] = "Office opening hours and holiday arrangements."
+        elif content == "missing":
+            del row["chunk"]
+        elif content == "empty":
+            row["chunk"] = ""
+        elif content == "null":
+            row["chunk"] = None
+        elif content == "changed":
+            row["chunk"] = row["chunk"].replace(*changes[row["doc"]])
+        elif content == "revoked":
+            row["chunk"] += "\nThis document is revoked; its statements and recommendations no longer apply."
+
+    result = answer_question("Why did West margin fall since July 2025?")
+    policy_claims = [c for c in result["claims"] if c["kind"] in ("reason", "action")]
+    if content in ("original", "whitespace"):
+        assert [c["kind"] for c in policy_claims] == ["reason", "action", "action", "action"]
+        assert {p for c in policy_claims for p in c["policy_ids"]} == {
+            f"P{row['id']}" for row in retrieved_policy_rows}
+    else:
+        assert policy_claims == []
+    assert any(c["kind"] == "finding" for c in result["claims"])
+    assert result["dropped_count"] == 0
+
+
+def test_policy_claims_cite_only_supporting_chunks(retrieved_policy_rows):
+    supporting_ids = {f"P{row['id']}" for row in retrieved_policy_rows}
+    retrieved_policy_rows.extend([
+        {**row, "id": row["id"] + 100, "chunk": "Owner: Regional managers."}
+        for row in retrieved_policy_rows
+    ])
+
+    result = answer_question("Why did West margin fall since July 2025?")
+
+    assert [c["kind"] for c in result["claims"] if c["policy_ids"]] == [
+        "reason", "action", "action", "action"]
+    assert {p for c in result["claims"] for p in c["policy_ids"]} == supporting_ids
+
+
 def test_west_live_end_to_end(west_answer):
     result = west_answer
     row = next(r for r in result["evidence"]["E2"]["rows"] if r["region_name"] == "West")
