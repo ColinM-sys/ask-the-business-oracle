@@ -79,6 +79,12 @@ def test_readme_documents_node_test_prerequisite():
     assert "Node.js installed and available as `node` on PATH" in " ".join(test_instructions.split())
 
 
+def test_readme_documents_supported_year_range():
+    readme = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
+    assert ("a full month name plus year or `YYYY-MM`. "
+            "Both formats require a year from 2000 through 2099.") in " ".join(readme.split())
+
+
 def test_readme_documents_required_oracle_configuration():
     root = Path(__file__).parent
     readme = (root / "README.md").read_text(encoding="utf-8")
