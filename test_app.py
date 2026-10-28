@@ -476,6 +476,81 @@ def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
     for part in finding["parts"]:
         if "value" in part:
             assert supported(part, result["evidence"])
+
+
+@pytest.fixture
+def policy_rows(monkeypatch):
+    row = {
+        "region_name": "West", "first_month": "2025-01", "last_month": "2025-09",
+        "before_last_month": "2025-06", "after_first_month": "2025-07",
+        "before_margin_pct": 40, "after_margin_pct": 25, "margin_drop_pts": 15,
+        "margin_direction": "fell", "before_discount_pct": 3, "after_discount_pct": 18,
+        "before_freight_per_unit": 5, "after_freight_per_unit": 8,
+        "freight_increase_pct": 60,
+        "missing_cost_count": 0,
+    }
+    policies = [{"id": i, "doc": path.name, "chunk": path.read_text(encoding="utf-8").strip()}
+                for i, path in enumerate(sorted(Path(__file__).with_name("docs").glob("*.md")), 1)]
+    monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
+        "sql": sql, "params": params or {}, "rows": [row]})
+    monkeypatch.setattr("agent.search_policies", lambda _: {
+        "sql": "SELECT policy evidence", "params": {}, "rows": policies})
+    return policies
+
+
+def test_reviewed_policy_text_supports_claims_and_only_matching_citations(policy_rows):
+    policy_rows.extend({**policy, "id": policy["id"] + 10, "chunk": "Unrelated policy text."}
+                       for policy in policy_rows[:])
+    result = answer_question("West since July 2025")
+    claims = [claim for claim in result["claims"] if claim["kind"] in {"reason", "action"}]
+    assert [claim["kind"] for claim in claims] == ["reason", "action", "action", "action"]
+    assert all(claim["policy_ids"] for claim in claims)
+    assert {citation for claim in claims for citation in claim["policy_ids"]} == {"P1", "P2", "P3", "P4"}
+    assert result["dropped_count"] == 0
+
+
+@pytest.mark.parametrize("filename,contradiction", [
+    ("west_q3_volume_push.md", "West cancelled the discount push; Sales and Finance approved every deal."),
+    ("freight_contract_memo.md", "West retained its freight carrier and the existing rates."),
+    ("pricing_policy.md", "Freight surcharges are prohibited on all orders."),
+    ("regional_playbook.md", "Keep broad discount programs; do not re-tender or consolidate freight."),
+])
+@pytest.mark.parametrize("revision", ["missing", "header", "replacement", "addendum"])
+def test_policy_filenames_do_not_prove_claims(policy_rows, filename, contradiction, revision):
+    policy = next(policy for policy in policy_rows if policy["doc"] == filename)
+    original = policy["chunk"]
+    if revision == "missing":
+        del policy["chunk"]
+    else:
+        policy["chunk"] = {"header": original.splitlines()[0], "replacement": contradiction,
+                           "addendum": original + "\n\nCorrection: " + contradiction}[revision]
+
+    result = answer_question("West since July 2025")
+
+    assert all(f"P{policy['id']}" not in claim["policy_ids"] for claim in result["claims"])
+    if filename in {"west_q3_volume_push.md", "freight_contract_memo.md"}:
+        assert not any(claim["kind"] == "reason" for claim in result["claims"])
+    else:
+        assert not any(claim["kind"] == "action" for claim in result["claims"])
+    assert len([claim for claim in result["claims"] if claim["kind"] == "finding"]) == 2
+    assert result["dropped_count"] == 0
+
+
+def test_updated_policy_source_invalidates_unchanged_retrieved_chunk(policy_rows, tmp_path, monkeypatch):
+    for policy in policy_rows:
+        content = policy["chunk"]
+        if policy["doc"] == "west_q3_volume_push.md":
+            content += "\n\nCorrection: the program was cancelled before launch."
+        (tmp_path / policy["doc"]).write_text(content, encoding="utf-8")
+    monkeypatch.setattr("agent.DOCS", tmp_path)
+
+    result = answer_question("West since July 2025")
+
+    assert not any(claim["kind"] == "reason" for claim in result["claims"])
+    assert len([claim for claim in result["claims"] if claim["kind"] == "action"]) == 3
+    assert result["dropped_count"] == 0
+
+
 @pytest.mark.parametrize("month", ["Jul", "jul.", "Sept", "SEP"])
 def test_question_month_abbreviations(month):
     expected = "07" if month.lower().startswith("jul") else "09"
