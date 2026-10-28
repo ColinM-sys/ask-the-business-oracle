@@ -1,20 +1,34 @@
 # Ask the Business
 
+> **Hackathon report: [REPORT.md](REPORT.md).** Built at the Codex + Oracle AI Database Hackathon (Oracle AI
+> World, Oct 28, 2026) by Claude orchestrating **6,704 OpenAI Codex agent runs (656M tokens)**. Up to 200 agents
+> ran in parallel across GPT-6.1-Sol, GPT-6-Astra and GPT-6.1-Terra. They reviewed, fixed, tested and merged this
+> repo: **73 agent PRs** (34 merged so far) and **42 → 213 tests**. The report covers calls and tokens by
+> component and model, the 6-to-200-agent scaling curve, the merge-bot pipeline, AgentSocial (agents coordinating
+> on an open local social network), and every problem hit and fixed. The orchestration code is in [`swarm/`](swarm).
+
 A local Flask app that explains regional margin changes with Oracle SQL evidence
 and policy retrieval. No API key or language model is required.
 
+If `.env` does not exist, copy `.env.example` to `.env`. Set `ORACLE_USER`
+(database user), `ORACLE_PASSWORD` (database password), and `ORACLE_DSN`
+(connection string, such as `host:port/service_name`) in `.env` before running
+`policies.py`. Business tables must already be loaded.
+
 ```powershell
 python -m pip install -r requirements.txt
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+# Fill in the required Oracle settings in .env before continuing.
 docker start oracle-free
 python policies.py
 python app.py
 ```
 
 Open http://127.0.0.1:5055 and ask “Why did West margin fall since July 2025?”.
-The existing `.env` is read by `db.py`; business tables must already be loaded.
-Do not commit credentials. `policies.py` creates only `policy_chunks`, probes
-registered Oracle embedding models, and otherwise uses deterministic normalized
-hashing vectors. Queries use Oracle `VECTOR_DISTANCE` with cosine distance; the
+`.env` is read by `db.py`; do not commit credentials. `policies.py` creates only
+`policy_chunks`, probes registered Oracle embedding models, and otherwise uses
+deterministic normalized hashing vectors. Source changes trigger a transactional
+policy refresh. Queries use Oracle `VECTOR_DISTANCE` with cosine distance; the
 local hashing fallback is lexical retrieval rather than a semantic language model.
 
 The app runs fixed analysis for margin, discount and freight, regardless of
@@ -25,6 +39,10 @@ month onward, including later years. It displays those boundaries explicitly.
 Margin includes COGS and freight and is weighted by net revenue; discounts use
 gross-sales weights; freight per unit uses quantity weights. Freight movement
 therefore includes product mix and can differ from the contract's rate change.
+Changes and margin direction use unrounded aggregates. SQL rounds period metrics
+and changes independently to two decimal places, so subtracting displayed
+endpoints may give a different result. For example, margins of 25.004% and
+24.996% both round to 25%, but the drop is 0.01 percentage points.
 The other regions provide context, not a causal decomposition.
 
 Every number in the brief, including dates and SQL-derived differences, names an
@@ -38,14 +56,17 @@ were retrieved; West's explanation applies to the default change point.
 writes/locks/sequences/procedural calls, and executes in a read-only transaction.
 It refuses evidence over the row limit instead of silently truncating it.
 `search_policies()` calls `ensure_policies()` on every policy search, including
-normal POST requests. The runtime database user needs `CREATE TABLE` when
-`policy_chunks` is missing, tablespace quota (or `UNLIMITED TABLESPACE`) for
-storage, and `SELECT`, `DELETE` and `INSERT` access to `policy_chunks`. If the
-table is empty or the source documents or selected embedding backend change,
-refresh deletes and replaces all rows and commits. The table is shared by
-requests and other app instances using the same schema, so refreshes change their
-policy state too. Instances with different documents or embedding backends can
-overwrite each other's policy state.
+normal POST requests. It creates `policy_chunks` if absent and transactionally
+deletes and replaces all rows and commits when the table is empty or the source
+documents or selected embedding backend change. The runtime database user needs
+`CREATE TABLE` when the table is missing, tablespace quota (or
+`UNLIMITED TABLESPACE`) for storage, and `SELECT`, `DELETE`, and `INSERT` access
+to `policy_chunks` (the table owner has these privileges). Running
+`python policies.py` once does not make SELECT-only runtime permissions sufficient.
+The table is shared by requests and other app instances using the same schema,
+so refreshes change their policy state too. Instances with different documents
+or embedding backends can overwrite each other's policy state.
+
 The Flask server binds only to localhost and runs without debug mode; this demo
 has no production authentication layer.
 

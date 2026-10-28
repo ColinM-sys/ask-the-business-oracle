@@ -1,18 +1,21 @@
 """Local Flask UI: python app.py, then http://127.0.0.1:5055."""
+from decimal import Decimal
+
 from flask import Flask, render_template, request
 
-from agent import answer_question
+from agent import QuestionValidationError, answer_question
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024
+app.config["TRUSTED_HOSTS"] = ["localhost", "127.0.0.1"]
 
 
 @app.template_filter()
 def browser_evidence(evidence):
-    """Keep integer cells exact across JSON/JavaScript without changing SQL evidence."""
+    """Keep integer and Decimal cells exact in JavaScript without changing SQL evidence."""
     return {
         key: {**item, "rows": [
-            {column: str(value) if isinstance(value, int) and not isinstance(value, bool) else value
+            {column: str(value) if isinstance(value, (int, Decimal)) and not isinstance(value, bool) else value
              for column, value in row.items()}
             for row in item["rows"]
         ]}
@@ -24,7 +27,7 @@ def browser_evidence(evidence):
 def submission_too_large(_):
     return render_template(
         "index.html", result=None, question="",
-        error="Submission too large. Shorten your question and try again.",
+        error="Submission too large. Shorten your question and try again.", question_error=True,
     ), 413
 
 
@@ -36,12 +39,13 @@ def index():
     if request.method == "POST":
         try:
             result = answer_question(question)
-        except ValueError as exc:
+        except QuestionValidationError as exc:
             error, status = str(exc), 400
         except Exception:
             # Do not expose connection settings, driver errors or credentials.
             error, status = "Analysis unavailable. Check the local Oracle connection and policy setup, then retry.", 503
-    return render_template("index.html", result=result, error=error, question=question), status
+    return render_template("index.html", result=result, error=error, question=question,
+                           question_error=status == 400), status
 
 
 if __name__ == "__main__":
