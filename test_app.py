@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 
 import oracledb
 import pytest
+from packaging.requirements import Requirement
 
 import db
 import tools
@@ -73,12 +74,48 @@ def test_pooled_connection_cleans_up_transaction(monkeypatch, fail):
     finally:
         if db._pool is not None:
             db._pool.close(force=True)
+
+
+def test_readme_install_requirements_are_available():
+    readme = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
+    assert "python -m pip install -r requirements.txt" in readme
+    requirements = Path(__file__).with_name("requirements.txt").read_text(encoding="utf-8")
+    packages = {re.split(r"[<>=!~\[;\s]", line.strip(), maxsplit=1)[0].lower()
+                for line in requirements.splitlines()}
+    assert {"flask", "oracledb", "sqlglot", "pytest"} <= packages
+def test_readme_requirements_include_compatible_dependencies():
+    root = Path(__file__).parent
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    assert "python -m pip install -r requirements.txt" in readme
+    requirements = [Requirement(line) for line in
+                    (root / "requirements.txt").read_text(encoding="utf-8").splitlines()
+                    if line.strip() and not line.lstrip().startswith("#")]
+    by_name = {requirement.name.lower(): requirement for requirement in requirements}
+    assert {"flask", "oracledb", "sqlglot", "pytest"} <= by_name.keys()
+    # VECTOR column support for generally available Oracle 23ai starts at 2.2.
+    assert "2.1" not in by_name["oracledb"].specifier
+    assert "2.2" in by_name["oracledb"].specifier
+
+
 def test_readme_documents_node_test_prerequisite():
     readme = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
     test_instructions = readme.split("python -m pytest -q test_app.py", 1)[1]
     assert "Node.js installed and available as `node` on PATH" in " ".join(test_instructions.split())
 
 
+def test_readme_explains_independent_rounding():
+    readme = " ".join(Path(__file__).with_name("README.md").read_text(encoding="utf-8").split())
+    assert "Changes and margin direction use unrounded aggregates." in readme
+    assert "SQL rounds period metrics and changes independently to two decimal places" in readme
+    assert "subtracting displayed endpoints may give a different result" in readme
+def test_readme_documents_request_time_policy_writes():
+    readme = " ".join(Path(__file__).with_name("README.md").read_text(encoding="utf-8").split())
+    assert "Each `search_policies` call runs `ensure_policies`" in readme
+    assert "creates `policy_chunks` if absent" in readme
+    assert "policy documents or the embedding backend change" in readme
+    assert "`CREATE TABLE` and tablespace quota" in readme
+    assert "`SELECT`, `DELETE`, and `INSERT` access to `policy_chunks`" in readme
+    assert "Running `python policies.py` once does not make SELECT-only runtime permissions sufficient." in readme
 def test_readme_documents_required_oracle_configuration():
     root = Path(__file__).parent
     readme = (root / "README.md").read_text(encoding="utf-8")
@@ -107,6 +144,7 @@ def test_readme_documents_required_oracle_configuration():
     "SELECT UTL_HTTP.REQUEST('https://example.com') FROM sales",
     "SELECT * FROM sales UNION ALL SELECT * FROM sales",
     "SELECT * FROM sales FOR UPDATE SKIP LOCKED", "SELECT * FROM sales; COMMIT",
+    "SELECT * FROM \u017fales", "SELECT * FROM d\u0131scounts",
     "SELECT 'unterminated FROM sales",
 ])
 def test_guard_refuses_before_connect(sql, monkeypatch):
@@ -120,6 +158,20 @@ def test_guard_refuses_before_connect(sql, monkeypatch):
 def test_guard_accepts_comments_and_harmless_string():
     tools.validate_select("/* report */ SELECT COUNT(*) FROM sales WHERE sale_month=:month;")
     tools.validate_select("SELECT 'DROP TABLE sales' AS harmless FROM regions")
+
+
+@pytest.mark.parametrize("name", ["sales", "costs", "customers", "discounts", "products", "regions"])
+def test_guard_resolves_oracle_table_names(name, monkeypatch):
+    for identifier in (name, name.upper(), name.capitalize(), f'"{name.upper()}"'):
+        tools.validate_select(f"SELECT * FROM {identifier}")
+
+    def forbidden_connection():
+        pytest.fail("Rejected SQL must never connect")
+
+    monkeypatch.setattr(tools, "connect", forbidden_connection)
+    for identifier in (f'"{name}"', f'"{name.capitalize()}"'):
+        with pytest.raises(ValueError, match="Only governed business tables"):
+            tools.run_sql(f"SELECT * FROM sales JOIN {identifier} ON 1=1")
 
 
 @pytest.fixture
@@ -1030,6 +1082,39 @@ def test_select_preserves_semicolon_in_string():
     assert result["rows"] == [{"label": "West; -- report"}]
 
 
+@pytest.mark.parametrize("host", [
+    "rebind.example:5055", "localhost.rebind.example:5055",
+    "evil.localhost:5055", "127.0.0.1.rebind.example:5055",
+    "localhost@rebind.example:5055",
+])
+@pytest.mark.parametrize("method", ["get", "post"])
+def test_ui_rejects_untrusted_hosts_before_analysis(monkeypatch, host, method):
+    analysis = MagicMock()
+    monkeypatch.setattr("app.answer_question", analysis)
+
+    response = getattr(app.test_client(), method)(
+        "/", headers={"Host": host}, data={"question": "West"},
+    )
+
+    assert response.status_code == 400
+    analysis.assert_not_called()
+
+
+@pytest.mark.parametrize("host", ["localhost", "localhost:5055", "127.0.0.1", "127.0.0.1:5055"])
+def test_ui_accepts_local_hosts(monkeypatch, host):
+    monkeypatch.setattr("app.answer_question", lambda _: {
+        "region": "West", "claims": [], "dropped_count": 0,
+        "evidence": {"E1": {"kind": "sql", "sql": "SELECT revenue FROM sales",
+                            "params": {}, "rows": [{"revenue": 12345}]}},
+    })
+    client = app.test_client()
+
+    assert client.get("/", headers={"Host": host}).status_code == 200
+    response = client.post("/", headers={"Host": host}, data={"question": "West"})
+    assert response.status_code == 200
+    assert b"SELECT revenue FROM sales" in response.data
+
+
 def test_flask_live_brief_and_evidence():
     client = app.test_client()
     assert client.get("/").status_code == 200
@@ -1317,6 +1402,45 @@ def test_evidence_dialog_preserves_exact_integers(monkeypatch):
         ]);
     """], capture_output=True, text=True)
     assert check.returncode == 0, check.stderr
+
+
+def test_evidence_rows_region_is_keyboard_focusable_and_named(monkeypatch):
+    monkeypatch.setattr("app.answer_question", lambda _: {
+        "region": "West", "claims": [], "evidence": {},
+    })
+
+    class EvidenceParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.region = None
+            self.heading_id = None
+            self.rows_heading_id = None
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if attrs.get("id") == "evidence-rows":
+                self.region = (tag, attrs)
+            if tag == "h3":
+                self.heading_id = attrs.get("id")
+
+        def handle_data(self, data):
+            if data.strip() == "Returned rows":
+                self.rows_heading_id = self.heading_id
+
+        def handle_endtag(self, tag):
+            if tag == "h3":
+                self.heading_id = None
+
+    response = app.test_client().post("/", data={"question": "West"})
+    assert response.status_code == 200
+    parser = EvidenceParser()
+    parser.feed(response.get_data(as_text=True))
+    tag, attrs = parser.region
+    assert tag == "div"
+    assert "table-wrap" in attrs["class"].split()
+    assert attrs.get("tabindex") == "0"
+    assert attrs.get("role") == "region"
+    assert parser.rows_heading_id and attrs.get("aria-labelledby") == parser.rows_heading_id
 
 
 def test_evidence_dialog_identifies_cited_cell(monkeypatch):
