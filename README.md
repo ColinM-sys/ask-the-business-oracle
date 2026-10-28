@@ -51,8 +51,13 @@ were retrieved; West's explanation applies to the default change point.
 `run_sql` parses one SELECT, limits tables and functions to an allowlist, rejects
 writes/locks/sequences/procedural calls, and executes in a read-only transaction.
 It refuses evidence over the row limit instead of silently truncating it.
-Policy setup is the separate write path. The Flask server binds only to localhost
-and runs without debug mode; this demo has no production authentication layer.
+Policy searches during requests can create or refresh `policy_chunks`, so the
+database user needs policy write permissions, including `CREATE TABLE` if the
+table does not exist. The setup lock is process-local; do not overlap policy
+ingestion across processes targeting the same table (including `policies.py` and
+multiple server processes) without database-level coordination.
+The Flask server binds only to localhost and runs without debug mode; this demo
+has no production authentication layer.
 
 ```powershell
 python -m pytest -q test_app.py

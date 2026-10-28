@@ -95,6 +95,18 @@ def test_readme_documents_required_oracle_configuration():
         assert is_empty, f"{name} must be blank in .env.example"
 
 
+def test_readme_documents_policy_writer_restrictions():
+    readme = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
+    readme = " ".join(readme.split())
+    assert "Policy searches during requests can create or refresh `policy_chunks`" in readme
+    assert "database user needs policy write permissions" in readme
+    assert "`CREATE TABLE` if the table does not exist" in readme
+    assert "setup lock is process-local" in readme
+    assert "do not overlap policy ingestion across processes targeting the same table" in readme
+    assert "including `policies.py` and multiple server processes" in readme
+    assert "without database-level coordination" in readme
+
+
 @pytest.mark.parametrize("sql", [
     "DELETE FROM sales", "DROP TABLE sales", "UPDATE sales SET quantity=0",
     "INSERT INTO sales (sale_id) VALUES (0)", "ALTER TABLE sales ADD x NUMBER",
