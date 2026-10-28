@@ -56,10 +56,15 @@ def ensure_policies():
             sources = [(p.name, p.read_text(encoding="utf-8")) for p in sorted(DOCS.glob("*.md"))]
             if not sources:
                 raise RuntimeError("No policy documents found")
-            fingerprint = hashlib.sha256(repr(sources).encode()).hexdigest()
+            # Refresh cached chunks when the chunking algorithm changes.
+            source_hash = hashlib.sha256(repr(("chunk-v2", sources)).encode()).hexdigest()
             backend = "hash-v1-512"
-            for (model,) in cur.execute(
-                "SELECT model_name FROM user_mining_models WHERE mining_function='EMBEDDING' ORDER BY model_name"
+            model_version = (backend,)
+            for model, created, object_id in cur.execute(
+                """SELECT model_name, creation_date,
+                    (SELECT object_id FROM user_objects WHERE object_name=m.model_name
+                        AND object_type='MINING MODEL' AND subobject_name IS NULL)
+                    FROM user_mining_models m WHERE mining_function='EMBEDDING' ORDER BY model_name"""
             ).fetchall():
                 if not _model_identifier.fullmatch(model):
                     _logger.warning("Skipping unsupported embedding model %r", model)
@@ -67,6 +72,7 @@ def ensure_policies():
                 try:
                     embed(cur, "Business policy", model)
                     backend = model
+                    model_version = (model, created, object_id)
                     break
                 except oracledb.DatabaseError as exc:
                     code = getattr(exc.args[0], "code", None) if exc.args else None
@@ -77,6 +83,10 @@ def ensure_policies():
                     _logger.warning("Embedding model %r incompatible (ORA-%05d)", model, code)
             else:
                 _logger.warning("Using hash-v1-512 fallback: no compatible embedding models available")
+            # Tag the collection fingerprint with the model revision. The non-hex prefix
+            # also invalidates legacy rows, whose model revision was not recorded.
+            version = "v" + hashlib.sha256(repr(model_version).encode()).hexdigest()[:31]
+            fingerprint = version + source_hash[:32]
             existing = cur.execute("SELECT DISTINCT backend, source_hash FROM policy_chunks").fetchall()
             if existing == [(backend, fingerprint)]:
                 return backend
@@ -89,16 +99,34 @@ def ensure_policies():
                     # At most four UTF-8 bytes per character; each part fits VARCHAR2(4000 BYTE).
                     for offset in range(0, len(paragraph), 1000):
                         part = paragraph[offset:offset + 1000]
-                        if chunk and (len(chunk) + len(part) + 2 > 1800
-                                      or len((chunk + "\n\n" + part).encode("utf-8")) > 4000):
+                        separator = "\n\n" if chunk and offset == 0 else ""
+                        if chunk and (len(chunk) + len(separator) + len(part) > 1800
+                                      or len((chunk + separator + part).encode("utf-8")) > 4000):
                             chunks.append((name, chunk))
                             chunk = ""
-                        chunk = (chunk + "\n\n" + part).strip()
+                            separator = ""
+                        chunk += separator + part
                 if chunk:
                     chunks.append((name, chunk))
             if not chunks:
                 raise RuntimeError("No policy content found")
-            vectors = [embed(cur, chunk, backend) for _, chunk in chunks]
+            vectors_by_chunk = {}
+            if any(old_backend == backend and old_hash and old_hash.startswith(version)
+                   for old_backend, old_hash in existing):
+                for old_chunk, vector in cur.execute(
+                    "SELECT chunk, embedding FROM policy_chunks "
+                    "WHERE backend=:backend AND SUBSTR(source_hash, 1, 32)=:version",
+                    backend=backend, version=version,
+                ).fetchall():
+                    if old_chunk is not None and vector is not None:
+                        key = (backend, hashlib.sha256(old_chunk.encode("utf-8")).digest())
+                        vectors_by_chunk[key] = vector
+            vectors = []
+            for _, chunk in chunks:
+                key = (backend, hashlib.sha256(chunk.encode("utf-8")).digest())
+                if key not in vectors_by_chunk:
+                    vectors_by_chunk[key] = embed(cur, chunk, backend)
+                vectors.append(vectors_by_chunk[key])
             cur.execute("DELETE FROM policy_chunks")
             for index, ((doc, chunk), vector) in enumerate(zip(chunks, vectors), 1):
                 cur.execute("""INSERT INTO policy_chunks (id,doc,chunk,embedding,backend,source_hash)
