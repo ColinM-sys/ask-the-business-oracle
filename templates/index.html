@@ -14,7 +14,7 @@
     .intro { color: #52736c; max-width: 660px; line-height: 1.6; }
     form { display: flex; gap: 12px; margin: 28px 0; flex-wrap: wrap; }
     label { width: 100%; font-weight: 650; }
-    input { flex: 1; min-width: 230px; padding: 16px; border: 1px solid #b9ccc2; border-radius: 10px; font: inherit; background: white; }
+    input { flex: 1; min-width: 230px; padding: 16px; border: 1px solid #52736c; border-radius: 10px; font: inherit; background: white; }
     button { font: inherit; cursor: pointer; }
     .submit { border: 0; border-radius: 10px; background: #1d5c4f; color: white; padding: 16px 24px; font-weight: 650; }
     .card { background: white; border: 1px solid #dbe3d8; border-radius: 16px; padding: 26px; margin: 22px 0; }
@@ -78,13 +78,34 @@
     <p>No verified claims are available for this brief.</p>
     {% endfor %}
     {% if not policy_reasons %}
-    <p class="hint">{% if not reasons %}Explanation unavailable: {% endif %}Policy-backed explanation is unavailable for this brief.</p>
+    <p class="hint">{% if not reasons %}Explanation unavailable: No verified explanation is available for this brief. {% endif %}Policy-backed explanation is unavailable for this brief.</p>
     {% endif %}
     {% if not policy_actions %}
-    <p class="hint">{% if not actions %}Recommendations unavailable: {% endif %}Policy-backed recommendations are unavailable for this brief.</p>
+    <p class="hint">{% if not actions %}Recommendations unavailable: No verified actions are available for this brief. {% endif %}Policy-backed recommendations are unavailable for this brief.</p>
     {% endif %}
     {% if result.claims %}
     <p class="hint">Numbers in retained claims verified against cited SQL cells.{% if policy_reasons %} Policy citations support the qualitative explanation.{% endif %}</p>
+    {% endif %}
+    {% set monthly_rows = result.evidence.get('E1', {}).get('rows', []) %}
+    {% if monthly_rows | selectattr('region_name', 'defined') | selectattr('region_name', 'equalto', result.region) | list %}
+    <h3>Monthly trend · {{ result.region }}</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th scope="col">Month</th><th scope="col">Gross margin (%)</th><th scope="col">Discount (%)</th><th scope="col">Freight per unit ($)</th></tr></thead>
+        <tbody>
+        {% for row in monthly_rows %}
+          {% if row.get('region_name') == result.region %}
+          {% set row_index = loop.index0 %}
+          <tr>
+            {% for column, label, prefix, suffix in [('sale_month', 'Month', '', ''), ('margin_pct', 'Gross margin', '', '%'), ('discount_pct', 'Discount', '', '%'), ('freight_per_unit', 'Freight per unit', '$', '')] %}
+            <td>{% if row.get(column) is not none %}<button type="button" class="number" data-evidence="E1" data-row="{{ row_index }}" data-column="{{ column }}" aria-label="{{ label }}: {{ prefix }}{{ row[column] }}{{ suffix }}">{{ prefix }}{{ row[column] }}{{ suffix }}</button>{% else %}N/A{% endif %}</td>
+            {% endfor %}
+          </tr>
+          {% endif %}
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
     {% endif %}
     <details><summary>Explore all evidence</summary>
       <p>{% for id in result.evidence %}<button type="button" class="citation" data-evidence="{{ id }}"{% if result.evidence[id].kind == 'policy' %} aria-label="{{ id }}: {{ result.evidence[id].rows[0].doc }}"{% endif %}>{{ id }}</button>{% endfor %}</p>
@@ -96,7 +117,7 @@
     <p id="evidence-description"></p>
     <h3>SQL</h3><pre id="evidence-sql"></pre>
     <h3>Bound parameters</h3><pre id="evidence-params"></pre>
-    <h3>Returned rows</h3><div class="table-wrap" id="evidence-rows"></div>
+    <h3 id="evidence-rows-heading">Returned rows</h3><div class="table-wrap" id="evidence-rows" role="region" aria-labelledby="evidence-rows-heading" tabindex="0"></div>
   </dialog>
   <script>
     const evidence = {{ result.evidence | browser_evidence | tojson }};
