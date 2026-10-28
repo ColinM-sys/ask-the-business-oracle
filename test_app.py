@@ -364,8 +364,6 @@ def test_policy_probe_cache_tracks_model_versions(failure_mode, tmp_path, monkey
             cursor.fetchall.return_value = [(row["backend"], row["fingerprint"]) for row in rows]
         elif sql.startswith("DELETE FROM policy_chunks"):
             rows.clear()
-        elif sql.lstrip().startswith("INSERT INTO policy_chunks"):
-            rows.append(params)
         return cursor
 
     def embedding(cur, text, backend):
@@ -380,6 +378,7 @@ def test_policy_probe_cache_tracks_model_versions(failure_mode, tmp_path, monkey
         return hash_embedding(text)
 
     cursor.execute.side_effect = execute
+    cursor.executemany.side_effect = lambda sql, bindings: rows.extend(bindings)
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
     monkeypatch.setattr("policies.embed", embedding)
@@ -477,8 +476,8 @@ def test_policy_probe_selects_usable_text_model(
     expected = "C_GOOD" if good_model else "hash-v1-512"
     assert ensure_policies() == expected
     assert probed == (["B_NULL"] if null_model else []) + (["C_GOOD"] if good_model else []) + [expected]
-    inserted = [call.kwargs for call in cursor.execute.call_args_list
-                if call.args[0].lstrip().startswith("INSERT INTO policy_chunks")]
+    cursor.executemany.assert_called_once()
+    inserted = cursor.executemany.call_args.args[1]
     assert inserted and all(row["backend"] == expected and row["vector"] is not None for row in inserted)
     model_version = model_versions[expected] if good_model else (expected,)
     version = "v" + hashlib.sha256(repr(model_version).encode()).hexdigest()[:31]
@@ -577,8 +576,8 @@ def test_policy_probe_skips_unsupported_names(unsupported, later_model, tmp_path
                      if "VECTOR_EMBEDDING" in call.args[0]]
     assert embedding_sql == (["SELECT VECTOR_EMBEDDING(GOOD_MODEL USING :text AS DATA) FROM dual"] * 2
                              if later_model else [])
-    inserted = [call.kwargs for call in cursor.execute.call_args_list
-                if call.args[0].lstrip().startswith("INSERT INTO policy_chunks")]
+    cursor.executemany.assert_called_once()
+    inserted = cursor.executemany.call_args.args[1]
     assert inserted and all(row["backend"] == expected for row in inserted)
     connection.commit.assert_called_once()
 
@@ -597,8 +596,8 @@ def test_policy_chunks_fit_byte_limit(character, tmp_path, monkeypatch):
 
     ensure_policies()
 
-    chunks = [call.kwargs["chunk"] for call in cursor.execute.call_args_list
-              if call.args[0].lstrip().startswith("INSERT INTO policy_chunks")]
+    cursor.executemany.assert_called_once()
+    chunks = [row["chunk"] for row in cursor.executemany.call_args.args[1]]
     assert chunks
     assert all(chunk and len(chunk.encode("utf-8")) <= 4000 for chunk in chunks)
     assert "".join(chunks).replace("\n", "") == content.replace("\n", "")
@@ -623,8 +622,8 @@ def test_long_policy_paragraph_preserves_text_and_embedding(paragraph, tmp_path,
 
     ensure_policies()
 
-    inserted = [call.kwargs for call in cursor.execute.call_args_list
-                if call.args[0].lstrip().startswith("INSERT INTO policy_chunks")]
+    cursor.executemany.assert_called_once()
+    inserted = cursor.executemany.call_args.args[1]
     assert "".join(row["chunk"] for row in inserted) == content
     assert all(row["vector"] == hash_embedding(row["chunk"]) for row in inserted)
 
@@ -643,19 +642,21 @@ def test_policy_refresh_replaces_legacy_chunks_once(tmp_path, monkeypatch):
 
     ensure_policies()
 
-    inserted = [call.kwargs for call in cursor.execute.call_args_list
-                if call.args[0].lstrip().startswith("INSERT INTO policy_chunks")]
+    cursor.executemany.assert_called_once()
+    inserted = cursor.executemany.call_args.args[1]
     assert inserted and inserted[0]["chunk"] == content
     new_hash = inserted[0]["fingerprint"]
     assert new_hash != legacy_hash
     connection.commit.assert_called_once()
 
     cursor.execute.reset_mock()
+    cursor.executemany.reset_mock()
     connection.commit.reset_mock()
     cursor.execute.return_value.fetchall.side_effect = [[], [("hash-v1-512", new_hash)]]
     ensure_policies()
     assert not any(call.args[0].lstrip().startswith(("DELETE", "INSERT"))
                    for call in cursor.execute.call_args_list)
+    cursor.executemany.assert_not_called()
     connection.commit.assert_not_called()
 
 
@@ -690,11 +691,10 @@ def test_policy_refresh_rechunks_model_versioned_cache(tmp_path, monkeypatch):
                                            and row["fingerprint"].startswith(params["version"])]
         elif sql.startswith("DELETE FROM policy_chunks"):
             rows.clear()
-        elif sql.startswith("INSERT INTO policy_chunks"):
-            rows.append(params)
         return cursor
 
     cursor.execute.side_effect = execute
+    cursor.executemany.side_effect = lambda sql, bindings: rows.extend(bindings)
     embed = MagicMock(side_effect=lambda cur, text, model: "new vector for " + text)
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
@@ -731,6 +731,7 @@ def test_empty_policy_documents_preserve_existing_rows(tmp_path, monkeypatch):
 
     assert not any(call.args[0].lstrip().startswith(("DELETE", "INSERT"))
                    for call in cursor.execute.call_args_list)
+    cursor.executemany.assert_not_called()
     connection.commit.assert_not_called()
 
 
@@ -759,8 +760,6 @@ def test_policy_refresh_reuses_chunk_embeddings_by_model(tmp_path, monkeypatch):
                                            and row["fingerprint"].startswith(params["version"])]
         elif sql.startswith("DELETE FROM policy_chunks"):
             rows.clear()
-        elif sql.startswith("INSERT INTO policy_chunks"):
-            rows.append(params)
         return cursor
 
     def embedding(cur, text, backend):
@@ -772,6 +771,7 @@ def test_policy_refresh_reuses_chunk_embeddings_by_model(tmp_path, monkeypatch):
         return f"{backend}:{model[2]}:{text}"
 
     cursor.execute.side_effect = execute
+    cursor.executemany.side_effect = lambda sql, bindings: rows.extend(bindings)
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
     monkeypatch.setattr("policies.embed", embedding)
@@ -782,14 +782,25 @@ def test_policy_refresh_reuses_chunk_embeddings_by_model(tmp_path, monkeypatch):
     original_fingerprint = rows[0]["fingerprint"]
     embedding_calls.clear()
     commits = connection.commit.call_count
+    cursor.executemany.reset_mock()
     assert ensure_policies() == "MODEL_V1"
     assert not embedding_calls
+    cursor.executemany.assert_not_called()
     assert connection.commit.call_count == commits
     documents[0].write_text("Updated policy", encoding="utf-8")
+    cursor.execute.reset_mock()
+    cursor.executemany.reset_mock()
 
     assert ensure_policies() == "MODEL_V1"
     assert embedding_calls == [("MODEL_V1", "Updated policy")]
     assert initial_calls == [("MODEL_V1", "Old policy"), ("MODEL_V1", "Shared policy")]
+    cursor.executemany.assert_called_once()
+    insert_sql, bindings = cursor.executemany.call_args.args
+    assert insert_sql.lstrip().startswith("INSERT INTO policy_chunks")
+    assert len(bindings) == 3
+    assert not any(call.args[0].lstrip().startswith("INSERT INTO policy_chunks")
+                   for call in cursor.execute.call_args_list)
+    assert connection.commit.call_count == commits + 1
     assert [(row["id"], row["doc"], row["chunk"], row["vector"]) for row in rows] == [
         (1, "a.md", "Updated policy", "MODEL_V1:100:Updated policy"),
         (2, "b.md", "Shared policy", original_shared_vector),
@@ -850,11 +861,10 @@ def test_delayed_policy_refresh_preserves_newer_content(tmp_path, monkeypatch):
             cursor.fetchall.return_value = [(row["backend"], row["fingerprint"]) for row in rows]
         elif sql.startswith("DELETE FROM policy_chunks"):
             rows.clear()
-        elif sql.startswith("INSERT INTO policy_chunks"):
-            rows.append(params)
         return cursor
 
     cursor.execute.side_effect = execute
+    cursor.executemany.side_effect = lambda sql, bindings: rows.extend(bindings)
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
     monkeypatch.setattr("policies._lock", DelayedLock())
@@ -948,11 +958,13 @@ def test_concurrent_policy_refreshes_do_not_overwrite_newer_content(tmp_path, mo
                     ]
             elif sql.startswith("DELETE FROM POLICY_CHUNKS"):
                 self.connection.pending = []
-            elif sql.startswith("INSERT INTO POLICY_CHUNKS"):
-                self.connection.pending.append(params)
             else:
                 pytest.fail(f"Unexpected SQL: {sql}")
             return self
+
+        def executemany(self, sql, bindings):
+            assert sql.lstrip().upper().startswith("INSERT INTO POLICY_CHUNKS")
+            self.connection.pending.extend(bindings)
 
         def fetchone(self):
             return self.result[0] if self.result else None

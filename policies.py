@@ -144,11 +144,12 @@ def ensure_policies():
                 if key not in vectors_by_chunk:
                     vectors_by_chunk[key] = embed(cur, chunk, backend)
                 vectors.append(vectors_by_chunk[key])
+            bindings = [dict(id=index, doc=doc, chunk=chunk, vector=vector,
+                             backend=backend, fingerprint=fingerprint)
+                        for index, ((doc, chunk), vector) in enumerate(zip(chunks, vectors), 1)]
             cur.execute("DELETE FROM policy_chunks")
-            for index, ((doc, chunk), vector) in enumerate(zip(chunks, vectors), 1):
-                cur.execute("""INSERT INTO policy_chunks (id,doc,chunk,embedding,backend,source_hash)
-                    VALUES (:id,:doc,:chunk,:vector,:backend,:fingerprint)""",
-                    id=index, doc=doc, chunk=chunk, vector=vector, backend=backend, fingerprint=fingerprint)
+            cur.executemany("""INSERT INTO policy_chunks (id,doc,chunk,embedding,backend,source_hash)
+                VALUES (:id,:doc,:chunk,:vector,:backend,:fingerprint)""", bindings)
             con.commit()
             return backend
 
