@@ -106,6 +106,17 @@ def test_readme_documents_node_test_prerequisite():
     assert "Node.js installed and available as `node` on PATH" in " ".join(test_instructions.split())
 
 
+def test_readme_documents_reference_dataset_for_integration_tests():
+    readme = " ".join(Path(__file__).with_name("README.md").read_text(encoding="utf-8").split())
+    setup = readme.split("python policies.py", 1)[0]
+    assert "`data/oracle_load.sql`" in setup
+    assert "`data/*.csv`" in setup
+    assert "fresh Oracle schema" in setup
+    assert "python load.py" in setup
+    test_instructions = readme.split("python -m pytest -q test_app.py", 1)[1]
+    assert "West metric ranges" in test_instructions
+    assert "`13.36`" in test_instructions
+    assert "depend on the unmodified reference dataset" in test_instructions
 def test_readme_documents_supported_year_range():
     readme = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
     assert ("a full month name plus year or `YYYY-MM`. "
@@ -2097,6 +2108,92 @@ def test_flask_live_brief_and_evidence():
     assert b"evidence-dialog" in response.data
 
 
+@pytest.mark.parametrize("region", ["West", "East"])
+def test_monthly_trend_links_selected_region_to_original_evidence_rows(monkeypatch, region):
+    rows = [
+        {"region_name": "East", "sale_month": "2025-06", "margin_pct": 45,
+         "discount_pct": 2.5, "freight_per_unit": 4.25},
+        {"region_name": "West", "sale_month": "2025-06", "margin_pct": 38.9,
+         "discount_pct": 0, "freight_per_unit": 5.5},
+        {"region_name": "East", "sale_month": "2025-07", "margin_pct": 47,
+         "discount_pct": None, "freight_per_unit": 4.75},
+        {"region_name": "West", "sale_month": "2025-07", "margin_pct": 25.6,
+         "discount_pct": 18, "freight_per_unit": None},
+    ]
+    monkeypatch.setattr("app.answer_question", lambda _: {
+        "region": region, "claims": [],
+        "evidence": {"E1": {"kind": "sql", "sql": "SELECT ...", "params": {}, "rows": rows}},
+    })
+
+    class TrendParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.in_table = self.in_body = self.in_caption = False
+            self.caption = ""
+            self.rows = []
+            self.cell = None
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == "table" and attrs.get("id") == "monthly-trend":
+                self.in_table = True
+            elif self.in_table and tag == "caption":
+                self.in_caption = True
+            elif self.in_table and tag == "tbody":
+                self.in_body = True
+            elif self.in_body and tag == "tr":
+                self.rows.append([])
+            elif self.in_body and tag in ("td", "th"):
+                self.cell = {"text": "", "button": None}
+                self.rows[-1].append(self.cell)
+            elif self.cell is not None and tag == "button":
+                self.cell["button"] = attrs
+
+        def handle_data(self, data):
+            if self.in_caption:
+                self.caption += data
+            if self.cell is not None:
+                self.cell["text"] += data
+
+        def handle_endtag(self, tag):
+            if tag == "caption":
+                self.in_caption = False
+            elif self.in_body and tag in ("td", "th"):
+                self.cell = None
+            elif tag == "tbody":
+                self.in_body = False
+            elif tag == "table":
+                self.in_table = False
+
+    response = app.test_client().post("/", data={"question": region})
+    assert response.status_code == 200
+    parser = TrendParser()
+    parser.feed(response.get_data(as_text=True))
+    assert region in parser.caption
+    selected = [(index, row) for index, row in enumerate(rows) if row["region_name"] == region]
+    assert len(parser.rows) == len(selected)
+    columns = ("sale_month", "margin_pct", "discount_pct", "freight_per_unit")
+    for cells, (index, row) in zip(parser.rows, selected):
+        assert len(cells) == len(columns)
+        for cell, column in zip(cells, columns):
+            value = row[column]
+            if value is None:
+                assert cell["text"].strip().lower() == "unavailable"
+                assert cell["button"] is None
+            else:
+                expected = str(value)
+                if column in ("margin_pct", "discount_pct"):
+                    expected += "%"
+                elif column == "freight_per_unit":
+                    expected = "$" + expected
+                assert cell["text"].strip() == expected
+                button = cell["button"]
+                assert button["data-evidence"] == "E1"
+                assert button["data-row"] == str(index)
+                assert button["data-column"] == column
+                assert region in button["aria-label"] and row["sale_month"] in button["aria-label"]
+
+
 @pytest.mark.parametrize("missing_reason,missing_actions", [
     (False, False), (True, False), (False, True), (True, True),
 ])
@@ -2114,6 +2211,8 @@ def test_ui_discloses_missing_explanation_and_actions(policy_rows, missing_reaso
     assert (b"No verified actions are available for this brief." in response.data) == missing_actions
     assert (b"The policy documents identify a regional volume discount push" in response.data) == (not missing_reason)
     assert (b"Review discount approvals with Sales and Finance" in response.data) == (not missing_actions)
+
+
 def test_brief_shows_selected_region_monthly_trend_with_cell_citations(monkeypatch):
     rows = [
         {"region_name": "East", "sale_month": "2025-06", "margin_pct": 70,
@@ -2181,7 +2280,7 @@ def test_brief_shows_selected_region_monthly_trend_with_cell_citations(monkeypat
             value = rows[evidence_index][column]
             displayed = cell["text"].strip()
             if value is None:
-                assert displayed in ("N/A", "—", "-")
+                assert displayed == "Unavailable"
                 assert not cell["buttons"]
                 continue
             assert len(cell["buttons"]) == 1

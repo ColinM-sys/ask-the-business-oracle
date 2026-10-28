@@ -16,16 +16,19 @@ and policy retrieval. No API key or language model is required.
 If `.env` does not exist, copy `.env.example` to `.env`. Set `ORACLE_USER`
 (database user), `ORACLE_PASSWORD` (database password), and `ORACLE_DSN`
 (connection string, such as `host:port/service_name`) in `.env` before running
-`policies.py` or `load.py`. The repository includes `requirements.txt`, `.env.example`, and
-the four policy documents in `docs/`. Run `python load.py` only once on an empty
-database; skip it if the business tables are already loaded.
+`policies.py` or `load.py`. The repository includes `requirements.txt`,
+`.env.example`, and the four policy documents in `docs/`. The reference dataset
+is `data/oracle_load.sql`, the SQL form of the checked-in `data/*.csv` business
+data. In a fresh Oracle schema without the six business tables (sales, costs,
+customers, discounts, products and regions), run `python load.py` only once to create
+and load them; skip it if the tables are already loaded.
 
 ```powershell
 python -m pip install -r requirements.txt
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 # Fill in the required Oracle settings in .env before continuing.
 docker start oracle-free
-python load.py  # Only for an empty database; skip if tables are already loaded.
+python load.py  # Once in a fresh schema; skip if the tables are already loaded.
 python policies.py
 python app.py
 ```
@@ -90,7 +93,9 @@ python -m pytest -q test_app.py
 
 Tests include live Oracle integration; start the local database first. They also
 require Node.js installed and available as `node` on PATH. Tests do not reload or
-alter the business tables.
+alter the business tables. The West metric ranges and displayed `13.36` asserted
+by the integration tests depend on the unmodified reference dataset; other
+business data can fail them.
 
 Oracle syntax reference: [VECTOR_EMBEDDING](https://docs.oracle.com/en/database/oracle/oracle-database/26/vecse/vector_embedding.html)
 and [Oracle vector search quick start](https://docs.oracle.com/en/database/oracle/oracle-database/26/vecse/sql-quick-start-using-vector-embedding-model-uploaded-database.html).
