@@ -62,10 +62,13 @@ The other regions provide context, not a causal decomposition.
 
 The fixed brief uses cited SQL result cells for dates and SQL-derived values. The
 critic checks numeric parts against the cited cells and drops claims with
-unsupported numeric parts or digits in plain text. Numbers written as words,
-such as "five million", are not checked and can pass without a citation. Click a
-number to view SQL, bound parameters and returned rows, with the cited cell
-highlighted. Policy citations open retrieved source text and vector SQL.
+unsupported numeric parts or Unicode numeric characters in plain text, including
+circled digits and fractions. Numbers written as words without such characters,
+such as "five million", are not checked and can pass without a citation; ASCII
+Roman numerals such as "IV" can also pass. The critic does not verify the cited
+cell's units, and some unit or magnitude modifiers in text can pass unchecked.
+Click a number to view SQL, bound parameters and returned rows, with the cited
+cell highlighted. Policy citations open retrieved source text and vector SQL.
 Fixed qualitative explanations are included only when their policy documents
 were retrieved; West's explanation applies to the default change point.
 

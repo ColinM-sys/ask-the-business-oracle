@@ -253,6 +253,19 @@ def test_critic_drops_unsupported_numbers_and_preserves_valid(sample_evidence):
     assert len(dropped) == 3
 
 
+@pytest.mark.parametrize("text", ["100", "١٠٠", "①⓪⓪", "²", "Ⅻ", "½", "四"])
+def test_critic_rejects_uncited_unicode_numeric_characters(text):
+    claim = {"parts": [{"text": f"Sales: {text}"}]}
+    assert critique([claim], {}) == ([], [claim])
+
+
+def test_critic_preserves_cited_unicode_numeric_characters():
+    evidence = {"E1": {"kind": "sql", "rows": [{"sales": "①⓪⓪"}]}}
+    claim = {"parts": [{"text": "Sales: "},
+        {"value": "①⓪⓪", "evidence": "E1", "row": 0, "column": "sales"}]}
+    assert critique([claim], evidence) == ([claim], [])
+
+
 def test_readme_documents_unchecked_spelled_out_numbers():
     claim = {"parts": [{"text": "Sales were five million."}]}
     assert critique([claim], {}) == ([claim], [])

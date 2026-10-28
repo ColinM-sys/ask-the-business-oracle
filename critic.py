@@ -23,15 +23,16 @@ def supported(part, evidence):
 def critique(claims, evidence):
     """Drop an entire claim if a numeric part lacks an exact cited SQL cell.
 
-    Plain text cannot carry digits (including dates); numerical segments must
-    name the evidence, row, column and exact value. Policy text is evidence for
-    qualitative reasons only, never an authority for business numbers. Numeric
-    suffixes are limited to "", "%", and " percentage points", without checking
-    the cell's units. The adjacent-text check rejects certain unit and magnitude
-    tokens only at the start of the text after a number, after whitespace and
-    joining adjacent text parts; it does not catch other wording such as
-    ' (in millions)'. Other unit or magnitude modifiers, such as "quadrillion",
-    may pass unchecked.
+    Plain text cannot carry Unicode numeric characters (including dates);
+    numerical segments must name the evidence, row, column and exact value.
+    Written-out numbers and ASCII Roman numerals are not checked. Policy text is
+    evidence for qualitative reasons only, never an authority for business
+    numbers. Numeric suffixes are limited to "", "%", and " percentage points",
+    without checking the cell's units. The adjacent-text check rejects certain
+    unit and magnitude tokens only at the start of the text after a number,
+    after whitespace and joining adjacent text parts; it does not catch other
+    wording such as ' (in millions)'. Other unit or magnitude modifiers, such
+    as "quadrillion", may pass unchecked.
     """
     kept, dropped = [], []
     for claim in claims:
@@ -40,7 +41,7 @@ def critique(claims, evidence):
         number_tails = []
         for part in claim.get("parts", []):
             if "text" in part:
-                valid &= not bool(re.search(r"\d", part["text"]))
+                valid &= not any(character.isnumeric() for character in part["text"])
                 if number_tails:
                     number_tails[-1] += part["text"]
                 rendered += part["text"]
