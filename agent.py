@@ -4,7 +4,7 @@ from hashlib import sha256
 import re
 
 from critic import critique
-from policies import DOCS
+from policies import DOCS, PolicyRefreshInProgress
 from tools import run_sql, search_policies
 
 
@@ -174,7 +174,12 @@ def answer_question(question):
             "The comparison date must have sales both before and after it. "
             f"{region} sales are available from {row['first_month']} through {row['last_month']}. "
             "The cutoff must be after the first month and no later than the last month.")
-    policies = search_policies(f"{region} margin discount freight policy " + question)
+    policy_refresh_in_progress = False
+    try:
+        policies = search_policies(f"{region} margin discount freight policy " + question)
+    except PolicyRefreshInProgress:
+        policy_refresh_in_progress = True
+        policies = {"rows": []}
     for policy in policies["rows"]:
         evidence[f"P{policy['id']}"] = {"kind": "policy",
             "sql": f"SELECT * FROM (\n{policies['sql']}\n) WHERE id = :policy_id",
@@ -263,7 +268,7 @@ def answer_question(question):
                       if direction == "fell" else f"The observed margin {direction}")
             claim("reason", [text("The policy documents identify a regional volume discount push and a replacement freight contract. The discount program bypassed senior sales approval and Finance review. "
                 f"{impact}; this comparison does not isolate their individual causal effects.")], push + freight)
-    else:
+    elif not policy_refresh_in_progress:
         claim("reason", [text(("Use the discount and freight movements to investigate the margin change. "
             if margin_available else "Review the discount and freight movements alongside margin when available. ")
             + "The retrieved West-specific documents do not establish a cause for this region and comparison period.")])
@@ -276,6 +281,7 @@ def answer_question(question):
     kept, dropped = critique(claims, evidence)
     return {"question": question, "region": region, "cutoff": cutoff, "claims": kept,
             "evidence": evidence, "dropped_count": len(dropped),
+            "policy_refresh_in_progress": policy_refresh_in_progress,
             "plan": ["Compare region and month margin", "Compare discount and freight", "Retrieve policy reasons", "Verify every numerical claim"]}
 
 

@@ -18,6 +18,10 @@ _model_identifier = re.compile(r"[A-Z][A-Z0-9_$#]*")
 _probe_cache = {}
 
 
+class PolicyRefreshInProgress(RuntimeError):
+    """Another process is holding the policy refresh lock."""
+
+
 def hash_embedding(text, dimensions=512):
     values = [0.0] * dimensions
     for word in re.findall(r"[a-z]+", text.lower()):
@@ -53,7 +57,12 @@ def ensure_policies():
                     if not exc.args or getattr(exc.args[0], "code", None) != 955:
                         raise
             # DDL commits implicitly, so acquire the transaction lock only after setup.
-            cur.execute("LOCK TABLE policy_chunks IN EXCLUSIVE MODE WAIT 5")
+            try:
+                cur.execute("LOCK TABLE policy_chunks IN EXCLUSIVE MODE WAIT 5")
+            except oracledb.DatabaseError as exc:
+                if exc.args and getattr(exc.args[0], "code", None) in (54, 30006):
+                    raise PolicyRefreshInProgress("Policy refresh is in progress") from exc
+                raise
             sources = [(p.name, p.read_text(encoding="utf-8")) for p in sorted(DOCS.glob("*.md"))]
             if not sources:
                 raise RuntimeError("No policy documents found")

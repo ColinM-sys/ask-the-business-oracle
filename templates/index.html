@@ -77,6 +77,9 @@
     {% if result.dropped_count %}
     <p class="error" role="alert" data-notice>{{ result.dropped_count }} claim{{ 's' if result.dropped_count != 1 else '' }} {{ 'were' if result.dropped_count != 1 else 'was' }} omitted because they failed verification.</p>
     {% endif %}
+    {% if result.policy_refresh_in_progress %}
+    <p class="hint" data-notice>Policy refresh is in progress. Please retry for policy explanations and recommendations.</p>
+    {% endif %}
     {% for claim in result.claims %}
       <p class="{{ claim.kind }}" data-claim data-claim-kind="{{ claim.kind }}">
       {%- for part in claim.parts -%}

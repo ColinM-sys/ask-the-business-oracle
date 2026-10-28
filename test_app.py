@@ -1888,6 +1888,84 @@ def policy_rows(monkeypatch):
     return policies
 
 
+@pytest.mark.parametrize("code", [54, 30006])
+@pytest.mark.parametrize("question", ["West since July 2025", "West since August 2025"])
+def test_policy_lock_contention_preserves_verified_metrics(code, question, policy_rows, tmp_path, monkeypatch):
+    baseline = answer_question(question)
+    (tmp_path / "policy.md").write_text("Policy", encoding="utf-8")
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.fetchone.return_value = ("POLICY_CHUNKS",)
+    cursor.fetchall.return_value = []
+    lock_attempts = []
+
+    def execute(sql, **params):
+        if sql.upper().startswith("LOCK TABLE"):
+            lock_attempts.append(sql)
+            if len(lock_attempts) == 1:
+                raise oracledb.DatabaseError(SimpleNamespace(code=code, message="private-driver-details"))
+        return cursor
+
+    cursor.execute.side_effect = execute
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+    monkeypatch.setattr("agent.search_policies", tools.search_policies)
+    results = []
+
+    def capture_result(question):
+        result = answer_question(question)
+        results.append(result)
+        return result
+
+    monkeypatch.setattr("app.answer_question", capture_result)
+    response = app.test_client().post("/", data={"question": question})
+
+    assert response.status_code == 200
+    result = results[0]
+    metric_kinds = {"scope", "finding", "comparison"}
+    assert result["claims"] == [claim for claim in baseline["claims"] if claim["kind"] in metric_kinds]
+    assert len([claim for claim in result["claims"] if claim["kind"] == "finding"]) == 3
+    assert result["evidence"] == {key: baseline["evidence"][key] for key in ("E1", "E2")}
+    assert critique(result["claims"], result["evidence"]) == (result["claims"], [])
+    assert result["dropped_count"] == 0
+    assert b"data-notice>Policy refresh is in progress." in response.data
+    assert b"Policy-backed recommendations are unavailable" in response.data
+    assert b"private-driver-details" not in response.data
+    for column in ("before_margin_pct", "after_margin_pct", "before_discount_pct",
+                   "after_discount_pct", "before_freight_per_unit", "after_freight_per_unit"):
+        assert f'data-evidence="E2" data-row="0" data-column="{column}"'.encode() in response.data
+    connection.commit.assert_not_called()
+
+    assert ensure_policies() == "hash-v1-512"
+    assert len(lock_attempts) == 2
+    connection.commit.assert_called_once()
+
+
+@pytest.mark.parametrize("stage,code", [("setup", 54), ("setup", 30006), ("lock", 942)])
+def test_other_policy_database_errors_do_not_return_partial_results(stage, code, policy_rows, monkeypatch):
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.fetchone.return_value = ("POLICY_CHUNKS",)
+
+    def execute(sql, **params):
+        if (stage == "setup" and sql.startswith("SELECT table_name")) or (
+                stage == "lock" and sql.startswith("LOCK TABLE")):
+            raise oracledb.DatabaseError(SimpleNamespace(code=code, message="private-driver-details"))
+        return cursor
+
+    cursor.execute.side_effect = execute
+    monkeypatch.setattr("policies.connect", lambda: connection)
+    monkeypatch.setattr("agent.search_policies", tools.search_policies)
+    response = app.test_client().post("/", data={"question": "West since July 2025"})
+
+    assert response.status_code == 503
+    assert b"Policy refresh is in progress" not in response.data
+    assert b"private-driver-details" not in response.data
+    connection.commit.assert_not_called()
+
+
 def test_reviewed_policy_text_supports_claims_and_only_matching_citations(policy_rows):
     policy_rows.extend({**policy, "id": policy["id"] + 10, "chunk": "Unrelated policy text."}
                        for policy in policy_rows[:])
