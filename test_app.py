@@ -193,6 +193,23 @@ def test_readme_includes_initial_business_data_load():
     assert "skip" in readme.lower()
 
 
+def test_readme_documents_oracle_container_creation_and_readiness():
+    readme = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
+    setup = readme.split("```powershell", 1)[1].split("```", 1)[0]
+    assert "docker run -d --name oracle-free" in setup
+    assert "-p 127.0.0.1:1521:1521" in setup
+    assert "-e ORACLE_PASSWORD -e APP_USER=atb -e APP_USER_PASSWORD" in setup
+    assert "gvenzl/oracle-free:23" in setup
+    assert "ORACLE_USER=atb" in readme
+    assert "ORACLE_DSN=localhost:1521/FREEPDB1" in readme
+    assert "the same application password" in readme
+    assert "$env:ORACLE_PASSWORD = $oldOraclePassword" in setup
+    assert "$env:APP_USER_PASSWORD = $oldAppPassword" in setup
+    assert setup.index("docker run -d --name oracle-free") < setup.index("docker exec oracle-free healthcheck.sh")
+    assert setup.index("docker exec oracle-free healthcheck.sh") < setup.index("python load.py")
+    assert "if ($LASTEXITCODE -eq 0) { break }" in setup
+
+
 @pytest.mark.parametrize("sql", [
     "DELETE FROM sales", "DROP TABLE sales", "UPDATE sales SET quantity=0",
     "INSERT INTO sales (sale_id) VALUES (0)", "ALTER TABLE sales ADD x NUMBER",

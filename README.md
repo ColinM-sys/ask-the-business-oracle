@@ -23,11 +23,49 @@ data. In a fresh Oracle schema without the six business tables (sales, costs,
 customers, discounts, products and regions), run `python load.py` only once to create
 and load them; skip it if the tables are already loaded.
 
+For the Oracle Database Free container below, set `ORACLE_USER=atb`,
+`ORACLE_DSN=localhost:1521/FREEPDB1`, and `ORACLE_PASSWORD` to the same application password
+entered for `APP_USER_PASSWORD` when creating the container. Choose a separate
+SYS/SYSTEM password. Existing process environment variables override `.env`.
+The first startup can take several minutes; the health check waits for the database
+and application user to be ready. For an existing container from a different image,
+replace the health check below with that image's readiness check.
+
 ```powershell
 python -m pip install -r requirements.txt
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 # Fill in the required Oracle settings in .env before continuing.
-docker start oracle-free
+$containers = docker ps -a --filter "name=^/oracle-free$" --format "{{.Names}}"
+if ($LASTEXITCODE -ne 0) { throw "Could not list Docker containers." }
+if (-not $containers) {
+    $oldOraclePassword = $env:ORACLE_PASSWORD
+    $oldAppPassword = $env:APP_USER_PASSWORD
+    try {
+        $env:ORACLE_PASSWORD = [System.Net.NetworkCredential]::new("", (Read-Host "SYS/SYSTEM password" -AsSecureString)).Password
+        $env:APP_USER_PASSWORD = [System.Net.NetworkCredential]::new("", (Read-Host "Application password from .env" -AsSecureString)).Password
+        docker run -d --name oracle-free -p 127.0.0.1:1521:1521 -e ORACLE_PASSWORD -e APP_USER=atb -e APP_USER_PASSWORD gvenzl/oracle-free:23
+        $creationExitCode = $LASTEXITCODE
+    } finally {
+        $env:ORACLE_PASSWORD = $oldOraclePassword
+        $env:APP_USER_PASSWORD = $oldAppPassword
+        Remove-Variable oldOraclePassword, oldAppPassword
+    }
+    if ($creationExitCode -ne 0) { throw "Oracle container creation failed." }
+} else {
+    docker start oracle-free
+    if ($LASTEXITCODE -ne 0) { throw "Oracle container could not start." }
+}
+while ($true) {
+    docker exec oracle-free healthcheck.sh
+    if ($LASTEXITCODE -eq 0) { break }
+    if ($LASTEXITCODE -eq 126 -or $LASTEXITCODE -eq 127) {
+        throw "healthcheck.sh is unavailable; use the container image's readiness check."
+    }
+    if ((docker inspect --format '{{.State.Running}}' oracle-free) -ne 'true') {
+        throw "Oracle container stopped; check docker logs oracle-free."
+    }
+    Start-Sleep -Seconds 5
+}
 python load.py  # Once in a fresh schema; skip if the tables are already loaded.
 python policies.py
 python app.py
