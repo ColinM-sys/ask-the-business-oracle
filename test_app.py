@@ -6,6 +6,7 @@ import runpy
 import subprocess
 import sqlite3
 from contextlib import nullcontext
+from datetime import datetime
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
@@ -211,6 +212,79 @@ def test_hashing_is_stable_and_normalized():
     assert abs(sum(v*v for v in first) - 1) < 0.000001
 
 
+def test_replaced_model_rebuilds_policy_embeddings(tmp_path, monkeypatch):
+    (tmp_path / "policy.md").write_text("A distinct policy", encoding="utf-8")
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    rows = []
+    model = {"id": 1, "last_ddl_time": datetime(2026, 1, 2, 3, 4, 5),
+             "embedding": "first model"}
+
+    def execute(sql, **params):
+        query = " ".join(sql.upper().split())
+        if query.startswith("SELECT TABLE_NAME FROM USER_TABLES"):
+            cursor.fetchone.return_value = ("POLICY_CHUNKS",)
+        elif query.startswith("SELECT MODEL_NAME FROM USER_MINING_MODELS"):
+            cursor.fetchall.return_value = [("POLICY_MODEL",)]
+        elif "FROM USER_OBJECTS" in query:
+            cursor.fetchone.return_value = (
+                (model["id"], model["last_ddl_time"]) if model["id"] is not None else None
+            )
+        elif query.startswith("SELECT DISTINCT BACKEND, SOURCE_HASH FROM POLICY_CHUNKS"):
+            cursor.fetchall.return_value = [(row["backend"], row["fingerprint"]) for row in rows]
+        elif query.startswith("DELETE FROM POLICY_CHUNKS"):
+            rows.clear()
+        elif query.startswith("INSERT INTO POLICY_CHUNKS"):
+            rows.append(params)
+        else:
+            pytest.fail(f"Unexpected SQL: {sql}")
+        return cursor
+
+    def embedding(cur, text, backend):
+        # A probe of the new model is unchanged, while actual policy vectors change.
+        value = "same probe" if text == "Business policy" else model["embedding"]
+        return hash_embedding(value)
+
+    cursor.execute.side_effect = execute
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+    monkeypatch.setattr("policies.embed", embedding)
+
+    assert ensure_policies() == "POLICY_MODEL"
+    original = copy.deepcopy(rows)
+    assert ensure_policies() == "POLICY_MODEL"
+    assert rows == original
+    connection.commit.assert_called_once()
+
+    # The model was dropped and recreated under the same name in the same second.
+    model["id"] = 2
+    model["embedding"] = "second model"
+    assert ensure_policies() == "POLICY_MODEL"
+    assert len(rows) == len(original) == 1
+    assert rows[0]["backend"] == original[0]["backend"]
+    assert rows[0]["vector"] != original[0]["vector"]
+    assert rows[0]["fingerprint"] != original[0]["fingerprint"]
+    assert connection.commit.call_count == 2
+
+    # A replacement may also retain the object id but change its DDL timestamp.
+    previous = copy.deepcopy(rows)
+    model["last_ddl_time"] = datetime(2026, 1, 2, 3, 4, 6)
+    model["embedding"] = "third model"
+    assert ensure_policies() == "POLICY_MODEL"
+    assert rows[0]["vector"] != previous[0]["vector"]
+    assert rows[0]["fingerprint"] != previous[0]["fingerprint"]
+    assert connection.commit.call_count == 3
+
+    # Do not reuse or replace rows when the model's revision cannot be verified.
+    current = copy.deepcopy(rows)
+    model["id"] = None
+    with pytest.raises(RuntimeError):
+        ensure_policies()
+    assert rows == current
+    assert connection.commit.call_count == 3
+
+
 @pytest.mark.parametrize("failure", [
     RuntimeError("private-driver-details"),
     oracledb.DatabaseError(SimpleNamespace(code=3113, message="private-driver-details")),
@@ -252,7 +326,9 @@ def test_policy_probe_fallback_is_explicit_and_sanitized(
     connection = MagicMock()
     connection.__enter__.return_value = connection
     cursor = connection.cursor.return_value
-    cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
+    cursor.execute.return_value.fetchone.side_effect = [
+        ("POLICY_CHUNKS",), (42, datetime(2026, 1, 2))
+    ]
     cursor.execute.return_value.fetchall.side_effect = [models, []]
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
@@ -281,7 +357,9 @@ def test_policy_probe_skips_unsupported_names(unsupported, later_model, tmp_path
     connection = MagicMock()
     connection.__enter__.return_value = connection
     cursor = connection.cursor.return_value
-    cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
+    cursor.execute.return_value.fetchone.side_effect = [
+        ("POLICY_CHUNKS",), ([0.0],), (42, datetime(2026, 1, 2)), ([0.0],)
+    ]
     models = [(unsupported,)] + ([(later_model,)] if later_model else [])
     cursor.execute.return_value.fetchall.side_effect = [models, []]
     monkeypatch.setattr("policies.DOCS", tmp_path)

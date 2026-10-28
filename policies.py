@@ -70,6 +70,16 @@ def ensure_policies():
                     _logger.warning("Embedding model %r incompatible (ORA-%05d)", model, code)
             else:
                 _logger.warning("Using hash-v1-512 fallback: no compatible embedding models available")
+            if backend != "hash-v1-512":
+                revision = cur.execute(
+                    "SELECT object_id, last_ddl_time FROM user_objects "
+                    "WHERE object_name=:model AND object_type='MINING MODEL'",
+                    model=backend,
+                ).fetchone()
+                if not revision or revision[0] is None or revision[1] is None:
+                    raise RuntimeError("Embedding model revision unavailable")
+                # Object identity changes on drop/reload, even within the same second.
+                fingerprint = hashlib.sha256(repr((sources, revision)).encode()).hexdigest()
             existing = cur.execute("SELECT DISTINCT backend, source_hash FROM policy_chunks").fetchall()
             if existing == [(backend, fingerprint)]:
                 return backend
