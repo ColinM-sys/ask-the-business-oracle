@@ -1585,6 +1585,52 @@ def test_comparison_keeps_available_margin_when_other_period_is_empty(available_
     assert result["dropped_count"] == 0
 
 
+@pytest.mark.parametrize("before_costs, before_freight, change", [
+    ((1.0, 10.0), -8.0, None),
+    ((1.0, 2.0), 0.0, None),
+    ((1.0, 2.004), 0.0, None),
+    ((3.0, 1.0), 5.0, 60.0),
+])
+def test_freight_change_requires_positive_baseline(before_costs, before_freight, change, monkeypatch):
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+            INSERT INTO sales VALUES (1, 1, '2025-06', 200, 2, 100, 0);
+            INSERT INTO sales VALUES (1, 2, '2025-06', -100, -1, 100, 0);
+            INSERT INTO sales VALUES (1, 1, '2025-07', 100, 1, 100, 0);
+        """)
+        for product, freight in enumerate(before_costs, 1):
+            con.execute("INSERT INTO costs VALUES (1, ?, '2025-06', 10, ?)", (product, freight))
+        con.execute("INSERT INTO costs VALUES (1, 1, '2025-07', 10, 8.0)")
+
+        def run_sql(sql, params=None):
+            return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
+                con.execute(tools.validate_select(sql), params or {})]}
+
+        monkeypatch.setattr("agent.run_sql", run_sql)
+        monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
+        result = answer_question("West since July 2025")
+
+    row = result["evidence"]["E2"]["rows"][0]
+    assert row["before_freight_per_unit"] == before_freight
+    assert row["after_freight_per_unit"] == 8.0
+    assert row["freight_increase_pct"] == change
+    freight = next(c for c in result["claims"] if c["kind"] == "finding"
+                   and "freight" in c["parts"][0].get("text", "").lower())
+    rendered = "".join(p.get("text", str(p.get("value", "")) + p.get("suffix", ""))
+                       for p in freight["parts"])
+    assert ("change: unavailable" if change is None else "change: 60.0%") in rendered
+    assert {p["column"] for p in freight["parts"] if "value" in p} >= {
+        "before_freight_per_unit", "after_freight_per_unit"}
+    assert all(supported(p, result["evidence"]) for p in freight["parts"] if "value" in p)
+    assert result["dropped_count"] == 0
+
+
 def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
     row = {
         "region_name": "West", "first_month": "2025-01", "last_month": "2025-09",
