@@ -25,15 +25,19 @@ def critique(claims, evidence):
 
     Plain text cannot carry digits (including dates); numerical segments must
     name the evidence, row, column and exact value. Policy text is evidence for
-    qualitative reasons only, never an authority for business numbers.
+    qualitative reasons only, never an authority for business numbers. Units
+    and magnitudes cannot be appended as plain text; use validated suffixes.
     """
     kept, dropped = [], []
     for claim in claims:
         valid = bool(claim.get("parts"))
         rendered = ""
+        number_tails = []
         for part in claim.get("parts", []):
             if "text" in part:
                 valid &= not bool(re.search(r"\d", part["text"]))
+                if number_tails:
+                    number_tails[-1] += part["text"]
                 rendered += part["text"]
             else:
                 # A sign must belong to the cited value, even across text parts.
@@ -42,6 +46,12 @@ def critique(claims, evidence):
                 # Only literal units are supported; magnitude conversions are not.
                 valid &= part.get("suffix", "") in ("", "%", " percentage points")
                 rendered += str(part.get("value", "")) + str(part.get("suffix") or "")
+                number_tails.append("")
+        # Join adjacent text parts so splitting a modifier cannot hide it.
+        valid &= not any(re.match(
+            r"\s*(?:%|(?:hundred|thousand|million|billion|trillion|percent|percentage|"
+            r"points?|basis|bps|[kmbt])\b)", tail, re.IGNORECASE)
+            for tail in number_tails)
         valid &= all(p in evidence and evidence[p].get("kind") == "policy"
                      for p in claim.get("policy_ids", []))
         (kept if valid else dropped).append(claim)

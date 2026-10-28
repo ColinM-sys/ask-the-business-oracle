@@ -103,6 +103,19 @@ def test_critic_preserves_supported_suffixes(sample_evidence, suffix):
     assert critique([claim], sample_evidence) == ([claim], [])
 
 
+@pytest.mark.parametrize("modifier", [" million", " billion", " thousand", "k", "M",
+                                      " percent", "%", " percentage points", " basis points"])
+@pytest.mark.parametrize("split", [False, True])
+def test_critic_rejects_units_and_magnitudes_in_adjacent_text(sample_evidence, modifier, split):
+    texts = [{"text": modifier}]
+    if split:
+        texts = [{"text": character} for character in modifier]
+    claim = {"parts": [
+        {"value": 25.53, "evidence": "E1", "row": 0, "column": "margin"},
+        *texts]}
+    assert critique([claim], sample_evidence) == ([], [claim])
+
+
 def test_hashing_is_stable_and_normalized():
     first = hash_embedding("West freight contract")
     assert first == hash_embedding("West freight contract")
