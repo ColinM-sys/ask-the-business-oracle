@@ -36,6 +36,8 @@
     table { border-collapse: collapse; font-size: .8rem; width: 100%; }
     td, th { text-align: left; border-bottom: 1px solid #dbe3d8; padding: 10px; min-width: 90px; }
     th { position: sticky; top: 0; background: #e9f4eb; }
+    tbody th { position: static; background: transparent; }
+    caption { text-align: left; font-weight: 700; padding: 10px 0; }
     td { white-space: pre-wrap; max-width: 650px; }
     .selected { background: #fff1c7; }
     details { margin-top: 18px; }
@@ -103,17 +105,18 @@
     {% endif %}
     {% set monthly_rows = result.evidence.get('E1', {}).get('rows', []) %}
     {% if monthly_rows | selectattr('region_name', 'defined') | selectattr('region_name', 'equalto', result.region) | list %}
-    <h3>Monthly trend · {{ result.region }}</h3>
     <div class="table-wrap">
-      <table>
+      <table id="monthly-trend">
+        <caption>{{ result.region }} monthly trend</caption>
         <thead><tr><th scope="col">Month</th><th scope="col">Gross margin (%)</th><th scope="col">Discount (%)</th><th scope="col">Freight per unit ($)</th></tr></thead>
         <tbody>
         {% for row in monthly_rows %}
           {% if row.get('region_name') == result.region %}
           {% set row_index = loop.index0 %}
           <tr>
-            {% for column, label, prefix, suffix in [('sale_month', 'Month', '', ''), ('margin_pct', 'Gross margin', '', '%'), ('discount_pct', 'Discount', '', '%'), ('freight_per_unit', 'Freight per unit', '$', '')] %}
-            <td>{% if row.get(column) is not none %}<button type="button" class="number" data-evidence="E1" data-row="{{ row_index }}" data-column="{{ column }}" aria-label="{{ label }}: {{ prefix }}{{ row[column] }}{{ suffix }}">{{ prefix }}{{ row[column] }}{{ suffix }}</button>{% else %}N/A{% endif %}</td>
+            <th scope="row">{% if row.get('sale_month') is not none %}<button type="button" class="number" data-evidence="E1" data-row="{{ row_index }}" data-column="sale_month" aria-label="Evidence for {{ result.region }} {{ row.sale_month }}">{{ row.sale_month }}</button>{% else %}Unavailable{% endif %}</th>
+            {% for column, label, prefix, suffix in [('margin_pct', 'gross margin', '', '%'), ('discount_pct', 'discount', '', '%'), ('freight_per_unit', 'freight per unit', '$', '')] %}
+            <td>{% if row.get(column) is not none %}<button type="button" class="number" data-evidence="E1" data-row="{{ row_index }}" data-column="{{ column }}" aria-label="Evidence for {{ result.region }} {{ row.sale_month }} {{ label }}: {{ prefix }}{{ row[column] }}{{ suffix }}">{{ prefix }}{{ row[column] }}{{ suffix }}</button>{% else %}Unavailable{% endif %}</td>
             {% endfor %}
           </tr>
           {% endif %}
