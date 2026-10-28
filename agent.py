@@ -4,7 +4,7 @@ from hashlib import sha256
 import re
 
 from critic import critique
-from policies import DOCS
+from policies import DOCS, source_fingerprint
 from tools import run_sql, search_policies
 
 
@@ -108,7 +108,8 @@ def summary_sql():
         f"CASE WHEN ({raw['before']['margin_pct']}) IS NULL OR ({raw['after']['margin_pct']}) IS NULL THEN NULL "
         f"WHEN ({raw['before']['margin_pct']}) > ({raw['after']['margin_pct']}) THEN 'fell' WHEN ({raw['before']['margin_pct']}) < ({raw['after']['margin_pct']}) THEN 'rose' ELSE 'was unchanged' END AS margin_direction",
         f"ROUND(({raw['before']['margin_pct']})-({raw['after']['margin_pct']}),2) AS margin_drop_pts",
-        f"ROUND(100*(({raw['after']['freight_per_unit']})/NULLIF(({raw['before']['freight_per_unit']}),0)-1),2) AS freight_increase_pct",
+        f"CASE WHEN ({raw['before']['freight_per_unit']}) > 0 THEN "
+        f"ROUND(100*(({raw['after']['freight_per_unit']})/NULLIF(({raw['before']['freight_per_unit']}),0)-1),2) END AS freight_increase_pct",
         "MIN(s.sale_month) AS first_month", "MAX(s.sale_month) AS last_month",
         "MIN(CASE WHEN s.sale_month >= :cutoff THEN s.sale_month END) AS after_first_month",
         "MAX(CASE WHEN s.sale_month < :cutoff THEN s.sale_month END) AS before_last_month",
@@ -193,15 +194,18 @@ def answer_question(question):
 
     # An unchanged document can be superseded by any other policy in the corpus.
     try:
-        corpus_hashes = {
-            path.name: sha256(path.read_text(encoding="utf-8").strip().encode("utf-8")).hexdigest()
-            for path in DOCS.glob("*.md")
-        }
+        sources = [(path.name, path.read_text(encoding="utf-8")) for path in sorted(DOCS.glob("*.md"))]
+        corpus_hashes = {name: sha256(content.strip().encode("utf-8")).hexdigest()
+                         for name, content in sources}
+        corpus_fingerprint = source_fingerprint(sources)
     except (OSError, UnicodeError):
         corpus_hashes = {}
+        corpus_fingerprint = None
 
     def policy_ids(filename):
-        if corpus_hashes != POLICY_SHA256:
+        # The first half of source_hash identifies the model, the second the source files.
+        if (corpus_hashes != POLICY_SHA256
+                or (policies.get("source_hash") or "")[32:] != corpus_fingerprint):
             return []
         # These reviewed documents each fit in one chunk; partial text is not proof.
         citations = []
@@ -266,7 +270,7 @@ def answer_question(question):
     else:
         claim("reason", [text(("Use the discount and freight movements to investigate the margin change. "
             if margin_available else "Review the discount and freight movements alongside margin when available. ")
-            + "The retrieved West-specific documents do not establish a cause for this region and comparison period.")])
+            + "No verified policy explanation is available for this region and comparison period.")])
     pricing = policy_ids("pricing_policy.md")
     playbook = policy_ids("regional_playbook.md")
     if pricing and playbook:
