@@ -695,13 +695,13 @@ def test_policy_refresh_reuses_chunk_embeddings_by_model(tmp_path, monkeypatch):
     monkeypatch.setattr("policies.connect", lambda: connection)
     monkeypatch.setattr("policies.embed", embedding)
 
-    assert ensure_policies() == "MODEL_V1"
+    assert ensure_policies(include_fingerprint=True) == ("MODEL_V1", rows[0]["fingerprint"])
     initial_calls = embedding_calls[:]
     original_shared_vector = rows[1]["vector"]
     original_fingerprint = rows[0]["fingerprint"]
     embedding_calls.clear()
     commits = connection.commit.call_count
-    assert ensure_policies() == "MODEL_V1"
+    assert ensure_policies(include_fingerprint=True) == ("MODEL_V1", rows[0]["fingerprint"])
     assert not embedding_calls
     assert connection.commit.call_count == commits
     documents[0].write_text("Updated policy", encoding="utf-8")
@@ -950,12 +950,62 @@ def test_policy_table_creation_race(code, tmp_path, monkeypatch):
         connection.commit.assert_not_called()
 
 
+@pytest.mark.parametrize("snapshot", [
+    [("hash-v1-512", "superseding-corpus")],
+    [("OTHER_MODEL", "expected-corpus")],
+    [("hash-v1-512", "expected-corpus"), ("hash-v1-512", "superseding-corpus")],
+    [],
+])
+def test_policy_search_retries_when_retrieval_corpus_differs(monkeypatch, snapshot):
+    expected = ("hash-v1-512", "expected-corpus")
+    refresh = MagicMock(return_value=expected)
+    monkeypatch.setattr(tools, "ensure_policies", refresh)
+    connections = []
+    results = [(1, "reviewed.md", "Reviewed policy", 0.25)]
+
+    def connect_snapshot():
+        connection = MagicMock()
+        connection.__enter__.return_value = connection
+        cursor = connection.cursor.return_value.__enter__.return_value
+        pairs = snapshot if not connections else [expected]
+        connections.append((connection, cursor))
+
+        def execute(sql, *args, **kwargs):
+            if sql.startswith("SELECT DISTINCT backend, source_hash"):
+                cursor.fetchall.return_value = pairs
+            elif sql.startswith("SELECT backend FROM policy_chunks"):
+                cursor.fetchone.return_value = pairs[0][:1] if pairs else None
+            elif "VECTOR_DISTANCE" in sql:
+                cursor.fetchall.return_value = results
+            return cursor
+
+        cursor.execute.side_effect = execute
+        return connection
+
+    monkeypatch.setattr(tools, "connect", connect_snapshot)
+    embedding = MagicMock(return_value=hash_embedding("West freight"))
+    monkeypatch.setattr(tools, "embed", embedding)
+
+    policies = tools.search_policies("West freight", k=1)
+
+    assert refresh.call_count == 2
+    assert len(connections) == 2
+    for connection, cursor in connections:
+        assert cursor.execute.call_args_list[0].args[0] == "SET TRANSACTION READ ONLY"
+        connection.__exit__.assert_called_once()
+    assert not any("VECTOR_DISTANCE" in call.args[0]
+                   for call in connections[0][1].execute.call_args_list)
+    embedding.assert_called_once_with(connections[1][1], "West freight", expected[0])
+    assert policies["rows"] == [dict(zip(("id", "doc", "chunk", "distance"), results[0]))]
+
+
 def test_policy_search_handles_empty_table(monkeypatch):
     connection = MagicMock()
     connection.__enter__.return_value = connection
     cursor = connection.cursor.return_value.__enter__.return_value
-    cursor.execute.return_value.fetchone.return_value = None
-    monkeypatch.setattr(tools, "ensure_policies", lambda: None)
+    cursor.execute.return_value.fetchall.return_value = []
+    refresh = MagicMock(return_value=("hash-v1-512", "expected"))
+    monkeypatch.setattr(tools, "ensure_policies", refresh)
     monkeypatch.setattr(tools, "connect", lambda: connection)
     embedding = MagicMock()
     monkeypatch.setattr(tools, "embed", embedding)
@@ -963,6 +1013,27 @@ def test_policy_search_handles_empty_table(monkeypatch):
     with pytest.raises(RuntimeError, match="No policy chunks"):
         tools.search_policies("West freight")
 
+    assert refresh.call_count == 3
+    assert connection.__exit__.call_count == 3
+    embedding.assert_not_called()
+
+
+def test_policy_search_fails_closed_if_collection_keeps_changing(monkeypatch):
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value.__enter__.return_value
+    cursor.execute.return_value.fetchall.return_value = [("hash-v1-512", "other")]
+    refresh = MagicMock(return_value=("hash-v1-512", "expected"))
+    embedding = MagicMock()
+    monkeypatch.setattr(tools, "ensure_policies", refresh)
+    monkeypatch.setattr(tools, "connect", lambda: connection)
+    monkeypatch.setattr(tools, "embed", embedding)
+
+    with pytest.raises(RuntimeError, match="Policy collection changed"):
+        tools.search_policies("West freight")
+
+    assert refresh.call_count == 3
+    assert connection.__exit__.call_count == 3
     embedding.assert_not_called()
 
 
