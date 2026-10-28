@@ -128,7 +128,8 @@ def test_readme_documents_policy_fingerprint_maintenance():
     text = " ".join(readme.split())
     assert "review the fixed claims in `agent.py`" in text
     assert "update both `POLICY_SHA256` (SHA-256 of the stripped full document)" in text
-    assert "`REVIEWED_POLICY_HASHES` (SHA-256 of its complete chunk with whitespace collapsed)" in text
+    assert ("`REVIEWED_POLICY_HASHES` (SHA-256 of its complete chunk with whitespace collapsed). "
+            "Then restart the Flask app to load the updated fingerprints.") in text
     assert "The revised document must still fit in one chunk" in text
     assert "affected explanations and recommendations remain unavailable even after refresh and retrieval" in text
 
