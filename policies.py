@@ -53,7 +53,7 @@ def ensure_policies():
                     if not exc.args or getattr(exc.args[0], "code", None) != 955:
                         raise
             # DDL commits implicitly, so acquire the transaction lock only after setup.
-            cur.execute("LOCK TABLE policy_chunks IN EXCLUSIVE MODE")
+            cur.execute("LOCK TABLE policy_chunks IN EXCLUSIVE MODE WAIT 5")
             sources = [(p.name, p.read_text(encoding="utf-8")) for p in sorted(DOCS.glob("*.md"))]
             if not sources:
                 raise RuntimeError("No policy documents found")
