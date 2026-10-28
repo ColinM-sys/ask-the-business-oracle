@@ -1127,6 +1127,89 @@ def test_flask_live_brief_and_evidence():
     assert b"evidence-dialog" in response.data
 
 
+def test_brief_shows_selected_region_monthly_trend_with_cell_citations(monkeypatch):
+    rows = [
+        {"region_name": "East", "sale_month": "2025-06", "margin_pct": 70,
+         "discount_pct": 1, "freight_per_unit": 2},
+        {"region_name": "West", "sale_month": "2025-06", "margin_pct": 38.9,
+         "discount_pct": 0, "freight_per_unit": 5.4},
+        {"region_name": "East", "sale_month": "2025-07", "margin_pct": 71,
+         "discount_pct": 2, "freight_per_unit": 3},
+        {"region_name": "West", "sale_month": "2025-07", "margin_pct": None,
+         "discount_pct": 18.25, "freight_per_unit": 8.6},
+    ]
+    result = {"region": "West", "claims": [], "dropped_count": 0,
+              "evidence": {"E1": {"kind": "sql", "sql": "SELECT ...", "params": {}, "rows": rows}}}
+    monkeypatch.setattr("app.answer_question", lambda _: result)
+
+    class BriefTableParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.in_article = False
+            self.in_table = False
+            self.tables = []
+            self.current_row = None
+            self.cell = None
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "article":
+                self.in_article = True
+            elif self.in_article and tag == "table":
+                self.in_table = True
+                self.tables.append([])
+            elif self.in_table and tag == "tr":
+                self.current_row = []
+                self.tables[-1].append(self.current_row)
+            elif self.in_table and tag in ("th", "td"):
+                self.cell = {"text": "", "buttons": []}
+                self.current_row.append(self.cell)
+            elif self.cell is not None and tag == "button":
+                self.cell["buttons"].append(dict(attrs))
+
+        def handle_data(self, data):
+            if self.cell is not None:
+                self.cell["text"] += data
+
+        def handle_endtag(self, tag):
+            if tag in ("th", "td"):
+                self.cell = None
+            elif tag == "table":
+                self.in_table = False
+            elif tag == "article":
+                self.in_article = False
+
+    response = app.test_client().post("/", data={"question": "West"})
+    assert response.status_code == 200
+    parser = BriefTableParser()
+    parser.feed(response.get_data(as_text=True))
+    assert len(parser.tables) == 1
+    header, *body = parser.tables[0]
+    labels = [cell["text"].strip().lower() for cell in header]
+    assert len(labels) == 4
+    assert all(term in label for term, label in zip(("month", "margin", "discount", "freight"), labels))
+    assert len(body) == 2
+    for table_row, evidence_index in zip(body, (1, 3)):
+        assert len(table_row) == 4
+        for cell, column, label in zip(table_row, ("sale_month", "margin_pct", "discount_pct", "freight_per_unit"), labels):
+            value = rows[evidence_index][column]
+            displayed = cell["text"].strip()
+            if value is None:
+                assert displayed in ("N/A", "—", "-")
+                assert not cell["buttons"]
+                continue
+            assert len(cell["buttons"]) == 1
+            button = cell["buttons"][0]
+            assert button["data-evidence"] == "E1"
+            assert button["data-row"] == str(evidence_index)
+            assert button["data-column"] == column
+            if column == "sale_month":
+                assert displayed == value
+            else:
+                unit = "%" if column.endswith("_pct") else "$"
+                assert unit in displayed or unit in label
+                assert float(displayed.replace("%", "").replace("$", "").strip()) == value
+
+
 @pytest.mark.parametrize("has_claims,dropped_count", [(True, 0), (True, 2), (False, 2), (False, 0)])
 def test_ui_discloses_dropped_claims_and_empty_brief(monkeypatch, has_claims, dropped_count):
     result = {
