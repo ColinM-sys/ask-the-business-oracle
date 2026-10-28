@@ -176,7 +176,7 @@ def answer_question(question):
                 number("after_margin_pct", "%", other_index), text(" after.")])
     if region == "West" and cutoff == "2025-07":
         push, freight = policy_ids("west_q3_volume_push.md"), policy_ids("freight_contract_memo.md")
-        if push and freight:
+        if push and freight and direction == "fell":
             claim("reason", [text("The policy documents identify a regional volume discount push and a replacement freight contract. The discount program bypassed senior sales approval and Finance review. These changes are consistent with the observed margin decline; this comparison does not isolate their individual causal effects.")], push + freight)
     else:
         claim("reason", [text("Use the discount and freight movements to investigate the margin change. The retrieved West-specific documents do not establish a cause for this region and comparison period.")])
