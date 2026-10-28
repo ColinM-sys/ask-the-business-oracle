@@ -1589,6 +1589,7 @@ def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
     row = {
         "region_name": "West", "first_month": "2025-01", "last_month": "2025-09",
         "before_last_month": "2025-06", "after_first_month": "2025-07",
+        "before_revenue": 100, "after_revenue": 90,
         "before_margin_pct": 40, "after_margin_pct": 25, "margin_drop_pts": 15,
         "margin_direction": "fell",
         "before_discount_pct": 3, "after_discount_pct": 18,
@@ -1873,6 +1874,7 @@ def policy_rows(monkeypatch):
     row = {
         "region_name": "West", "first_month": "2025-01", "last_month": "2025-09",
         "before_last_month": "2025-06", "after_first_month": "2025-07",
+        "before_revenue": 100, "after_revenue": 90,
         "before_margin_pct": 40, "after_margin_pct": 25, "margin_drop_pts": 15,
         "margin_direction": "fell", "before_discount_pct": 3, "after_discount_pct": 18,
         "before_freight_per_unit": 5, "after_freight_per_unit": 8,
@@ -1922,7 +1924,7 @@ def test_policy_filenames_do_not_prove_claims(policy_rows, filename, contradicti
         assert not any(claim["kind"] == "reason" for claim in result["claims"])
     else:
         assert not any(claim["kind"] == "action" for claim in result["claims"])
-    assert len([claim for claim in result["claims"] if claim["kind"] == "finding"]) == 3
+    assert len([claim for claim in result["claims"] if claim["kind"] == "finding"]) == 4
     assert result["dropped_count"] == 0
 
 
@@ -1961,7 +1963,7 @@ def test_fixed_policy_claims_require_reviewed_complete_corpus(policy_rows, tmp_p
         assert [claim["kind"] for claim in policy_claims] == ["reason", "action", "action", "action"]
     else:
         assert policy_claims == []
-    assert len([claim for claim in result["claims"] if claim["kind"] == "finding"]) == 3
+    assert len([claim for claim in result["claims"] if claim["kind"] == "finding"]) == 4
     assert result["dropped_count"] == 0
 
 
@@ -2002,6 +2004,7 @@ def retrieved_policy_rows(monkeypatch):
     summary = {
         "region_name": "West", "first_month": "2025-01", "last_month": "2025-09",
         "before_last_month": "2025-06", "after_first_month": "2025-07",
+        "before_revenue": 100, "after_revenue": 90,
         "before_margin_pct": 40, "after_margin_pct": 25, "margin_drop_pts": 15,
         "margin_direction": "fell", "before_discount_pct": 3, "after_discount_pct": 18,
         "before_freight_per_unit": 5, "after_freight_per_unit": 8,
@@ -2236,6 +2239,29 @@ def test_flask_live_brief_and_evidence():
 
 def test_download_brief_contains_cited_evidence_and_verification(monkeypatch):
     question = "Why did West margin fall since July 2025?"
+    summary = {
+        "region_name": "West", "first_month": "2025-06", "last_month": "2025-07",
+        "before_last_month": "2025-06", "after_first_month": "2025-07",
+        "before_revenue": 123456, "after_revenue": 234567,
+        "before_margin_pct": 40, "after_margin_pct": 25, "margin_drop_pts": 15,
+        "margin_direction": "fell", "before_discount_pct": 3, "after_discount_pct": 18,
+        "before_freight_per_unit": 5, "after_freight_per_unit": 8, "freight_increase_pct": 60,
+        "missing_cost_count": 0, "missing_discount_count": 0, "missing_revenue_count": 0,
+        "margin_pct": 25.6, "units": 9007199254740993,
+    }
+    monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
+        "sql": sql, "params": params or {}, "rows": [summary]})
+    monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
+    generated = answer_question(question)
+    revenue_findings = [claim for claim in generated["claims"] if claim["kind"] == "finding"
+                        and claim["parts"][0].get("text", "").startswith("Net revenue:")]
+    assert len(revenue_findings) == 1
+    revenue = revenue_findings[0]
+    parts = [part for part in revenue["parts"] if "value" in part]
+    assert [(part["evidence"], part["row"], part["column"], part["value"]) for part in parts] == [
+        ("E2", 0, "before_revenue", 123456), ("E2", 0, "after_revenue", 234567)]
+    assert all(supported(part, generated["evidence"]) for part in parts)
+    assert generated["dropped_count"] == 0
     result = {
         "region": "West", "cutoff": "2025-07", "dropped_count": 2,
         "claims": [
@@ -2246,15 +2272,13 @@ def test_download_brief_contains_cited_evidence_and_verification(monkeypatch):
                 {"text": "Margin fell to "},
                 {"value": 25.6, "suffix": "%", "evidence": "E2", "row": 0,
                  "column": "margin_pct"}, {"text": "."}]},
+            revenue,
             {"kind": "reason", "parts": [{"text": "A volume push affected pricing."}],
              "policy_ids": ["P1"]},
             {"kind": "action", "parts": [{"text": "Review discounts."}]},
         ],
         "evidence": {
-            "E2": {"kind": "sql", "sql": "SELECT margin_pct, units FROM sales WHERE month >= :cutoff",
-                   "params": {"cutoff": "2025-07"},
-                   "rows": [{"margin_pct": 25.6, "first_month": "2025-06",
-                             "units": 9007199254740993}]},
+            "E2": generated["evidence"]["E2"],
             "P1": {"kind": "policy", "sql": "SELECT chunk FROM policy_chunks WHERE id = :policy_id",
                    "params": {"policy_id": 1}, "rows": [{"id": 1, "doc": "volume_push.md",
                                                            "chunk": "Discounts increased in West."}]},
@@ -2341,14 +2365,18 @@ def test_download_brief_contains_cited_evidence_and_verification(monkeypatch):
     finding = next(line for line in markdown.splitlines() if "Margin fell to" in line)
     assert "25.6%" in finding and "E2" in finding and "row 1" in finding
     assert "margin_pct" in finding.replace("\\_", "_")
+    revenue_line = next(line.replace("\\_", "_") for line in markdown.splitlines() if "Net revenue:" in line)
+    assert "$123456 [E2, row 1, column before_revenue](#e2)" in revenue_line
+    assert "$234567 [E2, row 1, column after_revenue](#e2)" in revenue_line
     reason = next(line for line in markdown.splitlines() if "A volume push affected pricing." in line)
     assert "P1" in reason
     assert "Review discounts." in markdown
     assert "2 claims were omitted because they failed verification." in markdown
     assert "Numbers in retained claims verified against cited SQL cells." in markdown
     assert "Policy-backed recommendations are unavailable for this brief." in markdown
-    assert "SELECT margin_pct, units FROM sales WHERE month >= :cutoff" in markdown
+    assert "AS before_revenue" in markdown and "AS after_revenue" in markdown
     assert '"cutoff": "2025-07"' in markdown and '"margin_pct": 25.6' in markdown
+    assert '"before_revenue": "123456"' in markdown and '"after_revenue": "234567"' in markdown
     assert "9007199254740993" in markdown
     assert "SELECT chunk FROM policy_chunks WHERE id = :policy_id" in markdown
     assert '"policy_id": 1' in markdown

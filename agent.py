@@ -245,6 +245,8 @@ def answer_question(question):
                 parts.append(text("; "))
             parts.extend([text(f"{period} revenue is "), number(f"{period}_revenue")])
         claim("finding", parts + [text(".")])
+    claim("finding", [text("Net revenue: before $"), number("before_revenue"),
+        text("; after $"), number("after_revenue"), text(".")])
     claim("finding", [text("Average discount: before ")] + metric("before_discount_pct", suffix="%")
         + [text("; after ")] + metric("after_discount_pct", suffix="%") + [text(".")])
     claim("finding", [text("Freight per unit: before ")] + metric("before_freight_per_unit", prefix="$")
