@@ -258,6 +258,16 @@ def test_flask_live_brief_and_evidence():
     assert b"evidence-dialog" in response.data
 
 
+@pytest.mark.parametrize("data", [None, {}, {"unrelated": "value"}, {"question": ""}])
+def test_ui_missing_question_rejected_before_querying(monkeypatch, data):
+    def forbidden_query(*args, **kwargs):
+        pytest.fail("Missing questions must be rejected before querying")
+
+    monkeypatch.setattr("agent.run_sql", forbidden_query)
+    response = app.test_client().post("/", data=data)
+    assert response.status_code == 400
+
+
 def test_ui_validation_and_safe_error(monkeypatch):
     client = app.test_client()
     assert client.post("/", data={"question": ""}).status_code == 400
