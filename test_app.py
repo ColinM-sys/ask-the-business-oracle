@@ -20,6 +20,7 @@ import pytest
 from packaging.requirements import Requirement
 
 import db
+import critic
 import tools
 from db import connect
 from agent import (DataQualityError, DiscountDataQualityError, RevenueDataQualityError,
@@ -272,7 +273,7 @@ def test_critic_drops_unsupported_numbers_and_preserves_valid(sample_evidence):
     assert len(dropped) == 3
 
 
-def test_readme_documents_unchecked_spelled_out_numbers():
+def test_docs_document_unchecked_spelled_out_numbers():
     claim = {"parts": [{"text": "Sales were five million."}]}
     assert critique([claim], {}) == ([claim], [])
 
@@ -281,6 +282,10 @@ def test_readme_documents_unchecked_spelled_out_numbers():
     assert "numbers written as words" in documentation
     assert "five million" in documentation
     assert "can pass without a citation" in documentation
+
+    documentation = " ".join(critic.__doc__.lower().split())
+    assert "structured numeric parts" in documentation
+    assert "numbers written as words are unchecked" in documentation
 
 
 @pytest.mark.parametrize("change", [
