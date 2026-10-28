@@ -807,6 +807,49 @@ def test_margin_direction_uses_unrounded_sql(before, after, direction, below_pre
     assert result["dropped_count"] == 0
 
 
+@pytest.mark.parametrize("available_period,margin", [
+    ("before", 35), ("after", 35), ("before", 0), ("after", 0),
+])
+def test_comparison_keeps_available_margin_when_other_period_is_empty(available_period, margin, monkeypatch):
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West'), (2, 'East');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+        """)
+        for region_id, month, value in (
+            (1, "2025-06", 40), (1, "2025-07", 25),
+            (2, "2025-06" if available_period == "before" else "2025-07", margin),
+        ):
+            con.execute("INSERT INTO sales VALUES (?, 1, ?, 100.0, 1, 100.0, 0)", (region_id, month))
+            con.execute("INSERT INTO costs VALUES (?, 1, ?, ?, 5)", (region_id, month, 95 - value))
+
+        def run_sql(sql, params=None):
+            return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
+                con.execute(tools.validate_select(sql), params or {})]}
+
+        monkeypatch.setattr("agent.run_sql", run_sql)
+        monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
+        result = answer_question("West since July 2025")
+
+    comparison = next(claim for claim in result["claims"] if claim["kind"] == "comparison")
+    rendered = "".join(part.get("text", str(part.get("value", "")) + part.get("suffix", ""))
+                       for part in comparison["parts"])
+    missing_period = "after" if available_period == "before" else "before"
+    assert f"{margin}.0% {available_period}" in rendered
+    assert f"unavailable {missing_period}" in rendered
+    parts = [part for part in comparison["parts"] if "value" in part]
+    assert len(parts) == 1
+    assert parts[0]["column"] == f"{available_period}_margin_pct"
+    assert parts[0]["evidence"] == "E2"
+    assert result["evidence"]["E2"]["rows"][parts[0]["row"]]["region_name"] == "East"
+    assert supported(parts[0], result["evidence"])
+    assert result["dropped_count"] == 0
+
+
 def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
     row = {
         "region_name": "West", "first_month": "2025-01", "last_month": "2025-09",
