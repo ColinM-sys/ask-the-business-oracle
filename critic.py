@@ -40,7 +40,7 @@ def critique(claims, evidence):
         number_tails = []
         for part in claim.get("parts", []):
             if "text" in part:
-                valid &= not bool(re.search(r"\d", part["text"]))
+                valid &= not any(char.isdigit() for char in part["text"])
                 if number_tails:
                     number_tails[-1] += part["text"]
                 rendered += part["text"]

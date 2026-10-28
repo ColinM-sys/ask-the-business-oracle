@@ -253,6 +253,13 @@ def test_critic_drops_unsupported_numbers_and_preserves_valid(sample_evidence):
     assert len(dropped) == 3
 
 
+@pytest.mark.parametrize("digit", ["1", "\u0661", "\u2460", "\u00b2"])
+def test_critic_rejects_uncited_digits_in_comparison_text(sample_evidence, digit):
+    claim = {"parts": [{"text": f"West {digit} margin: "},
+        {"value": "25.53", "suffix": "%", "evidence": "E1", "row": 0, "column": "margin"}]}
+    assert critique([claim], sample_evidence) == ([], [claim])
+
+
 def test_readme_documents_unchecked_spelled_out_numbers():
     claim = {"parts": [{"text": "Sales were five million."}]}
     assert critique([claim], {}) == ([claim], [])
