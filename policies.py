@@ -14,6 +14,7 @@ from db import connect
 DOCS = Path(__file__).parent / "docs"
 _lock = threading.Lock()
 _logger = logging.getLogger(__name__)
+_model_identifier = re.compile(r"[A-Z][A-Z0-9_$#]*")
 
 
 def hash_embedding(text, dimensions=512):
@@ -28,7 +29,7 @@ def hash_embedding(text, dimensions=512):
 def embed(cursor, text, backend):
     if backend == "hash-v1-512":
         return hash_embedding(text)
-    if not re.fullmatch(r"[A-Z][A-Z0-9_$#]*", backend):
+    if not _model_identifier.fullmatch(backend):
         raise ValueError("Invalid embedding model name")
     return cursor.execute(
         f"SELECT VECTOR_EMBEDDING({backend} USING :text AS DATA) FROM dual",
@@ -53,6 +54,9 @@ def ensure_policies():
             for (model,) in cur.execute(
                 "SELECT model_name FROM user_mining_models WHERE mining_function='EMBEDDING' ORDER BY model_name"
             ).fetchall():
+                if not _model_identifier.fullmatch(model):
+                    _logger.warning("Skipping unsupported embedding model %r", model)
+                    continue
                 try:
                     embed(cur, "Business policy", model)
                     backend = model
