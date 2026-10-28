@@ -9,6 +9,7 @@ import oracledb
 from agent import (DataQualityError, DiscountDataQualityError, MissingCostsError,
                    MissingDiscountInputsError, QuestionValidationError,
                    RevenueDataQualityError, answer_question)
+from tools import EvidenceLimitError
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024
@@ -58,6 +59,9 @@ def index():
             error, status = "Analysis unavailable. Correct missing net revenue for sales, then retry.", 503
         except DataQualityError:
             error, status = "Analysis unavailable. Correct missing, incomplete, or duplicate monthly cost records, then retry.", 503
+        except EvidenceLimitError:
+            error, status = ("Analysis unavailable. The evidence query returned more than 1,000 rows. "
+                             "Filter the sales data or aggregate the evidence query into fewer rows, then retry."), 503
         except Exception as exc:
             # Do not expose connection settings, driver errors or credentials.
             error_type = type(exc)

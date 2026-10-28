@@ -26,7 +26,7 @@ from agent import (DataQualityError, DiscountDataQualityError, RevenueDataQualit
                    answer_question, parse_question, summary_sql)
 from app import app
 from critic import critique, supported
-from policies import ensure_policies, hash_embedding
+from policies import ensure_policies, hash_embedding, source_fingerprint
 
 
 @pytest.mark.parametrize("wallet", [None, "test-wallet"])
@@ -221,6 +221,25 @@ def test_guard_accepts_comments_and_harmless_string():
     tools.validate_select("SELECT 'DROP TABLE sales' AS harmless FROM regions")
 
 
+@pytest.mark.parametrize("sql, columns, rows", [
+    ("SELECT region_id, region_id + 1 AS region_id FROM regions",
+     ["REGION_ID", "REGION_ID"], [(1, 2)]),
+    ('SELECT region_id AS "ID", region_id + 1 AS "id" FROM regions',
+     ["ID", "id"], [(1, 2)]),
+    ("SELECT region_id, region_id + 1 AS region_id FROM regions WHERE 1 = 0",
+     ["REGION_ID", "REGION_ID"], []),
+])
+def test_run_sql_rejects_duplicate_evidence_columns(sql, columns, rows, monkeypatch):
+    connection = MagicMock()
+    cursor = connection.__enter__.return_value.cursor.return_value.__enter__.return_value
+    cursor.description = [(name,) for name in columns]
+    cursor.fetchmany.return_value = rows
+    monkeypatch.setattr(tools, "connect", lambda: connection)
+
+    with pytest.raises(ValueError, match="duplicate column names"):
+        tools.run_sql(sql)
+
+
 @pytest.mark.parametrize("name", ["sales", "costs", "customers", "discounts", "products", "regions"])
 def test_guard_resolves_oracle_table_names(name, monkeypatch):
     for identifier in (name, name.upper(), name.capitalize(), f'"{name.upper()}"'):
@@ -345,6 +364,12 @@ def test_hashing_is_stable_and_normalized():
     assert abs(sum(v*v for v in first) - 1) < 0.000001
 
 
+def policy_source_hash(directory):
+    sources = [(path.name, path.read_text(encoding="utf-8"))
+               for path in sorted(directory.glob("*.md"))]
+    return "v" * 32 + source_fingerprint(sources)
+
+
 @pytest.mark.parametrize("failure_mode", ["incompatible", "null"])
 def test_policy_probe_cache_tracks_model_versions(failure_mode, tmp_path, monkeypatch):
     (tmp_path / "policy.md").write_text("Distinct policy content", encoding="utf-8")
@@ -385,7 +410,8 @@ def test_policy_probe_cache_tracks_model_versions(failure_mode, tmp_path, monkey
     monkeypatch.setattr("policies.embed", embedding)
     monkeypatch.setattr("policies._probe_cache", {}, raising=False)
 
-    assert ensure_policies() == "GOOD_MODEL"
+    assert ensure_policies(include_fingerprint=True) == ("GOOD_MODEL", rows[0]["fingerprint"])
+    assert ensure_policies(include_fingerprint=True) == ("GOOD_MODEL", rows[0]["fingerprint"])
     with ThreadPoolExecutor(max_workers=4) as executor:
         assert list(executor.map(lambda _: ensure_policies(), range(4))) == ["GOOD_MODEL"] * 4
     assert probes == models
@@ -1077,8 +1103,8 @@ def test_policy_search_handles_empty_table(monkeypatch):
     connection = MagicMock()
     connection.__enter__.return_value = connection
     cursor = connection.cursor.return_value.__enter__.return_value
-    cursor.execute.return_value.fetchone.return_value = None
-    monkeypatch.setattr(tools, "ensure_policies", lambda: None)
+    cursor.execute.return_value.fetchall.return_value = []
+    monkeypatch.setattr(tools, "ensure_policies", lambda **kwargs: ("hash-v1-512", "fingerprint"))
     monkeypatch.setattr(tools, "connect", lambda: connection)
     embedding = MagicMock()
     monkeypatch.setattr(tools, "embed", embedding)
@@ -1087,6 +1113,83 @@ def test_policy_search_handles_empty_table(monkeypatch):
         tools.search_policies("West freight")
 
     embedding.assert_not_called()
+
+
+@pytest.mark.parametrize("metadata", [
+    [("hash-v1-512", "v" * 32 + "b" * 32)],
+    [("hash-v1-512", "v" * 32 + "a" * 32),
+     ("hash-v1-512", "v" * 32 + "b" * 32)],
+    [("OTHER_MODEL", "v" * 32 + "a" * 32)],
+])
+def test_policy_search_rejects_corpus_replaced_after_setup(metadata, monkeypatch):
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value.__enter__.return_value
+    ensured = ("hash-v1-512", "v" * 32 + "a" * 32)
+    setup = MagicMock(return_value=ensured)
+    monkeypatch.setattr(tools, "ensure_policies", setup)
+    monkeypatch.setattr(tools, "connect", lambda: connection)
+    embedding = MagicMock(return_value=hash_embedding("West freight"))
+    monkeypatch.setattr(tools, "embed", embedding)
+
+    def execute(sql, *args, **kwargs):
+        if sql.startswith("SELECT backend FROM"):
+            cursor.fetchone.return_value = ("hash-v1-512",)
+        elif sql.startswith("SELECT DISTINCT backend, source_hash"):
+            cursor.fetchall.return_value = metadata
+        elif "VECTOR_DISTANCE" in sql:
+            cursor.fetchall.return_value = [
+                (1, "west_q3_volume_push.md", "Unchanged reviewed policy", 0.1),
+                (2, "superseding.md", "The earlier policy is revoked", 0.2),
+            ]
+        return cursor
+
+    cursor.execute.side_effect = execute
+    with pytest.raises(RuntimeError, match="Policy corpus"):
+        tools.search_policies("West freight")
+
+    setup.assert_called_once_with(include_fingerprint=True)
+    assert cursor.execute.call_args_list[0].args[0] == "SET TRANSACTION READ ONLY"
+    assert cursor.execute.call_args_list[1].args[0].startswith("SELECT DISTINCT backend, source_hash")
+    embedding.assert_not_called()
+
+
+def test_policy_search_keeps_fingerprint_and_results_in_one_snapshot(monkeypatch):
+    ensured = ("hash-v1-512", "v" * 32 + "a" * 32)
+    current = [(1, "original.md", "Original policy", 0.1)]
+    snapshot = []
+    events = []
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value.__enter__.return_value
+
+    def execute(sql, *args, **kwargs):
+        if sql == "SET TRANSACTION READ ONLY":
+            events.append("snapshot")
+            snapshot.extend(current)
+        elif sql.startswith("SELECT DISTINCT backend, source_hash"):
+            events.append("metadata")
+            cursor.fetchall.return_value = [ensured]
+        elif "VECTOR_DISTANCE" in sql:
+            events.append("search")
+            cursor.fetchall.return_value = list(snapshot)
+        return cursor
+
+    def embed_in_next_snapshot(*args):
+        events.append("embed")
+        current[:] = [(2, "superseding.md", "Revised policy", 0.1)]
+        return hash_embedding("West freight")
+
+    cursor.execute.side_effect = execute
+    monkeypatch.setattr(tools, "ensure_policies", lambda **kwargs: ensured)
+    monkeypatch.setattr(tools, "connect", lambda: connection)
+    monkeypatch.setattr(tools, "embed", embed_in_next_snapshot)
+
+    result = tools.search_policies("West freight")
+
+    assert events == ["snapshot", "metadata", "embed", "search"]
+    assert result["source_hash"] == ensured[1]
+    assert [row["doc"] for row in result["rows"]] == ["original.md"]
 
 
 def test_question_scope():
@@ -1585,6 +1688,58 @@ def test_comparison_keeps_available_margin_when_other_period_is_empty(available_
     assert result["dropped_count"] == 0
 
 
+@pytest.mark.parametrize("return_freight,after_freight,before,change", [
+    (18.0, 5.0, -8.0, None),
+    (10.0, 5.0, 0.0, None),
+    (10.004, 5.0, 0.0, None),
+    (9.996, 5.0, 0.0, 124900.0),
+    (5.0, 8.0, 5.0, 60.0),
+])
+def test_freight_change_requires_positive_unrounded_baseline(
+        return_freight, after_freight, before, change, monkeypatch):
+    # Returns can make the weighted freight baseline nonpositive.
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+            INSERT INTO sales VALUES (1, 1, '2025-06', 180.0, 2, 100.0, 10);
+            INSERT INTO sales VALUES (1, 2, '2025-06', -90.0, -1, 100.0, 10);
+            INSERT INTO sales VALUES (1, 1, '2025-07', 90.0, 1, 100.0, 10);
+            INSERT INTO costs VALUES (1, 1, '2025-06', 60.0, 5.0);
+        """)
+        con.execute("INSERT INTO costs VALUES (1, 2, '2025-06', 60.0, ?)", (return_freight,))
+        con.execute("INSERT INTO costs VALUES (1, 1, '2025-07', 60.0, ?)", (after_freight,))
+
+        def run_sql(sql, params=None):
+            return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
+                con.execute(tools.validate_select(sql), params or {})]}
+
+        monkeypatch.setattr("agent.run_sql", run_sql)
+        monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
+        result = answer_question("West since July 2025")
+
+    row = result["evidence"]["E2"]["rows"][0]
+    assert row["before_freight_per_unit"] == before
+    assert row["after_freight_per_unit"] == after_freight
+    if change is None:
+        assert row["freight_increase_pct"] is None
+    else:
+        assert row["freight_increase_pct"] == pytest.approx(change)
+    finding = next(c for c in result["claims"] if c["kind"] == "finding"
+                   and "Freight" in c["parts"][0].get("text", ""))
+    rendered = "".join(p.get("text", str(p.get("value", "")) + p.get("suffix", ""))
+                       for p in finding["parts"])
+    assert ("change: unavailable" in rendered) == (change is None)
+    cited = {p["column"] for p in finding["parts"] if "value" in p and supported(p, result["evidence"])}
+    assert {"before_freight_per_unit", "after_freight_per_unit"} <= cited
+    assert ("freight_increase_pct" in cited) == (change is not None)
+    assert result["dropped_count"] == 0
+
+
 def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
     row = {
         "region_name": "West", "first_month": "2025-01", "last_month": "2025-09",
@@ -1643,7 +1798,8 @@ def test_zero_revenue_preserves_available_metrics(zero_period, monkeypatch):
         policies = [{"id": i, "doc": path.name, "chunk": path.read_text(encoding="utf-8").strip()}
                     for i, path in enumerate(sorted(Path(__file__).with_name("docs").glob("*.md")), 1)]
         monkeypatch.setattr("agent.search_policies", lambda _: {
-            "sql": "SELECT policy evidence", "params": {}, "rows": policies})
+            "sql": "SELECT policy evidence", "params": {}, "rows": policies,
+            "source_hash": policy_source_hash(Path(__file__).with_name("docs"))})
         question = "West since July 2025"
         result = answer_question(question)
         response = app.test_client().post("/", data={"question": question})
@@ -1884,7 +2040,8 @@ def policy_rows(monkeypatch):
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
         "sql": sql, "params": params or {}, "rows": [row]})
     monkeypatch.setattr("agent.search_policies", lambda _: {
-        "sql": "SELECT policy evidence", "params": {}, "rows": policies})
+        "sql": "SELECT policy evidence", "params": {}, "rows": policies,
+        "source_hash": policy_source_hash(Path(__file__).with_name("docs"))})
     return policies
 
 
@@ -1897,6 +2054,19 @@ def test_reviewed_policy_text_supports_claims_and_only_matching_citations(policy
     assert all(claim["policy_ids"] for claim in claims)
     assert {citation for claim in claims for citation in claim["policy_ids"]} == {"P1", "P2", "P3", "P4"}
     assert result["dropped_count"] == 0
+
+
+def test_fixed_claims_require_searched_corpus_to_match_reviewed_files(policy_rows, monkeypatch):
+    # The files were restored after setup, while the searched snapshot still contains
+    # a superseding policy alongside unchanged, individually reviewed chunks.
+    superseding = {"id": 99, "doc": "superseding.md", "chunk": "The earlier policy is revoked."}
+    monkeypatch.setattr("agent.search_policies", lambda _: {
+        "sql": "SELECT policy evidence", "params": {}, "rows": [*policy_rows, superseding],
+        "source_hash": "v" * 32 + "b" * 32})
+
+    result = answer_question("West since July 2025")
+
+    assert not any(claim["kind"] in {"reason", "action"} for claim in result["claims"])
 
 
 @pytest.mark.parametrize("filename,contradiction", [
@@ -1941,10 +2111,36 @@ def test_updated_policy_source_invalidates_unchanged_retrieved_chunk(policy_rows
     assert result["dropped_count"] == 0
 
 
+@pytest.mark.parametrize("region,cutoff", [("West", "August 2025"), ("East", "July 2025")])
+@pytest.mark.parametrize("margin_available", [True, False])
+def test_nondefault_comparison_does_not_make_uncited_policy_claims(
+        policy_rows, tmp_path, monkeypatch, region, cutoff, margin_available):
+    import agent
+
+    summary = dict(agent.run_sql("SELECT ...")["rows"][0], region_name=region)
+    if not margin_available:
+        summary.update(after_margin_pct=None, after_revenue=0, margin_direction=None, margin_drop_pts=None)
+    monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
+        "sql": sql, "params": params or {}, "rows": [summary]})
+    for policy in policy_rows:
+        if policy["doc"] == "west_q3_volume_push.md":
+            policy["chunk"] += f"\n\nThe freight contract caused {region} margin to fall since {cutoff}."
+        (tmp_path / policy["doc"]).write_text(policy["chunk"], encoding="utf-8")
+    monkeypatch.setattr("agent.DOCS", tmp_path)
+
+    result = answer_question(f"Why did {region} margin fall since {cutoff}?")
+
+    reason = next(claim for claim in result["claims"] if claim["kind"] == "reason")
+    assert not reason["policy_ids"]
+    assert "no verified policy explanation is available" in reason["parts"][0]["text"].lower()
+    assert "do not establish a cause" not in reason["parts"][0]["text"].lower()
+
+
 @pytest.mark.parametrize("revision", ["unchanged", "superseding", "missing"])
 def test_fixed_policy_claims_require_reviewed_complete_corpus(policy_rows, tmp_path, monkeypatch, revision):
     for policy in policy_rows:
-        (tmp_path / policy["doc"]).write_text(policy["chunk"], encoding="utf-8")
+        content = (Path(__file__).with_name("docs") / policy["doc"]).read_text(encoding="utf-8")
+        (tmp_path / policy["doc"]).write_text(content, encoding="utf-8")
     if revision == "superseding":
         (tmp_path / "superseding.md").write_text(
             "The West discount push is revoked; do not follow the earlier freight recommendations.",
@@ -2013,7 +2209,8 @@ def retrieved_policy_rows(monkeypatch):
     rows = [{"id": index, "doc": path.name, "chunk": path.read_text(encoding="utf-8")}
             for index, path in enumerate(sorted(Path(__file__).with_name("docs").glob("*.md")), 1)]
     monkeypatch.setattr("agent.search_policies", lambda _: {
-        "sql": "SELECT ...", "params": {}, "rows": rows})
+        "sql": "SELECT ...", "params": {}, "rows": rows,
+        "source_hash": policy_source_hash(Path(__file__).with_name("docs"))})
     return rows
 
 
@@ -3111,6 +3308,9 @@ def test_question_validation_errors_are_associated_and_focused(monkeypatch):
         def __init__(self):
             super().__init__()
             self.question = None
+            self.hint = None
+            self.hint_text = ""
+            self.in_hint = False
             self.alert = None
             self.alert_text = ""
             self.in_alert = False
@@ -3119,21 +3319,31 @@ def test_question_validation_errors_are_associated_and_focused(monkeypatch):
             attrs = dict(attrs)
             if tag == "input" and attrs.get("id") == "question":
                 self.question = attrs
+            if tag == "p" and attrs.get("class") == "hint" and self.hint is None:
+                self.hint = attrs
+                self.in_hint = True
             if tag == "p" and attrs.get("role") == "alert":
                 self.alert = attrs
                 self.in_alert = True
 
         def handle_data(self, data):
+            if self.in_hint:
+                self.hint_text += data
             if self.in_alert:
                 self.alert_text += data
 
         def handle_endtag(self, tag):
             if tag == "p":
+                self.in_hint = False
                 self.in_alert = False
 
     def parse(response):
         parser = FormParser()
         parser.feed(response.get_data(as_text=True))
+        assert parser.hint.get("id")
+        assert parser.hint["id"] in parser.question.get("aria-describedby", "").split()
+        assert "Fixed analysis of margin, discounts and freight" in parser.hint_text
+        assert "defaults are West and July 2025" in parser.hint_text
         return parser
 
     client = app.test_client()
@@ -3147,8 +3357,8 @@ def test_question_validation_errors_are_associated_and_focused(monkeypatch):
         assert response.status_code == status
         page = parse(response)
         assert page.question.get("aria-invalid") == "true"
-        assert page.question.get("aria-describedby") == page.alert.get("id")
-        assert page.question.get("aria-describedby")
+        assert page.alert.get("id")
+        assert set(page.question["aria-describedby"].split()) == {page.hint["id"], page.alert["id"]}
         assert "autofocus" in page.question
         assert "autofocus" not in page.alert
         assert message in page.alert_text
@@ -3162,6 +3372,7 @@ def test_question_validation_errors_are_associated_and_focused(monkeypatch):
         assert response.status_code == status
         page = parse(response)
         assert "aria-invalid" not in page.question
+        assert page.question["aria-describedby"].split() == [page.hint["id"]]
         assert "autofocus" not in page.question
         if status == 503:
             assert page.alert.get("tabindex") == "-1"
@@ -3181,6 +3392,26 @@ def test_ui_validation_and_safe_error(monkeypatch):
     response = client.post("/", data={"question": "West"})
     assert response.status_code == 503
     assert b"secret-driver-settings" not in response.data
+
+
+def test_ui_reports_monthly_evidence_row_limit(monkeypatch):
+    connection = MagicMock()
+    cursor = connection.__enter__.return_value.cursor.return_value.__enter__.return_value
+    cursor.description = [("REGION_NAME",)]
+    cursor.fetchmany.return_value = [("West",)] * 1001
+    monkeypatch.setattr("tools.connect", lambda: connection)
+    policies = MagicMock()
+    monkeypatch.setattr("agent.search_policies", policies)
+
+    response = app.test_client().post("/", data={"question": "West"})
+
+    assert response.status_code == 503
+    message = response.get_data(as_text=True).lower()
+    assert "evidence query returned more than 1,000 rows" in message
+    assert "filter the sales data or aggregate the evidence query into fewer rows" in message
+    assert "oracle connection and policy setup" not in message
+    cursor.fetchmany.assert_called_once_with(1001)
+    policies.assert_not_called()
 
 
 @pytest.mark.parametrize("column, message", [
