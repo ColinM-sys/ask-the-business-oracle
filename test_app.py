@@ -117,9 +117,18 @@ def test_policy_vector_search_and_idempotent_setup():
     assert policies["rows"] == sorted(policies["rows"], key=lambda r: (r["distance"], r["id"]))
 
 
-def test_real_select_and_bind():
-    result = tools.run_sql("SELECT region_name FROM regions WHERE region_name=:name", {"name": "West"})
+@pytest.mark.parametrize("ending", ["", ";", "; -- report", "; /* report */"])
+def test_real_select_and_bind(ending):
+    sql = "SELECT region_name FROM regions WHERE region_name=:name" + ending
+    result = tools.run_sql(sql, {"name": "West"})
     assert result["rows"] == [{"region_name": "West"}]
+    assert result["sql"] == sql
+
+
+def test_select_preserves_semicolon_in_string():
+    result = tools.run_sql("SELECT 'West; -- report' AS label FROM regions WHERE region_name=:name; -- report",
+                           {"name": "West"})
+    assert result["rows"] == [{"label": "West; -- report"}]
 
 
 def test_flask_live_brief_and_evidence():
