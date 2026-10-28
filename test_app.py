@@ -21,7 +21,7 @@ from packaging.requirements import Requirement
 import db
 import tools
 from db import connect
-from agent import answer_question, parse_question, summary_sql
+from agent import DataQualityError, DiscountDataQualityError, answer_question, parse_question, summary_sql
 from app import app
 from critic import critique, supported
 from policies import ensure_policies, hash_embedding
@@ -536,7 +536,7 @@ def test_missing_discount_inputs_reject_analysis(column, region_id, month, incom
             return result
 
         monkeypatch.setattr("agent.run_sql", run_sql)
-        with pytest.raises(ValueError, match="Missing discount inputs"):
+        with pytest.raises(DiscountDataQualityError, match="Missing discount inputs"):
             answer_question("West since July 2025")
         policies.assert_not_called()
         for snapshot in snapshots:
@@ -546,6 +546,13 @@ def test_missing_discount_inputs_reject_analysis(column, region_id, month, incom
                         assert row["discount_pct"] is None
                     else:
                         assert row[f"{period}_discount_pct"] is None
+
+        set_input(None)
+        monkeypatch.setattr("agent.run_sql", execute)
+        response = app.test_client().post("/", data={"question": "West since July 2025"})
+        assert response.status_code == 503
+        assert b"Correct missing discount, quantity, or unit price inputs, then retry." in response.data
+        policies.assert_not_called()
 
 
 @pytest.mark.parametrize("region_id", [1, 2])
@@ -584,12 +591,12 @@ def test_missing_monthly_costs_reject_incomplete_analysis(region_id, month, prod
         policies = MagicMock(return_value={"rows": []})
         monkeypatch.setattr("agent.run_sql", run_sql)
         monkeypatch.setattr("agent.search_policies", policies)
-        with pytest.raises(ValueError, match="Missing monthly costs"):
+        with pytest.raises(DataQualityError, match="Missing monthly costs"):
             answer_question("West since July 2025")
         policies.assert_not_called()
         response = app.test_client().post("/", data={"question": "West since July 2025"})
         assert response.status_code == 503
-        assert b"Missing monthly costs" not in response.data
+        assert b"Correct missing, incomplete, or duplicate monthly cost records, then retry." in response.data
 
         if cost is None:
             con.execute("INSERT INTO costs VALUES (?, ?, ?, 60.0, 5.0)",
@@ -636,7 +643,7 @@ def test_monthly_evidence_rejects_null_costs_repaired_before_summary(
         policies = MagicMock(return_value={"rows": []})
         monkeypatch.setattr("agent.run_sql", run_sql)
         monkeypatch.setattr("agent.search_policies", policies)
-        with pytest.raises(ValueError, match="Missing monthly costs"):
+        with pytest.raises(DataQualityError, match="Missing monthly costs"):
             answer_question("West since July 2025")
         assert calls == 2
         policies.assert_not_called()
@@ -698,9 +705,15 @@ def test_duplicate_monthly_costs_reject_analysis(region_id, unit_cogs, duplicate
             return rows
 
         monkeypatch.setattr("agent.run_sql", run_sql)
-        with pytest.raises(ValueError, match="duplicate"):
+        with pytest.raises(DataQualityError, match="duplicate"):
             answer_question("West since July 2025")
         policies.assert_not_called()
+        if duplicate_when == "monthly":
+            insert_duplicate()
+        monkeypatch.setattr("agent.run_sql", execute)
+        response = app.test_client().post("/", data={"question": "West since July 2025"})
+        assert response.status_code == 503
+        assert b"Correct missing, incomplete, or duplicate monthly cost records, then retry." in response.data
 
 
 @pytest.mark.parametrize("rows", [[], [{"region_name": "East"}]])
@@ -1636,6 +1649,32 @@ def test_ui_sanitizes_invalid_policy_encoding(tmp_path, monkeypatch):
     assert response.status_code == 503
     assert b"Analysis unavailable. Check the local Oracle connection and policy setup, then retry." in response.data
     assert b"codec" not in response.data
+
+
+def test_ui_sanitizes_data_quality_error(monkeypatch):
+    def failure(_):
+        raise DataQualityError("private-data-quality-details")
+
+    monkeypatch.setattr("app.answer_question", failure)
+    response = app.test_client().post("/", data={"question": "West"})
+
+    assert response.status_code == 503
+    assert b"Correct missing, incomplete, or duplicate monthly cost records, then retry." in response.data
+    assert b"private-data-quality-details" not in response.data
+    assert b"Oracle connection" not in response.data
+
+
+def test_ui_sanitizes_discount_data_quality_error(monkeypatch):
+    def failure(_):
+        raise DiscountDataQualityError("private-data-quality-details")
+
+    monkeypatch.setattr("app.answer_question", failure)
+    response = app.test_client().post("/", data={"question": "West"})
+
+    assert response.status_code == 503
+    assert b"Correct missing discount, quantity, or unit price inputs, then retry." in response.data
+    assert b"private-data-quality-details" not in response.data
+    assert b"Oracle connection" not in response.data
 
 
 def test_ui_sanitizes_downstream_value_error(monkeypatch):
