@@ -123,6 +123,36 @@ def test_critic_drops_unsupported_numbers_and_preserves_valid(sample_evidence):
     assert len(dropped) == 3
 
 
+@pytest.mark.parametrize("text", [
+    "Margin fell thirteen points.", "Margin fell THIRTEEN points.",
+    "Margin fell twenty-one points.", "Margin fell one hundred points.",
+    "Margin fell half a point.", "Margin fell a dozen points.",
+    "Margin fell a couple of points.", "Margin fell a pair of points.",
+    "Margin was first in the region.",
+])
+@pytest.mark.parametrize("split", [False, True])
+def test_critic_rejects_uncited_number_words(sample_evidence, text, split):
+    parts = [{"text": character} for character in text] if split else [{"text": text}]
+    claim = {"parts": parts}
+    assert critique([claim], sample_evidence) == ([], [claim])
+
+
+@pytest.mark.parametrize("prefix", [
+    "Margin is minus ", "Margin is NEGATIVE ", "Margin is plus ", "Margin is minus $",
+])
+@pytest.mark.parametrize("split", [False, True])
+def test_critic_rejects_sign_words_outside_cited_value(sample_evidence, prefix, split):
+    parts = [{"text": character} for character in prefix] if split else [{"text": prefix}]
+    claim = {"parts": parts + [
+        {"value": 25.53, "evidence": "E1", "row": 0, "column": "margin"}]}
+    assert critique([claim], sample_evidence) == ([], [claim])
+
+
+def test_critic_preserves_words_containing_number_word_substrings(sample_evidence):
+    claim = {"parts": [{"text": "Freight costs increased, and someone reviewed the contract."}]}
+    assert critique([claim], sample_evidence) == ([claim], [])
+
+
 @pytest.mark.parametrize("change", [
     {"row": -1}, {"row": 10}, {"column": "missing"}, {"evidence": "missing"},
     {"value": "NaN"}, {"value": "Infinity"}, {"evidence": "P1", "value": 99},
@@ -132,7 +162,10 @@ def test_critic_refuses_invalid_cell_references(sample_evidence, change):
     assert not supported(part, sample_evidence)
 
 
-@pytest.mark.parametrize("prefix", ["Margin: -", "Margin: +", "Margin: \u2212", "Margin: - "])
+@pytest.mark.parametrize("prefix", [
+    "Margin: -", "Margin: +", "Margin: \u2212", "Margin: - ",
+    "Margin: -$", "Margin: - $ ", "Margin: + € ", "Margin: \u2212£",
+])
 @pytest.mark.parametrize("split", [False, True])
 def test_critic_refuses_signs_outside_cited_value(sample_evidence, prefix, split):
     texts = [{"text": prefix}]
@@ -147,6 +180,9 @@ def test_critic_preserves_cited_negative_value(sample_evidence):
     sample_evidence["E1"]["rows"][0]["margin"] = -25.53
     claim = {"parts": [{"text": "Margin: "},
         {"value": -25.53, "suffix": "%", "evidence": "E1", "row": 0, "column": "margin"}]}
+    assert critique([claim], sample_evidence) == ([claim], [])
+
+
 @pytest.mark.parametrize("suffix", [" million", " billion", "k", "M", "e6", "0", " percent", None])
 def test_critic_rejects_unsupported_suffixes(sample_evidence, suffix):
     claim = {"parts": [{"value": 25.53, "suffix": suffix,
