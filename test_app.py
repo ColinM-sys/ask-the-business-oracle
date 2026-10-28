@@ -2111,6 +2111,31 @@ def test_updated_policy_source_invalidates_unchanged_retrieved_chunk(policy_rows
     assert result["dropped_count"] == 0
 
 
+@pytest.mark.parametrize("region,cutoff", [("West", "August 2025"), ("East", "July 2025")])
+@pytest.mark.parametrize("margin_available", [True, False])
+def test_nondefault_comparison_does_not_make_uncited_policy_claims(
+        policy_rows, tmp_path, monkeypatch, region, cutoff, margin_available):
+    import agent
+
+    summary = dict(agent.run_sql("SELECT ...")["rows"][0], region_name=region)
+    if not margin_available:
+        summary.update(after_margin_pct=None, after_revenue=0, margin_direction=None, margin_drop_pts=None)
+    monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
+        "sql": sql, "params": params or {}, "rows": [summary]})
+    for policy in policy_rows:
+        if policy["doc"] == "west_q3_volume_push.md":
+            policy["chunk"] += f"\n\nThe freight contract caused {region} margin to fall since {cutoff}."
+        (tmp_path / policy["doc"]).write_text(policy["chunk"], encoding="utf-8")
+    monkeypatch.setattr("agent.DOCS", tmp_path)
+
+    result = answer_question(f"Why did {region} margin fall since {cutoff}?")
+
+    reason = next(claim for claim in result["claims"] if claim["kind"] == "reason")
+    assert not reason["policy_ids"]
+    assert "no verified policy explanation is available" in reason["parts"][0]["text"].lower()
+    assert "do not establish a cause" not in reason["parts"][0]["text"].lower()
+
+
 @pytest.mark.parametrize("revision", ["unchanged", "superseding", "missing"])
 def test_fixed_policy_claims_require_reviewed_complete_corpus(policy_rows, tmp_path, monkeypatch, revision):
     for policy in policy_rows:
@@ -3239,6 +3264,9 @@ def test_question_validation_errors_are_associated_and_focused(monkeypatch):
         def __init__(self):
             super().__init__()
             self.question = None
+            self.hint = None
+            self.hint_text = ""
+            self.in_hint = False
             self.alert = None
             self.alert_text = ""
             self.in_alert = False
@@ -3247,21 +3275,31 @@ def test_question_validation_errors_are_associated_and_focused(monkeypatch):
             attrs = dict(attrs)
             if tag == "input" and attrs.get("id") == "question":
                 self.question = attrs
+            if tag == "p" and attrs.get("class") == "hint" and self.hint is None:
+                self.hint = attrs
+                self.in_hint = True
             if tag == "p" and attrs.get("role") == "alert":
                 self.alert = attrs
                 self.in_alert = True
 
         def handle_data(self, data):
+            if self.in_hint:
+                self.hint_text += data
             if self.in_alert:
                 self.alert_text += data
 
         def handle_endtag(self, tag):
             if tag == "p":
+                self.in_hint = False
                 self.in_alert = False
 
     def parse(response):
         parser = FormParser()
         parser.feed(response.get_data(as_text=True))
+        assert parser.hint.get("id")
+        assert parser.hint["id"] in parser.question.get("aria-describedby", "").split()
+        assert "Fixed analysis of margin, discounts and freight" in parser.hint_text
+        assert "defaults are West and July 2025" in parser.hint_text
         return parser
 
     client = app.test_client()
@@ -3275,8 +3313,8 @@ def test_question_validation_errors_are_associated_and_focused(monkeypatch):
         assert response.status_code == status
         page = parse(response)
         assert page.question.get("aria-invalid") == "true"
-        assert page.question.get("aria-describedby") == page.alert.get("id")
-        assert page.question.get("aria-describedby")
+        assert page.alert.get("id")
+        assert set(page.question["aria-describedby"].split()) == {page.hint["id"], page.alert["id"]}
         assert "autofocus" in page.question
         assert "autofocus" not in page.alert
         assert message in page.alert_text
@@ -3290,6 +3328,7 @@ def test_question_validation_errors_are_associated_and_focused(monkeypatch):
         assert response.status_code == status
         page = parse(response)
         assert "aria-invalid" not in page.question
+        assert page.question["aria-describedby"].split() == [page.hint["id"]]
         assert "autofocus" not in page.question
         if status == 503:
             assert page.alert.get("tabindex") == "-1"

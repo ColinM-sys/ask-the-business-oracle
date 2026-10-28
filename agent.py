@@ -270,7 +270,7 @@ def answer_question(question):
     else:
         claim("reason", [text(("Use the discount and freight movements to investigate the margin change. "
             if margin_available else "Review the discount and freight movements alongside margin when available. ")
-            + "The retrieved West-specific documents do not establish a cause for this region and comparison period.")])
+            + "No verified policy explanation is available for this region and comparison period.")])
     pricing = policy_ids("pricing_policy.md")
     playbook = policy_ids("regional_playbook.md")
     if pricing and playbook:
