@@ -1,4 +1,5 @@
 """Unit checks and live integration against the existing local Oracle tables."""
+from array import array
 import copy
 import json
 import runpy
@@ -118,10 +119,33 @@ def test_critic_rejects_units_and_magnitudes_in_adjacent_text(sample_evidence, m
     assert critique([claim], sample_evidence) == ([], [claim])
 
 
-def test_hashing_is_stable_and_normalized():
-    first = hash_embedding("West freight contract")
-    assert first == hash_embedding("West freight contract")
+@pytest.mark.parametrize("text", ["West freight contract", "123", "折扣政策", "тарифы"])
+def test_hashing_is_stable_and_normalized(text):
+    first = hash_embedding(text)
+    assert first == hash_embedding(text)
     assert abs(sum(v*v for v in first) - 1) < 0.000001
+
+
+@pytest.mark.parametrize("text", ["", " \n\t", "!!!", "___", "😀"])
+def test_hashing_rejects_zero_vectors(text):
+    with pytest.raises(ValueError, match="non-zero"):
+        hash_embedding(text)
+
+
+def test_policy_search_rejects_zero_model_vector_before_cosine(monkeypatch):
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value.__enter__.return_value
+    cursor.execute.return_value.fetchone.side_effect = [
+        ("ZERO_MODEL",), (array("f", [0.0, 0.0]),)]
+    monkeypatch.setattr(tools, "ensure_policies", lambda: None)
+    monkeypatch.setattr(tools, "connect", lambda: connection)
+
+    with pytest.raises(ValueError, match="non-zero"):
+        tools.search_policies("West freight")
+
+    assert not any("VECTOR_DISTANCE" in call.args[0]
+                   for call in cursor.execute.call_args_list)
 
 
 @pytest.mark.parametrize("failure", [
@@ -155,8 +179,8 @@ def test_policy_probe_propagates_unexpected_failures(failure, tmp_path, monkeypa
 
 
 @pytest.mark.parametrize("models, expected", [
-    ([], "hash-v1-512"),
-    ([("INCOMPATIBLE_MODEL",)], "hash-v1-512"),
+    ([], "hash-v2-512"),
+    ([("INCOMPATIBLE_MODEL",)], "hash-v2-512"),
     ([("INCOMPATIBLE_MODEL",), ("GOOD_MODEL",)], "GOOD_MODEL"),
 ])
 def test_policy_probe_fallback_is_explicit_and_sanitized(
@@ -182,7 +206,7 @@ def test_policy_probe_fallback_is_explicit_and_sanitized(
     if models:
         assert "INCOMPATIBLE_MODEL" in caplog.text
         assert "40290" in caplog.text
-    assert ("Using hash-v1-512 fallback" in caplog.text) == (expected == "hash-v1-512")
+    assert ("Using hash-v2-512 fallback" in caplog.text) == (expected == "hash-v2-512")
     assert "private-driver-details" not in caplog.text
     assert "forged log entry" not in caplog.text
 
@@ -198,6 +222,7 @@ def test_policy_chunks_fit_byte_limit(character, tmp_path, monkeypatch):
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
     connection.__enter__.return_value = connection
+    monkeypatch.setattr("policies.embed", lambda *args: hash_embedding("Business policy"))
 
     ensure_policies()
 
@@ -209,8 +234,13 @@ def test_policy_chunks_fit_byte_limit(character, tmp_path, monkeypatch):
     connection.commit.assert_called_once()
 
 
-def test_empty_policy_documents_preserve_existing_rows(tmp_path, monkeypatch):
-    (tmp_path / "empty.md").write_text(" \n\t\n ", encoding="utf-8")
+@pytest.mark.parametrize("content, error, message", [
+    (" \n\t\n ", RuntimeError, "No policy content"),
+    ("!!!", ValueError, "non-zero"),
+    ("😀", ValueError, "non-zero"),
+])
+def test_invalid_policy_documents_preserve_existing_rows(content, error, message, tmp_path, monkeypatch):
+    (tmp_path / "invalid.md").write_text(content, encoding="utf-8")
     connection = MagicMock()
     connection.__enter__.return_value = connection
     cursor = connection.cursor.return_value
@@ -219,7 +249,7 @@ def test_empty_policy_documents_preserve_existing_rows(tmp_path, monkeypatch):
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
 
-    with pytest.raises(RuntimeError, match="No policy content"):
+    with pytest.raises(error, match=message):
         ensure_policies()
 
     assert not any(call.args[0].lstrip().startswith(("DELETE", "INSERT"))
