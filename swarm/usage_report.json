@@ -1,7 +1,7 @@
 {
- "files": 6704,
+ "files": 8809,
  "first": "2026-10-28T12-36-00",
- "last": "2026-10-28T14-10-29",
+ "last": "2026-10-28T14-39-42",
  "by_component": {
   "Setup tests": {
    "calls": 19,
@@ -13,13 +13,13 @@
    "total": 505102
   },
   "TOTAL": {
-   "calls": 6704,
-   "completed": 3698,
-   "input": 648673756,
-   "cached": 523660692,
-   "output": 7702998,
-   "reasoning": 5233105,
-   "total": 656376754
+   "calls": 8809,
+   "completed": 5395,
+   "input": 1175266690,
+   "cached": 992971418,
+   "output": 13838007,
+   "reasoning": 9644194,
+   "total": 1189104697
   },
   "Swarm scaling test": {
    "calls": 442,
@@ -29,15 +29,6 @@
    "output": 503692,
    "reasoning": 80333,
    "total": 74789009
-  },
-  "Other": {
-   "calls": 404,
-   "completed": 42,
-   "input": 677335,
-   "cached": 65260,
-   "output": 1440,
-   "reasoning": 38,
-   "total": 678775
   },
   "App build (Codex)": {
    "calls": 1,
@@ -49,54 +40,72 @@
    "total": 538676
   },
   "AgentSocial": {
-   "calls": 1626,
-   "completed": 1554,
-   "input": 240405827,
-   "cached": 188867320,
-   "output": 1203560,
-   "reasoning": 315232,
-   "total": 241609387
+   "calls": 2177,
+   "completed": 1988,
+   "input": 418565313,
+   "cached": 345936802,
+   "output": 2023281,
+   "reasoning": 573117,
+   "total": 420588594
   },
   "Repo loop: reviewers": {
-   "calls": 3856,
-   "completed": 1305,
-   "input": 238366198,
-   "cached": 193977668,
-   "output": 5183702,
-   "reasoning": 4466031,
-   "total": 243549900
+   "calls": 5007,
+   "completed": 1985,
+   "input": 401103698,
+   "cached": 333652318,
+   "output": 8797542,
+   "reasoning": 7701066,
+   "total": 409901240
   },
   "Repo loop: fixers": {
-   "calls": 189,
-   "completed": 178,
-   "input": 58907093,
-   "cached": 54045763,
-   "output": 509925,
-   "reasoning": 213483,
-   "total": 59417018
+   "calls": 439,
+   "completed": 417,
+   "input": 175835188,
+   "cached": 163690001,
+   "output": 1503791,
+   "reasoning": 713935,
+   "total": 177338979
+  },
+  "project": {
+   "calls": 90,
+   "completed": 40,
+   "input": 560320,
+   "cached": 0,
+   "output": 200,
+   "reasoning": 0,
+   "total": 560520
+  },
+  "empty_cwd": {
+   "calls": 85,
+   "completed": 0,
+   "input": 0,
+   "cached": 0,
+   "output": 0,
+   "reasoning": 0,
+   "total": 0
   },
   "Merge bots": {
-   "calls": 167,
-   "completed": 158,
-   "input": 35005186,
-   "cached": 31947157,
-   "output": 283701,
-   "reasoning": 156216,
-   "total": 35288887
+   "calls": 549,
+   "completed": 504,
+   "input": 103890054,
+   "cached": 94934773,
+   "output": 992523,
+   "reasoning": 573971,
+   "total": 104882577
   }
  },
  "by_model": {
   "gpt-6.1-sol": {
-   "calls": 2411,
-   "completed": 2013,
-   "input": 172084253,
-   "cached": 108381558,
-   "output": 1190511,
-   "reasoning": 223444,
-   "total": 173274764
+   "calls": 2408,
+   "completed": 2011,
+   "input": 171967238,
+   "cached": 108316298,
+   "output": 1189271,
+   "reasoning": 223406,
+   "total": 173156509
   },
   "?": {
-   "calls": 367,
+   "calls": 141,
    "completed": 0,
    "input": 0,
    "cached": 0,
@@ -105,22 +114,22 @@
    "total": 0
   },
   "gpt-6-astra": {
-   "calls": 1604,
-   "completed": 542,
-   "input": 143231053,
+   "calls": 1868,
+   "completed": 678,
+   "input": 149262871,
    "cached": 121152397,
-   "output": 1233957,
-   "reasoning": 736822,
-   "total": 144465010
+   "output": 2111349,
+   "reasoning": 1576364,
+   "total": 151374220
   },
   "gpt-6.1-terra": {
-   "calls": 2322,
-   "completed": 1143,
-   "input": 333358450,
-   "cached": 294126737,
-   "output": 5278530,
-   "reasoning": 4272839,
-   "total": 338636980
+   "calls": 4392,
+   "completed": 2706,
+   "input": 854036581,
+   "cached": 763502723,
+   "output": 10537387,
+   "reasoning": 7844424,
+   "total": 864573968
   }
  }
 }
