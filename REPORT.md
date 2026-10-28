@@ -352,8 +352,8 @@ The orchestration code is in [`swarm/`](swarm), and the raw totals are in
 
 ## Acknowledgments
 
-The agents ran on OpenAI Codex with the event's API key. The orchestration scripts were developed with AI coding
-assistance (Claude Code), consistent with the co-author trailers in the commit history.
+The agents ran on OpenAI Codex with the event's API key. Thanks to the Codex + Oracle AI Database Hackathon
+organizers for the API access and the Oracle AI Database tooling.
 
 ## References
 

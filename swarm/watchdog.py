@@ -1,4 +1,4 @@
-"""Watch the swarm; exit (which alerts Claude) as soon as something needs fixing.
+"""Watch the swarm and log an alert as soon as something needs fixing.
 Every 60 s it appends a status line to watchdog.log. It exits with a reason when:
   - more than 30 Codex failures in the last minute (mass kill)
   - no Codex process running for 5 minutes while hammer.py is alive (stalled round)
