@@ -46,6 +46,8 @@ def summary_sql():
 
 MONTHS = {name: f"{index:02}" for index, name in enumerate(
     ("january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"), 1)}
+MONTHS.update({name[:3]: value for name, value in list(MONTHS.items())})
+MONTHS["sept"] = "09"
 
 
 def parse_question(question):
@@ -54,12 +56,19 @@ def parse_question(question):
     if len(region_matches) > 1:
         raise ValueError("Ask about one region at a time; the evidence includes all regions for comparison.")
     cutoff = "2025-07"
-    date = re.search(r"\b(20\d{2})-(0[1-9]|1[0-2])\b", question)
-    named = re.search(r"\b(" + "|".join(MONTHS) + r")\s+(20\d{2})\b", question, re.I)
+    date = re.search(r"\b(20\d{2})-(0[1-9]|1[0-2])\b(?![-/\d])", question)
+    month_pattern = r"\b(" + "|".join(MONTHS) + r")\b"
+    named = re.search(month_pattern + r"\.?\s+(20\d{2})\b(?![-/\d])", question, re.I)
     if date:
         cutoff = date.group(0)
     elif named:
         cutoff = named[2] + "-" + MONTHS[named[1].lower()]
+    # A recognized date must not hide another unsupported date expression.
+    matched = date or named
+    remaining = question[:matched.start()] + question[matched.end():] if matched else question
+    if (re.search(r"\b\d{4}\b|\b\d+[-/]\d+\b", remaining)
+            or re.search(month_pattern, remaining, re.I)):
+        raise ValueError("Unsupported date; use YYYY-MM or a month name and four-digit year.")
     return region_matches[0] if region_matches else "West", cutoff
 
 
