@@ -24,6 +24,19 @@ def validate_select(sql):
     if len(statements) != 1 or not isinstance(statements[0], exp.Select):
         raise ValueError("Only a single read-only SELECT is allowed")
     tree = statements[0]
+    for join in tree.find_all(exp.Join):
+        if join.kind == "CROSS" or not (join.args.get("on") or join.args.get("using")):
+            raise ValueError("Cartesian joins are refused; use an explicit join predicate")
+        if join.args.get("on"):
+            # Require a connecting equality in an AND clause, not ON 1=1 or
+            # an equality hidden behind OR TRUE. Resource limits bound other work.
+            predicates = join.args["on"].flatten() if isinstance(join.args["on"], exp.And) else [join.args["on"]]
+            if not any(isinstance(p, exp.EQ)
+                       and isinstance(p.left, exp.Column) and isinstance(p.right, exp.Column)
+                       and p.left.table and p.right.table and p.left.table != p.right.table
+                       and join.this.alias_or_name in {p.left.table, p.right.table}
+                       for p in predicates):
+                raise ValueError("Cartesian joins are refused; use a connecting column equality")
     if any(tree.find_all(exp.Into, exp.Lock, exp.Command, exp.Insert, exp.Update,
                          exp.Delete, exp.Create, exp.Drop, exp.Alter, exp.With)):
         raise ValueError("SQL writes, locks and procedural statements are refused")
@@ -44,7 +57,19 @@ def validate_select(sql):
 def run_sql(select, params=None):
     executable = validate_select(select)
     with connect() as con:
+        con.call_timeout = 15000  # milliseconds per database round trip, including fetches
         with con.cursor() as cur:
+            # Fail closed if the DBA has not installed/enabled the resource profile.
+            cur.execute("SELECT value FROM v$parameter WHERE name = 'resource_limit'")
+            if cur.fetchone()[0].upper() != "TRUE":
+                raise ValueError("Database resource limits must be enabled")
+            cur.execute("SELECT resource_name, limit FROM user_resource_limits "
+                        "WHERE resource_name IN ('CPU_PER_CALL', 'LOGICAL_READS_PER_CALL')")
+            limits = dict(cur.fetchall())
+            for name, maximum in (("CPU_PER_CALL", 1000), ("LOGICAL_READS_PER_CALL", 100000)):
+                value = limits.get(name, "")
+                if not str(value).isdigit() or not 0 < int(value) <= maximum:
+                    raise ValueError("Database resource profile must bound CPU and logical reads")
             cur.execute("SET TRANSACTION READ ONLY")
             cur.execute(executable, params or {})
             columns = [d[0].lower() for d in cur.description]

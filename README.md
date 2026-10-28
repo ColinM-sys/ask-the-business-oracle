@@ -38,6 +38,10 @@ were retrieved; West's explanation applies to the default change point.
 `run_sql` parses one SELECT, limits tables and functions to an allowlist, rejects
 writes/locks/sequences/procedural calls, and executes in a read-only transaction.
 It refuses evidence over the row limit instead of silently truncating it.
+Cartesian and implicit joins are refused. Before running the app, a DBA must run
+`data/resource_limits.sql` in the application PDB to cap each database call at
+10 CPU seconds and 100,000 logical reads. `run_sql` verifies these limits are
+enabled before executing evidence SQL and uses a 15-second driver call timeout.
 Policy setup is the separate write path. The Flask server binds only to localhost
 and runs without debug mode; this demo has no production authentication layer.
 

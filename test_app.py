@@ -28,6 +28,13 @@ from policies import ensure_policies, hash_embedding
     "SELECT * FROM sales UNION ALL SELECT * FROM sales",
     "SELECT * FROM sales FOR UPDATE SKIP LOCKED", "SELECT * FROM sales; COMMIT",
     "SELECT 'unterminated FROM sales",
+    "SELECT COUNT(*) FROM sales a CROSS JOIN sales b CROSS JOIN sales c CROSS JOIN sales d",
+    "SELECT COUNT(*) FROM sales a, sales b",
+    "SELECT COUNT(*) FROM sales a JOIN sales b",
+    "SELECT COUNT(*) FROM sales a JOIN sales b ON 1=1",
+    "SELECT COUNT(*) FROM sales a JOIN sales b ON a.product_id=a.product_id",
+    "SELECT COUNT(*) FROM sales a JOIN sales b ON a.product_id=b.product_id OR 1=1",
+    "SELECT COUNT(*) FROM (SELECT COUNT(*) FROM sales a CROSS JOIN sales b)",
 ])
 def test_guard_refuses_before_connect(sql, monkeypatch):
     def forbidden_connection():
@@ -40,6 +47,51 @@ def test_guard_refuses_before_connect(sql, monkeypatch):
 def test_guard_accepts_comments_and_harmless_string():
     tools.validate_select("/* report */ SELECT COUNT(*) FROM sales WHERE sale_month=:month;")
     tools.validate_select("SELECT 'DROP TABLE sales' AS harmless FROM regions")
+    tools.validate_select("SELECT COUNT(*) FROM sales a JOIN sales b ON a.product_id=b.product_id")
+    tools.validate_select("SELECT COUNT(*) FROM sales a JOIN sales b USING (product_id)")
+
+
+@pytest.mark.parametrize("enabled,limits", [
+    ("FALSE", [("CPU_PER_CALL", "1000"), ("LOGICAL_READS_PER_CALL", "100000")]),
+    ("TRUE", []),
+    ("TRUE", [("CPU_PER_CALL", "UNLIMITED"), ("LOGICAL_READS_PER_CALL", "100000")]),
+    ("TRUE", [("CPU_PER_CALL", "1000"), ("LOGICAL_READS_PER_CALL", "100001")]),
+])
+def test_sql_requires_database_resource_limits(enabled, limits, monkeypatch):
+    con = MagicMock()
+    con.__enter__.return_value = con
+    cur = con.cursor.return_value.__enter__.return_value
+    cur.fetchone.return_value = (enabled,)
+    cur.fetchall.return_value = limits
+    monkeypatch.setattr(tools, "connect", lambda: con)
+
+    with pytest.raises(ValueError, match="resource"):
+        tools.run_sql("SELECT COUNT(*) FROM sales")
+
+    assert con.call_timeout == 15000
+    assert not any(call.args[0].startswith("SELECT COUNT") for call in cur.execute.call_args_list)
+
+
+def test_sql_resource_limits_and_timeout_precede_execution(monkeypatch):
+    con = MagicMock()
+    con.__enter__.return_value = con
+    cur = con.cursor.return_value.__enter__.return_value
+    cur.fetchone.return_value = ("TRUE",)
+    cur.fetchall.return_value = [("CPU_PER_CALL", "1000"), ("LOGICAL_READS_PER_CALL", "100000")]
+    cur.description = [("N",)]
+    cur.fetchmany.return_value = [(42,)]
+    sql = "SELECT COUNT(*) AS n FROM sales"
+
+    def execute(statement, *args):
+        assert con.call_timeout == 15000
+        if statement == sql:
+            assert cur.fetchall.called
+            assert cur.execute.call_args_list[-2].args == ("SET TRANSACTION READ ONLY",)
+
+    cur.execute.side_effect = execute
+    monkeypatch.setattr(tools, "connect", lambda: con)
+    assert tools.run_sql(sql)["rows"] == [{"n": 42}]
+    cur.fetchmany.assert_called_once_with(1001)
 
 
 @pytest.fixture
