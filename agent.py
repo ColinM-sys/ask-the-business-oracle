@@ -15,8 +15,22 @@ class DataQualityError(ValueError):
     """The underlying business data cannot support a reliable analysis."""
 
 
+class MissingCostsError(DataQualityError):
+    """The sales data has missing or ambiguous costs."""
+
+    message = ("Missing monthly costs or duplicate cost rows for some sales. "
+               "Check the costs table for missing rows or values and duplicate rows.")
+
+
 class DiscountDataQualityError(DataQualityError):
     """Discount inputs are missing from the underlying sales data."""
+
+
+class MissingDiscountInputsError(DiscountDataQualityError):
+    """The sales data lacks inputs needed to calculate discounts."""
+
+    message = ("Missing discount inputs for some sales. "
+               "Check discount, quantity, and unit price values in the sales table.")
 
 
 class RevenueDataQualityError(DataQualityError):
@@ -144,11 +158,11 @@ def answer_question(question):
     if index is None:
         raise QuestionValidationError(f"No sales/cost data found for {region}.")
     if any(row["missing_cost_count"] for key in ("E1", "E2") for row in evidence[key]["rows"]):
-        raise DataQualityError("Missing monthly costs or duplicate cost rows for some sales; cannot analyze incomplete or ambiguous data.")
+        raise MissingCostsError(MissingCostsError.message)
     if any(row["missing_revenue_count"] for key in ("E1", "E2") for row in evidence[key]["rows"]):
         raise RevenueDataQualityError("Missing net revenue for some sales; cannot analyze incomplete data.")
     if any(row["missing_discount_count"] for key in ("E1", "E2") for row in evidence[key]["rows"]):
-        raise DiscountDataQualityError("Missing discount inputs for some sales; cannot analyze incomplete data.")
+        raise MissingDiscountInputsError(MissingDiscountInputsError.message)
     row = rows[index]
     if row["before_margin_pct"] is None or row["after_margin_pct"] is None:
         raise QuestionValidationError(
