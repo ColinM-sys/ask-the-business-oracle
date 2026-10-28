@@ -34,7 +34,7 @@ def critique(claims, evidence):
     for claim in claims:
         valid = bool(claim.get("parts"))
         rendered = ""
-        number_tails = []
+        number_tails, value_spans = [], []
         for part in claim.get("parts", []):
             if "text" in part:
                 valid &= not bool(re.search(r"\d", part["text"]))
@@ -47,8 +47,16 @@ def critique(claims, evidence):
                 valid &= supported(part, evidence)
                 # Only literal units are supported; magnitude conversions are not.
                 valid &= part.get("suffix", "") in ("", "%", " percentage points")
-                rendered += str(part.get("value", "")) + str(part.get("suffix") or "")
+                value = str(part.get("value", ""))
+                value_spans.append((len(rendered), len(rendered) + len(value)))
+                rendered += value + str(part.get("suffix") or "")
                 number_tails.append("")
+        # A rendered number must not combine values or punctuation from different parts.
+        number_pattern = (r"(?:\d+(?:,\d{3})*(?:\.\d*)?|\.\d+)[eE][+-]?\d+"
+                          r"|\d+(?:,\d{3})*(?:\.\d+)?|\.\d+")
+        valid &= all(any(start <= match.start() and match.end() <= end
+                         for start, end in value_spans)
+                     for match in re.finditer(number_pattern, rendered))
         # Join adjacent text parts so splitting a modifier cannot hide it.
         valid &= not any(re.match(
             r"\s*(?:%|(?:hundred|thousand|million|billion|trillion|percent|percentage|"

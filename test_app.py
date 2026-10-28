@@ -140,6 +140,41 @@ def test_critic_drops_unsupported_numbers_and_preserves_valid(sample_evidence):
     assert len(dropped) == 3
 
 
+@pytest.mark.parametrize("connector, second", [
+    ("", 2), (".", 2), ("e", 2), ("E", 2), (".e", 2),
+    ("e", -2), (",", 234),
+])
+@pytest.mark.parametrize("split", [False, True])
+def test_critic_rejects_numbers_assembled_from_parts(sample_evidence, connector, second, split):
+    sample_evidence["E1"]["rows"][0].update(first=1, second=second)
+    texts = [{"text": char} for char in connector] if split else [{"text": connector}]
+    claim = {"parts": [
+        {"value": 1, "evidence": "E1", "row": 0, "column": "first"},
+        *texts,
+        {"value": second, "evidence": "E1", "row": 0, "column": "second"},
+    ]}
+    assert critique([claim], sample_evidence) == ([], [claim])
+
+
+def test_critic_rejects_decimal_point_outside_cited_value(sample_evidence):
+    sample_evidence["E1"]["rows"][0]["number"] = 2
+    claim = {"parts": [{"text": "."},
+        {"value": 2, "evidence": "E1", "row": 0, "column": "number"}]}
+    assert critique([claim], sample_evidence) == ([], [claim])
+
+
+@pytest.mark.parametrize("value, cell", [("1.2", 1.2), ("1.e2", 100), ("2025-07", "2025-07")])
+def test_critic_preserves_complete_cited_numbers(sample_evidence, value, cell):
+    sample_evidence["E1"]["rows"][0].update(first=1, second=cell)
+    claim = {"parts": [
+        {"value": 1, "evidence": "E1", "row": 0, "column": "first"},
+        {"text": ", "},
+        {"value": value, "evidence": "E1", "row": 0, "column": "second"},
+        {"text": "."},
+    ]}
+    assert critique([claim], sample_evidence) == ([claim], [])
+
+
 @pytest.mark.parametrize("change", [
     {"row": -1}, {"row": 10}, {"column": "missing"}, {"evidence": "missing"},
     {"value": "NaN"}, {"value": "Infinity"}, {"evidence": "P1", "value": 99},
