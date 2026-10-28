@@ -2107,29 +2107,67 @@ def test_ui_boundaries_contrast_with_adjacent_backgrounds():
             assert contrast >= 3, f"Boundary {boundary} has {contrast:.2f}:1 contrast against {surface}"
 
 
-def test_ui_restores_submit_button_on_pageshow():
-    html = app.test_client().get("/").get_data(as_text=True)
-    script = html.rsplit("<script>", 1)[1].split("</script>", 1)[0]
-    subprocess.run(["node", "-e", """
+@pytest.mark.parametrize("has_result", [False, True])
+def test_ui_allows_retry_after_stopped_submission(monkeypatch, has_result):
+    monkeypatch.setattr("app.answer_question", lambda _: {
+        "region": "West", "claims": [], "dropped_count": 0, "evidence": {},
+    })
+    client = app.test_client()
+    response = client.post("/", data={"question": "West"}) if has_result else client.get("/")
+    html = response.get_data(as_text=True)
+
+    class SubmitButtonParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.button = None
+            self.label = ""
+            self.in_button = False
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == "button" and attrs.get("class") == "submit":
+                self.button = attrs
+                self.in_button = True
+
+        def handle_data(self, data):
+            if self.in_button:
+                self.label += data
+
+        def handle_endtag(self, tag):
+            if tag == "button":
+                self.in_button = False
+
+    parser = SubmitButtonParser()
+    parser.feed(html)
+    assert parser.button is not None
+    assert parser.button.get("type") == "submit"
+    assert "disabled" not in parser.button
+    assert parser.label == "Analyze question"
+
+    scripts = "\n".join(re.findall(r"<script>(.*?)</script>", html, re.DOTALL))
+    check = subprocess.run(["node", "-e", """
         const assert = require('node:assert/strict');
         const handlers = {};
         const button = {disabled: false, textContent: 'Analyze question'};
-        const form = {addEventListener: (event, handler) => handlers[event] = handler};
+        const form = {addEventListener: (event, handler) => (handlers[event] ??= []).push(handler)};
+        const other = {addEventListener() {}};
         global.document = {
-            getElementById: () => form,
+            getElementById: id => id === 'question-form' ? form : other,
             querySelector: () => button,
+            querySelectorAll: () => [],
         };
-        global.window = {addEventListener: (event, handler) => handlers[event] = handler};
-    """ + script + """
-        for (let visit = 0; visit < 2; visit++) {
-            handlers.submit();
-            assert.equal(button.disabled, true);
-            assert.equal(button.textContent, 'Analyzing\u2026');
-            handlers.pageshow({persisted: true});
+        global.window = {addEventListener() {}};
+    """ + scripts + """
+        // A stopped navigation produces no pageshow; the same form must be retryable.
+        for (let attempt = 0; attempt < 2; attempt++) {
+            for (const handler of handlers.submit || []) handler({preventDefault() {}});
             assert.equal(button.disabled, false);
             assert.equal(button.textContent, 'Analyze question');
         }
-    """], check=True, capture_output=True, text=True)
+    """], capture_output=True, text=True)
+    assert check.returncode == 0, check.stderr
+
+
 def test_evidence_dialog_preserves_exact_integers(monkeypatch):
     values = [9007199254740993, -9007199254740993, 10**37 + 1,
               9007199254740991, 0, 42, 1.25, None, True, False, "text"]
