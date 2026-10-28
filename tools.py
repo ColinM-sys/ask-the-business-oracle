@@ -1,6 +1,8 @@
 """Constrained, read-only business SQL and Oracle vector policy retrieval."""
 import json
+from decimal import Decimal
 
+import oracledb
 import sqlglot
 from sqlglot import exp
 
@@ -9,6 +11,11 @@ from policies import embed, ensure_policies
 
 TABLES = {"sales", "costs", "customers", "discounts", "products", "regions"}
 FUNCTIONS = {"SUM", "MIN", "MAX", "AVG", "COUNT", "ROUND", "NULLIF", "COALESCE", "ABS", "AND", "OR"}
+
+
+def _number_to_decimal(cursor, metadata):
+    if metadata.type_code is oracledb.DB_TYPE_NUMBER:
+        return cursor.var(Decimal, arraysize=cursor.arraysize)
 
 
 def validate_select(sql):
@@ -46,6 +53,7 @@ def run_sql(select, params=None):
     with connect() as con:
         with con.cursor() as cur:
             cur.execute("SET TRANSACTION READ ONLY")
+            cur.outputtypehandler = _number_to_decimal
             cur.execute(executable, params or {})
             columns = [d[0].lower() for d in cur.description]
             rows = cur.fetchmany(1001)
