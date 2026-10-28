@@ -159,6 +159,44 @@ def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
     for part in finding["parts"]:
         if "value" in part:
             assert supported(part, result["evidence"])
+@pytest.mark.parametrize("scenario", ["supported", "approval_required", "unrelated", "missing_push", "missing_freight"])
+def test_policy_reasons_require_supporting_chunks(monkeypatch, scenario):
+    row = {
+        "region_name": "West", "first_month": "2025-01", "last_month": "2025-09",
+        "before_last_month": "2025-06", "after_first_month": "2025-07",
+        "before_margin_pct": 40, "after_margin_pct": 25, "margin_drop_pts": 15,
+        "before_discount_pct": 3, "after_discount_pct": 18,
+        "before_freight_per_unit": 3, "after_freight_per_unit": 5,
+        "freight_increase_pct": 60,
+    }
+    docs = Path(__file__).with_name("docs")
+    policies = [{"id": i, "doc": name, "chunk": (docs / name).read_text(encoding="utf-8")}
+                for i, name in enumerate(("west_q3_volume_push.md", "freight_contract_memo.md"), 1)]
+    if scenario == "approval_required":
+        policies[0]["chunk"] = policies[0]["chunk"].replace(
+            "It was not sent to the VP Sales or to Finance\nfor a margin review.",
+            "It requires VP Sales approval and Finance margin review before launch.")
+        assert "It was not sent" not in policies[0]["chunk"]
+    elif scenario == "unrelated":
+        for policy in policies:
+            policy["chunk"] = "Owner: Regional operations. Contact the help desk for questions."
+    elif scenario.startswith("missing_"):
+        policies[0 if scenario == "missing_push" else 1]["chunk"] = "No supporting passage available."
+    monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
+        "sql": sql, "params": params or {}, "rows": [row]})
+    monkeypatch.setattr("agent.search_policies", lambda _: {
+        "sql": "SELECT policy chunks", "params": {}, "rows": policies})
+
+    result = answer_question("Why did West margin fall since July 2025?")
+
+    reasons = [c for c in result["claims"] if c["kind"] == "reason"]
+    assert bool(reasons) == (scenario in ("supported", "approval_required"))
+    for reason in reasons:
+        assert reason["policy_ids"] == ["P1", "P2"]
+        assert "bypassed" not in "".join(p.get("text", "") for p in reason["parts"])
+    assert result["dropped_count"] == 0
+
+
 @pytest.mark.parametrize("month", ["Jul", "jul.", "Sept", "SEP"])
 def test_question_month_abbreviations(month):
     expected = "07" if month.lower().startswith("jul") else "09"

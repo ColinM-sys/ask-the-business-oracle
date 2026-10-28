@@ -101,9 +101,14 @@ def answer_question(question):
         return {"value": rows[row_index][column], "evidence": "E2", "row": row_index,
                 "column": column, "suffix": suffix}
 
-    def policy_ids(filename):
+    def policy_ids(filename, passage=None):
+        # Match complete sentences, normalizing line wrapping but not wording.
+        # Unknown or revised passages conservatively omit the fixed explanation.
         return [key for key, value in evidence.items()
-                if value["kind"] == "policy" and value["rows"][0]["doc"] == filename]
+                if value["kind"] == "policy" and value["rows"][0]["doc"] == filename
+                and (passage is None or passage in [" ".join(sentence.split())
+                     for sentence in re.split(r"(?<=[.!?])\s+|\n\s*\n",
+                                              value["rows"][0].get("chunk", ""))])]
 
     claims = []
     def claim(kind, parts, citations=None):
@@ -129,9 +134,12 @@ def answer_question(question):
                 number("before_margin_pct", "%", other_index), text(" before; "),
                 number("after_margin_pct", "%", other_index), text(" after.")])
     if region == "West" and cutoff == "2025-07":
-        push, freight = policy_ids("west_q3_volume_push.md"), policy_ids("freight_contract_memo.md")
+        push = policy_ids("west_q3_volume_push.md",
+            "To defend share against a new competitor in the Pacific Northwest, West will offer discounts of 15-22% on most deals from 1 July 2025.")
+        freight = policy_ids("freight_contract_memo.md",
+            "From 1 July 2025 the West region moves from Norcal Freight to Pacific Haul Logistics.")
         if push and freight:
-            claim("reason", [text("The policy documents identify a regional volume discount push and a replacement freight contract. The discount program bypassed senior sales approval and Finance review. These changes are consistent with the observed margin decline; this comparison does not isolate their individual causal effects.")], push + freight)
+            claim("reason", [text("The policy documents identify a regional volume discount push and a replacement freight contract. These changes are consistent with the observed margin decline; this comparison does not isolate their individual causal effects.")], push + freight)
     else:
         claim("reason", [text("Use the discount and freight movements to investigate the margin change. The retrieved West-specific documents do not establish a cause for this region and comparison period.")])
     pricing = policy_ids("pricing_policy.md")
