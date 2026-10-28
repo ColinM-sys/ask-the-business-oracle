@@ -364,10 +364,11 @@ def test_question_scope():
 
 
 @pytest.mark.parametrize("region_id", [1, 2])
+@pytest.mark.parametrize("cost", [None, (None, 5.0), (60.0, None), (None, None)])
 @pytest.mark.parametrize("month,product_id", [
     ("2025-05", 1), ("2025-06", 2), ("2025-08", 1),
 ])
-def test_missing_monthly_costs_reject_incomplete_analysis(region_id, month, product_id, monkeypatch):
+def test_missing_monthly_costs_reject_incomplete_analysis(region_id, month, product_id, cost, monkeypatch):
     # Missing costs must not hide boundary months or sales within a covered month,
     # including sales in a comparison region.
     with sqlite3.connect(":memory:") as con:
@@ -387,6 +388,9 @@ def test_missing_monthly_costs_reject_incomplete_analysis(region_id, month, prod
                             (matched_region, matched_month))
         con.execute("INSERT INTO sales VALUES (?, ?, ?, 100.0, 1, 100.0, 0)",
                     (region_id, product_id, month))
+        if cost is not None:
+            con.execute("INSERT INTO costs VALUES (?, ?, ?, ?, ?)",
+                        (region_id, product_id, month, *cost))
 
         def run_sql(sql, params=None):
             return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
@@ -399,8 +403,13 @@ def test_missing_monthly_costs_reject_incomplete_analysis(region_id, month, prod
             answer_question("West since July 2025")
         policies.assert_not_called()
 
-        con.execute("INSERT INTO costs VALUES (?, ?, ?, 60.0, 5.0)",
-                    (region_id, product_id, month))
+        if cost is None:
+            con.execute("INSERT INTO costs VALUES (?, ?, ?, 60.0, 5.0)",
+                        (region_id, product_id, month))
+        else:
+            con.execute("UPDATE costs SET unit_cogs=0, freight_per_unit=0 "
+                        "WHERE region_id=? AND product_id=? AND cost_month=?",
+                        (region_id, product_id, month))
         assert answer_question("West since July 2025")["dropped_count"] == 0
 
 
