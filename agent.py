@@ -131,7 +131,10 @@ def answer_question(question):
         raise ValueError("Missing discount inputs for some sales; cannot analyze incomplete data.")
     row = rows[index]
     if row["before_margin_pct"] is None or row["after_margin_pct"] is None:
-        raise QuestionValidationError("The comparison date must have sales both before and after it.")
+        raise QuestionValidationError(
+            "The comparison date must have sales both before and after it. "
+            f"{region} sales are available from {row['first_month']} through {row['last_month']}. "
+            "The cutoff must be after the first month and no later than the last month.")
     policies = search_policies(f"{region} margin discount freight policy " + question)
     for policy in policies["rows"]:
         evidence[f"P{policy['id']}"] = {"kind": "policy",
