@@ -4,6 +4,7 @@ from flask import Flask, render_template, request
 from agent import answer_question
 
 app = Flask(__name__)
+app.config["TRUSTED_HOSTS"] = ["localhost", "127.0.0.1"]
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024
 
 

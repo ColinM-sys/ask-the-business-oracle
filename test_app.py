@@ -408,6 +408,34 @@ def test_select_preserves_semicolon_in_string():
     assert result["rows"] == [{"label": "West; -- report"}]
 
 
+@pytest.mark.parametrize("host", [
+    "attacker.example:5055", "localhost.attacker.example:5055",
+    "127.0.0.1.attacker.example:5055", "attacker.localhost:5055",
+])
+@pytest.mark.parametrize("method", ["GET", "POST"])
+def test_ui_rejects_untrusted_host_before_analysis(monkeypatch, host, method):
+    analysis = MagicMock(return_value=None)
+    monkeypatch.setattr("app.answer_question", analysis)
+
+    response = app.test_client().open(
+        "/", method=method, headers={"Host": host}, data={"question": "West"}
+    )
+
+    analysis.assert_not_called()
+    assert response.status_code == 400
+
+
+@pytest.mark.parametrize("host", ["localhost", "localhost:5055", "127.0.0.1", "127.0.0.1:5055"])
+def test_ui_accepts_trusted_hosts(monkeypatch, host):
+    analysis = MagicMock(return_value=None)
+    monkeypatch.setattr("app.answer_question", analysis)
+    client = app.test_client()
+
+    assert client.get("/", headers={"Host": host}).status_code == 200
+    assert client.post("/", headers={"Host": host}, data={"question": "West"}).status_code == 200
+    analysis.assert_called_once_with("West")
+
+
 def test_flask_live_brief_and_evidence():
     client = app.test_client()
     assert client.get("/").status_code == 200
