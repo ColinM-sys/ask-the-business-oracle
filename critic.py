@@ -29,12 +29,14 @@ def critique(claims, evidence):
     suffixes are limited to "", "%", and " percentage points", without checking
     the cell's units. Only selected adjacent text modifiers are rejected; other
     unit or magnitude modifiers, such as "quadrillion", may pass unchecked.
+    Each rendered numeric token must stay within one cited value.
     """
     kept, dropped = [], []
     for claim in claims:
         valid = bool(claim.get("parts"))
         rendered = ""
         number_tails = []
+        number_spans = []
         for part in claim.get("parts", []):
             if "text" in part:
                 valid &= not bool(re.search(r"\d", part["text"]))
@@ -47,8 +49,16 @@ def critique(claims, evidence):
                 valid &= supported(part, evidence)
                 # Only literal units are supported; magnitude conversions are not.
                 valid &= part.get("suffix", "") in ("", "%", " percentage points")
-                rendered += str(part.get("value", "")) + str(part.get("suffix") or "")
+                value = str(part.get("value", ""))
+                number_spans.append((len(rendered), len(rendered) + len(value)))
+                rendered += value + str(part.get("suffix") or "")
                 number_tails.append("")
+        # A decimal, exponent, or grouped number must not cross value boundaries.
+        valid &= all(any(start <= match.start() and match.end() <= end
+                         for start, end in number_spans)
+                     for match in re.finditer(
+                         r"(?:\d+(?:,\d{3})*(?:\.\d+|\.(?=[eE][+-]?\d))?|\.\d+)"
+                         r"(?:[eE][+-]?\d+)?", rendered))
         # Join adjacent text parts so splitting a modifier cannot hide it.
         valid &= not any(re.match(
             r"\s*(?:%|(?:hundred|thousand|million|billion|trillion|percent|percentage|"

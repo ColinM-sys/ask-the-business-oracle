@@ -180,6 +180,55 @@ def test_critic_preserves_supported_suffixes(sample_evidence, suffix):
     assert critique([claim], sample_evidence) == ([claim], [])
 
 
+@pytest.mark.parametrize("first,between,second,second_cell", [
+    (1, [], 2, 2),
+    (1, ["", ""], 2, 2),
+    (1, ["."], 2, 2),
+    (1, ["", ".", ""], 2, 2),
+    (1, ["e"], 2, 2),
+    (1, ["E", "+"], 2, 2),
+    (1, ["e"], -2, -2),
+    (1, [".", "e"], 2, 2),
+    (1, [","], 234, 234),
+    ("1.", [], 2, 2),
+    (1, [], ".2", 0.2),
+])
+def test_critic_rejects_numbers_assembled_from_cited_parts(first, between, second, second_cell):
+    evidence = {"E1": {"kind": "sql", "rows": [{"first": 1, "second": second_cell}]}}
+    claim = {"parts": [
+        {"value": first, "evidence": "E1", "row": 0, "column": "first"},
+        *[{"text": text} for text in between],
+        {"value": second, "evidence": "E1", "row": 0, "column": "second"},
+    ]}
+    assert critique([claim], evidence) == ([], [claim])
+
+
+def test_critic_rejects_decimal_point_outside_cited_value():
+    evidence = {"E1": {"kind": "sql", "rows": [{"value": 2}]}}
+    claim = {"parts": [{"text": "."},
+                       {"value": 2, "evidence": "E1", "row": 0, "column": "value"}]}
+    assert critique([claim], evidence) == ([], [claim])
+
+
+@pytest.mark.parametrize("between", [" ", " to ", ", ", " / "])
+def test_critic_preserves_separate_cited_numbers(between):
+    evidence = {"E1": {"kind": "sql", "rows": [{"first": 1, "second": 2}]}}
+    claim = {"parts": [
+        {"value": 1, "evidence": "E1", "row": 0, "column": "first"},
+        {"text": between},
+        {"value": 2, "evidence": "E1", "row": 0, "column": "second"},
+        {"text": "."},
+    ]}
+    assert critique([claim], evidence) == ([claim], [])
+
+
+@pytest.mark.parametrize("value", ["1e2", "1.e2", "1.2e2"])
+def test_critic_preserves_cited_scientific_notation(value):
+    evidence = {"E1": {"kind": "sql", "rows": [{"value": float(value)}]}}
+    claim = {"parts": [{"value": value, "evidence": "E1", "row": 0, "column": "value"}]}
+    assert critique([claim], evidence) == ([claim], [])
+
+
 @pytest.mark.parametrize("modifier", [" million", " billion", " thousand", "k", "M",
                                       " percent", "%", " percentage points", " basis points"])
 @pytest.mark.parametrize("split", [False, True])
