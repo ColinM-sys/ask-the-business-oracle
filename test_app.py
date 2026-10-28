@@ -411,10 +411,94 @@ def test_policy_search_handles_empty_table(monkeypatch):
 
 
 def test_question_scope():
-    assert parse_question("East since March 2025") == ("East", "2025-03")
-    assert parse_question("West since 2025-07") == ("West", "2025-07")
+    assert parse_question("East since March 2025") == ("East", "2025-03", None, None)
+    assert parse_question("West since 2025-07") == ("West", "2025-07", None, None)
+    assert parse_question("West to March 2025") == ("West", "2025-03", None, None)
     with pytest.raises(ValueError):
         parse_question("West and East")
+
+
+@pytest.mark.parametrize("question, expected", [
+    ("West since July 2025 from January 2025", ("West", "2025-07", "2025-01", None)),
+    ("West since July 2025 through September 2025", ("West", "2025-07", None, "2025-09")),
+    ("West since July 2025 through July 2025", ("West", "2025-07", None, "2025-07")),
+])
+def test_question_optional_period_bounds(question, expected):
+    assert parse_question(question) == expected
+
+
+@pytest.mark.parametrize("question,start,end,months", [
+    ("West since July 2025 from January 2025 through September 2025", "2025-01", "2025-09",
+     ["2025-01", "2025-06", "2025-07", "2025-09"]),
+    ("West compare January–June against July–September 2025", "2025-01", "2025-09",
+     ["2025-01", "2025-06", "2025-07", "2025-09"]),
+    ("West since July 2025 from January 2025", "2025-01", None,
+     ["2025-01", "2025-06", "2025-07", "2025-09", "2025-10"]),
+    ("West since July 2025 through September 2025", None, "2025-09",
+     ["2024-12", "2025-01", "2025-06", "2025-07", "2025-09"]),
+    ("West since July 2025 through July 2025", None, "2025-07",
+     ["2024-12", "2025-01", "2025-06", "2025-07"]),
+])
+def test_bounded_periods_filter_both_evidence_queries(question, start, end, months, monkeypatch):
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+        """)
+        for month in ("2024-12", "2025-01", "2025-06", "2025-07", "2025-09", "2025-10"):
+            if month not in months:
+                # Excluded rows also exercise data-quality checks in both queries.
+                con.execute("INSERT INTO sales VALUES (1, 1, ?, 100, 1, 100, NULL)", (month,))
+            else:
+                con.execute("INSERT INTO sales VALUES (1, 1, ?, 100, 1, 100, 10)", (month,))
+                cogs = 55 if month < "2025-07" else 75
+                con.execute("INSERT INTO costs VALUES (1, 1, ?, ?, 5)", (month, cogs))
+
+        def run_sql(sql, params=None):
+            return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
+                con.execute(tools.validate_select(sql), params or {})]}
+
+        monkeypatch.setattr("agent.run_sql", run_sql)
+        monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
+        result = answer_question(question)
+
+    monthly = result["evidence"]["E1"]
+    summary = result["evidence"]["E2"]
+    assert result.get("start_month") == start and result.get("end_month") == end
+    assert [row["sale_month"] for row in monthly["rows"]] == months
+    row = summary["rows"][0]
+    assert (row["first_month"], row["before_last_month"],
+            row["after_first_month"], row["last_month"]) == (
+                months[0], "2025-06", "2025-07", months[-1])
+    assert (row["before_margin_pct"], row["after_margin_pct"]) == (40, 20)
+    assert row["missing_cost_count"] == row["missing_discount_count"] == 0
+    for evidence in (monthly, summary):
+        for name, value in (("start_month", start), ("end_month", end)):
+            if value is not None:
+                assert evidence["params"][name] == value
+                assert f":{name}" in evidence["sql"] and value not in evidence["sql"]
+
+
+@pytest.mark.parametrize("question", [
+    "West since July 2025 from July 2025 through September 2025",
+    "West since July 2025 from August 2025 through September 2025",
+    "West since July 2025 from January 2025 through June 2025",
+    "West since July 2025 from January 2025 through September 2025 and 2025-13",
+    "West compare January–May against July–September 2025",
+    "West compare January–August against July–September 2025",
+    "West compare January–June against July–September 2025 and 2026-13",
+])
+def test_invalid_periods_are_rejected_before_querying(question, monkeypatch):
+    def forbidden_query(*args, **kwargs):
+        pytest.fail("Invalid periods must be rejected before querying")
+
+    monkeypatch.setattr("agent.run_sql", forbidden_query)
+    with pytest.raises(ValueError):
+        answer_question(question)
 
 
 @pytest.mark.parametrize("column", ["discount_pct", "quantity", "unit_price"])
@@ -862,7 +946,7 @@ def test_updated_policy_source_invalidates_unchanged_retrieved_chunk(policy_rows
 @pytest.mark.parametrize("month", ["Jul", "jul.", "Sept", "SEP"])
 def test_question_month_abbreviations(month):
     expected = "07" if month.lower().startswith("jul") else "09"
-    assert parse_question(f"West since {month} 2026") == ("West", f"2026-{expected}")
+    assert parse_question(f"West since {month} 2026") == ("West", f"2026-{expected}", None, None)
 
 
 @pytest.mark.parametrize("date", ["2026-13", "2026-00", "2026/07", "2026-07-15",
@@ -874,7 +958,7 @@ def test_question_rejects_unsupported_explicit_dates(date):
 
 
 def test_question_defaults_only_without_date():
-    assert parse_question("Why did West margin fall?") == ("West", "2025-07")
+    assert parse_question("Why did West margin fall?") == ("West", "2025-07", None, None)
 @pytest.mark.parametrize("region", ["North", "north", "Northeast", "Northwest", "Southeast", "Southwest", "West and North"])
 def test_unsupported_region_is_rejected_before_querying(monkeypatch, region):
     def forbidden_query(*args, **kwargs):
@@ -882,7 +966,7 @@ def test_unsupported_region_is_rejected_before_querying(monkeypatch, region):
     monkeypatch.setattr("agent.run_sql", forbidden_query)
     with pytest.raises(ValueError, match="Unsupported region"):
         answer_question(f"Why did {region} margin fall since July 2025?")
-    assert parse_question("Why did margin fall since July 2025?") == ("West", "2025-07")
+    assert parse_question("Why did margin fall since July 2025?") == ("West", "2025-07", None, None)
 
 
 @pytest.fixture(scope="module")

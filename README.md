@@ -33,9 +33,12 @@ local hashing fallback is lexical retrieval rather than a semantic language mode
 
 The app runs fixed analysis for margin, discount and freight, regardless of
 question wording. It recognizes West, Central, East or South and a full month
-name plus year or `YYYY-MM`. Defaults are West and July 2025. It compares all
-available sales before the selected month with all available sales from that
-month onward, including later years. It displays those boundaries explicitly.
+name plus year or `YYYY-MM`. Defaults are West and July 2025. Without bounds, it
+compares all available sales before the selected month with all available sales
+from that month onward, including later years. To restrict the comparison, ask
+`West since July 2025 from January 2025 through September 2025` or compare
+`January–June against July–September 2025`. Both bounds are inclusive. It
+displays the actual sales boundaries explicitly.
 Margin includes COGS and freight and is weighted by net revenue; discounts use
 gross-sales weights; freight per unit uses quantity weights. Freight movement
 therefore includes product mix and can differ from the contract's rate change.

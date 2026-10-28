@@ -38,7 +38,10 @@ JOIN = """FROM sales s LEFT JOIN
     JOIN regions r ON r.region_id=s.region_id"""
 MISSING_DISCOUNT_COUNT = """SUM(CASE WHEN s.discount_pct IS NULL OR s.quantity IS NULL
     OR s.unit_price IS NULL THEN 1 ELSE 0 END)"""
-MONTHLY_SQL = f"""SELECT r.region_name, s.sale_month,
+
+
+def monthly_sql(bounds=""):
+    return f"""SELECT r.region_name, s.sale_month,
     ROUND(SUM(s.net_revenue),2) AS revenue,
     SUM(s.quantity) AS units,
     ROUND(100*SUM(s.net_revenue-s.quantity*(c.unit_cogs+c.freight_per_unit))
@@ -49,10 +52,10 @@ MONTHLY_SQL = f"""SELECT r.region_name, s.sale_month,
     ROUND(SUM(s.quantity*c.freight_per_unit)/NULLIF(SUM(s.quantity),0),2) AS freight_per_unit,
     SUM(CASE WHEN c.unit_cogs IS NULL OR c.freight_per_unit IS NULL THEN 1 ELSE 0 END) AS missing_cost_count,
     {MISSING_DISCOUNT_COUNT} AS missing_discount_count
-    {JOIN} GROUP BY r.region_name,s.sale_month ORDER BY r.region_name,s.sale_month"""
+    {JOIN}{bounds} GROUP BY r.region_name,s.sale_month ORDER BY r.region_name,s.sale_month"""
 
 
-def summary_sql():
+def summary_sql(bounds=""):
     # Compute changes in SQL too: a difference calculated in Python is not evidence.
     columns = []
     raw = {}
@@ -78,13 +81,39 @@ def summary_sql():
         "MIN(CASE WHEN s.sale_month >= :cutoff THEN s.sale_month END) AS after_first_month",
         "MAX(CASE WHEN s.sale_month < :cutoff THEN s.sale_month END) AS before_last_month",
     ])
-    return f"SELECT r.region_name, {', '.join(columns)} {JOIN} GROUP BY r.region_name ORDER BY r.region_name"
+    return f"SELECT r.region_name, {', '.join(columns)} {JOIN}{bounds} GROUP BY r.region_name ORDER BY r.region_name"
 
 
 MONTHS = {name: f"{index:02}" for index, name in enumerate(
     ("january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"), 1)}
 MONTHS.update({name[:3]: value for name, value in list(MONTHS.items())})
 MONTHS["sept"] = "09"
+
+MONTH_PATTERN = r"\b(?:" + "|".join(MONTHS) + r")\b"
+ISO_MONTH = r"\b20\d{2}-(?:0[1-9]|1[0-2])\b(?![-/\d])"
+NAMED_MONTH = MONTH_PATTERN + r"\.?(?:\s+20\d{2}\b(?![-/\d]))?"
+FULL_MONTH = rf"(?:{ISO_MONTH}|{MONTH_PATTERN}\.?\s+20\d{{2}}\b(?![-/\d]))"
+RANGE_MONTH = rf"(?:{ISO_MONTH}|{NAMED_MONTH})"
+RANGE_SEPARATOR = r"(?:-|–|—|through|to)"
+COMPARISON_RANGE = re.compile(
+    rf"(?P<start>{RANGE_MONTH})\s*{RANGE_SEPARATOR}\s*(?P<before_end>{RANGE_MONTH})"
+    rf"\s+(?:against|versus|vs\.?|with)\s+"
+    rf"(?P<cutoff>{RANGE_MONTH})\s*{RANGE_SEPARATOR}\s*(?P<end>{RANGE_MONTH})", re.I)
+
+
+def normalize_month(value, year=None):
+    if re.fullmatch(ISO_MONTH, value):
+        return value
+    match = re.fullmatch(r"(" + "|".join(MONTHS) + r")\.?(?:\s+(20\d{2}))?", value, re.I)
+    if not match or not (match[2] or year):
+        raise QuestionValidationError("Unsupported date; use YYYY-MM or a month name and four-digit year.")
+    return (match[2] or year) + "-" + MONTHS[match[1].lower()]
+
+
+def validate_remaining_dates(remaining):
+    if (re.search(r"\b\d{4}\b|\b\d+[-/]\d+\b", remaining)
+            or re.search(MONTH_PATTERN, remaining, re.I)):
+        raise QuestionValidationError("Unsupported date; use YYYY-MM or a month name and four-digit year.")
 
 
 def parse_question(question):
@@ -96,30 +125,65 @@ def parse_question(question):
                       if re.search(rf"\b{r}\b", question, re.I)]
     if len(region_matches) > 1:
         raise QuestionValidationError("Ask about one region at a time; the evidence includes all regions for comparison.")
-    cutoff = "2025-07"
-    date = re.search(r"\b(20\d{2})-(0[1-9]|1[0-2])\b(?![-/\d])", question)
-    month_pattern = r"\b(" + "|".join(MONTHS) + r")\b"
-    named = re.search(month_pattern + r"\.?\s+(20\d{2})\b(?![-/\d])", question, re.I)
-    if date:
-        cutoff = date.group(0)
-    elif named:
-        cutoff = named[2] + "-" + MONTHS[named[1].lower()]
-    # A recognized date must not hide another unsupported date expression.
-    matched = date or named
-    remaining = question[:matched.start()] + question[matched.end():] if matched else question
-    if (re.search(r"\b\d{4}\b|\b\d+[-/]\d+\b", remaining)
-            or re.search(month_pattern, remaining, re.I)):
-        raise QuestionValidationError("Unsupported date; use YYYY-MM or a month name and four-digit year.")
-    return region_matches[0] if region_matches else "West", cutoff
+    cutoff, start_month, end_month = "2025-07", None, None
+    comparison = COMPARISON_RANGE.search(question)
+    if comparison:
+        validate_remaining_dates(question[:comparison.start()] + question[comparison.end():])
+        values = [comparison[name] for name in ("start", "before_end", "cutoff", "end")]
+        years = [re.search(r"\b20\d{2}\b", value) for value in values]
+        explicit_years = {year[0] for year in years if year}
+        shared_year = next(iter(explicit_years)) if len(explicit_years) == 1 else None
+        months = []
+        for index, value in enumerate(values):
+            pair_years = {year[0] for year in years[index // 2 * 2:index // 2 * 2 + 2] if year}
+            pair_year = next(iter(pair_years)) if len(pair_years) == 1 else shared_year
+            months.append(normalize_month(value, pair_year))
+        start_month, before_end, cutoff, end_month = months
+        year, month = map(int, before_end.split("-"))
+        next_month = f"{year + month // 12:04}-{month % 12 + 1:02}"
+        if before_end < start_month or next_month != cutoff:
+            raise QuestionValidationError("Comparison periods must be ordered and consecutive months.")
+    else:
+        dates = list(re.finditer(FULL_MONTH, question, re.I))
+        remaining = question
+        for date in reversed(dates):
+            remaining = remaining[:date.start()] + remaining[date.end():]
+        validate_remaining_dates(remaining)
+        if len(dates) == 1:
+            cutoff = normalize_month(dates[0][0])
+        elif dates:
+            fields = {}
+            roles = {"since": "cutoff", "from": "start", "through": "end", "until": "end", "to": "end"}
+            for date in dates:
+                prefix = question[:date.start()]
+                marker = re.search(r"\b(since|from|through|until|to)\s*$", prefix, re.I)
+                role = roles[marker[1].lower()] if marker else None
+                if not role or role in fields:
+                    raise QuestionValidationError("Use since for the comparison month, from for the start, and through for the end.")
+                fields[role] = normalize_month(date[0])
+            cutoff = fields.get("cutoff", cutoff)
+            start_month, end_month = fields.get("start"), fields.get("end")
+    if (start_month is not None and start_month >= cutoff) or (end_month is not None and end_month < cutoff):
+        raise QuestionValidationError("The start month must be before the comparison month, and the end month must be on or after it.")
+    return region_matches[0] if region_matches else "West", cutoff, start_month, end_month
 
 
 def answer_question(question):
     if not isinstance(question, str) or not question.strip() or len(question) > 1000:
         raise QuestionValidationError("Enter a business question of up to one thousand characters.")
-    region, cutoff = parse_question(question)
+    region, cutoff, start_month, end_month = parse_question(question)
+    params = {}
+    conditions = []
+    if start_month is not None:
+        conditions.append("s.sale_month >= :start_month")
+        params["start_month"] = start_month
+    if end_month is not None:
+        conditions.append("s.sale_month <= :end_month")
+        params["end_month"] = end_month
+    bounds = " WHERE " + " AND ".join(conditions) if conditions else ""
     evidence = {
-        "E1": {"kind": "sql", **run_sql(MONTHLY_SQL)},
-        "E2": {"kind": "sql", **run_sql(summary_sql(), {"cutoff": cutoff})},
+        "E1": {"kind": "sql", **run_sql(monthly_sql(bounds), params)},
+        "E2": {"kind": "sql", **run_sql(summary_sql(bounds), {**params, "cutoff": cutoff})},
     }
     rows = evidence["E2"]["rows"]
     index = next((i for i, row in enumerate(rows) if row["region_name"] == region), None)
@@ -210,7 +274,8 @@ def answer_question(question):
         claim("action", [text("Check customer eligibility for a freight surcharge and apply it where pricing policy allows.")], pricing + playbook)
         claim("action", [text("Re-tender freight lanes and consolidate shipments of heavy products.")], playbook)
     kept, dropped = critique(claims, evidence)
-    return {"question": question, "region": region, "cutoff": cutoff, "claims": kept,
+    return {"question": question, "region": region, "cutoff": cutoff,
+            "start_month": start_month, "end_month": end_month, "claims": kept,
             "evidence": evidence, "dropped_count": len(dropped),
             "plan": ["Compare region and month margin", "Compare discount and freight", "Retrieve policy reasons", "Verify every numerical claim"]}
 
