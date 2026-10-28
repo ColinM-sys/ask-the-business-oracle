@@ -35,6 +35,7 @@ def summary_sql():
         for name, expression in raw[period].items():
             columns.append(f"ROUND({expression},2) AS {period}_{name}")
     columns.extend([
+        f"CASE WHEN ({raw['before']['margin_pct']}) > ({raw['after']['margin_pct']}) THEN 'fell' WHEN ({raw['before']['margin_pct']}) < ({raw['after']['margin_pct']}) THEN 'rose' ELSE 'was unchanged' END AS margin_direction",
         f"ROUND(({raw['before']['margin_pct']})-({raw['after']['margin_pct']}),2) AS margin_drop_pts",
         f"ROUND(100*(({raw['after']['freight_per_unit']})/NULLIF(({raw['before']['freight_per_unit']}),0)-1),2) AS freight_increase_pct",
         "MIN(s.sale_month) AS first_month", "MAX(s.sale_month) AS last_month",
@@ -85,7 +86,9 @@ def answer_question(question):
         "E2": {"kind": "sql", **run_sql(summary_sql(), {"cutoff": cutoff})},
     }
     rows = evidence["E2"]["rows"]
-    index = next(i for i, row in enumerate(rows) if row["region_name"] == region)
+    index = next((i for i, row in enumerate(rows) if row["region_name"] == region), None)
+    if index is None:
+        raise ValueError(f"No sales/cost data found for {region}.")
     row = rows[index]
     if row["before_margin_pct"] is None or row["after_margin_pct"] is None:
         raise ValueError("The comparison date must have sales both before and after it.")
@@ -112,11 +115,13 @@ def answer_question(question):
     claim("scope", [text(f"{region}: compare "), number("first_month"), text(" through "),
         number("before_last_month"), text(" with "), number("after_first_month"), text(" through "),
         number("last_month"), text(". Margin includes COGS and freight; percentages are revenue-weighted. Discounts are weighted by gross sales; freight is weighted by units.")])
-    direction = "fell" if row["margin_drop_pts"] >= 0 else "rose"
+    direction = row["margin_direction"]
+    precision_note = (" The change is below display precision."
+                      if row["margin_drop_pts"] == 0 and direction != "was unchanged" else "")
     # The signed drop is kept intact, including for regions whose margin rose.
     claim("finding", [text(f"{region} gross margin {direction} from "), number("before_margin_pct", "%"),
         text(" to "), number("after_margin_pct", "%"), text("; the signed margin drop is "),
-        number("margin_drop_pts", " percentage points"), text(".")])
+        number("margin_drop_pts", " percentage points"), text("." + precision_note)])
     freight_parts = [text("Average discount moved from "), number("before_discount_pct", "%"),
         text(" to "), number("after_discount_pct", "%"), text(". Freight per unit moved from $"),
         number("before_freight_per_unit"), text(" to $"), number("after_freight_per_unit")]

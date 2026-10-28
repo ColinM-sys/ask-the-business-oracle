@@ -2,14 +2,19 @@
 import copy
 import json
 import runpy
+import subprocess
+import sqlite3
+from html.parser import HTMLParser
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import oracledb
 import pytest
 
 import tools
 from db import connect
-from agent import answer_question, parse_question
+from agent import answer_question, parse_question, summary_sql
 from app import app
 from critic import critique, supported
 from policies import ensure_policies, hash_embedding
@@ -100,10 +105,86 @@ def test_critic_preserves_supported_suffixes(sample_evidence, suffix):
     assert critique([claim], sample_evidence) == ([claim], [])
 
 
+@pytest.mark.parametrize("modifier", [" million", " billion", " thousand", "k", "M",
+                                      " percent", "%", " percentage points", " basis points"])
+@pytest.mark.parametrize("split", [False, True])
+def test_critic_rejects_units_and_magnitudes_in_adjacent_text(sample_evidence, modifier, split):
+    texts = [{"text": modifier}]
+    if split:
+        texts = [{"text": character} for character in modifier]
+    claim = {"parts": [
+        {"value": 25.53, "evidence": "E1", "row": 0, "column": "margin"},
+        *texts]}
+    assert critique([claim], sample_evidence) == ([], [claim])
+
+
 def test_hashing_is_stable_and_normalized():
     first = hash_embedding("West freight contract")
     assert first == hash_embedding("West freight contract")
     assert abs(sum(v*v for v in first) - 1) < 0.000001
+
+
+@pytest.mark.parametrize("failure", [
+    RuntimeError("private-driver-details"),
+    oracledb.DatabaseError(SimpleNamespace(code=3113, message="private-driver-details")),
+    oracledb.DatabaseError(SimpleNamespace(code=40284, message="private-driver-details")),
+])
+def test_policy_probe_propagates_unexpected_failures(failure, tmp_path, monkeypatch):
+    (tmp_path / "policy.md").write_text("Business policy", encoding="utf-8")
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
+    cursor.execute.return_value.fetchall.side_effect = [[("BROKEN_MODEL",)], []]
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+
+    def embedding(cur, text, backend):
+        if backend == "BROKEN_MODEL":
+            raise failure
+        return hash_embedding(text)
+
+    monkeypatch.setattr("policies.embed", embedding)
+
+    with pytest.raises(type(failure)) as caught:
+        ensure_policies()
+
+    assert caught.value is failure
+    connection.commit.assert_not_called()
+    assert not any(call.args[0].startswith("DELETE") for call in cursor.execute.call_args_list)
+
+
+@pytest.mark.parametrize("models, expected", [
+    ([], "hash-v1-512"),
+    ([("INCOMPATIBLE_MODEL",)], "hash-v1-512"),
+    ([("INCOMPATIBLE_MODEL",), ("GOOD_MODEL",)], "GOOD_MODEL"),
+])
+def test_policy_probe_fallback_is_explicit_and_sanitized(
+        models, expected, tmp_path, monkeypatch, caplog):
+    (tmp_path / "policy.md").write_text("Business policy", encoding="utf-8")
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
+    cursor.execute.return_value.fetchall.side_effect = [models, []]
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+
+    def embedding(cur, text, backend):
+        if backend == "INCOMPATIBLE_MODEL":
+            raise oracledb.DatabaseError(SimpleNamespace(
+                code=40290, message="private-driver-details\nforged log entry"))
+        return hash_embedding(text)
+
+    monkeypatch.setattr("policies.embed", embedding)
+    assert ensure_policies() == expected
+    connection.commit.assert_called_once()
+    if models:
+        assert "INCOMPATIBLE_MODEL" in caplog.text
+        assert "40290" in caplog.text
+    assert ("Using hash-v1-512 fallback" in caplog.text) == (expected == "hash-v1-512")
+    assert "private-driver-details" not in caplog.text
+    assert "forged log entry" not in caplog.text
 
 
 @pytest.mark.parametrize("character", ["界", "😀"])
@@ -128,6 +209,40 @@ def test_policy_chunks_fit_byte_limit(character, tmp_path, monkeypatch):
     connection.commit.assert_called_once()
 
 
+def test_empty_policy_documents_preserve_existing_rows(tmp_path, monkeypatch):
+    (tmp_path / "empty.md").write_text(" \n\t\n ", encoding="utf-8")
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
+    cursor.execute.return_value.fetchall.side_effect = [[], [("hash-v1-512", "old-hash")]]
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+
+    with pytest.raises(RuntimeError, match="No policy content"):
+        ensure_policies()
+
+    assert not any(call.args[0].lstrip().startswith(("DELETE", "INSERT"))
+                   for call in cursor.execute.call_args_list)
+    connection.commit.assert_not_called()
+
+
+def test_policy_search_handles_empty_table(monkeypatch):
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value.__enter__.return_value
+    cursor.execute.return_value.fetchone.return_value = None
+    monkeypatch.setattr(tools, "ensure_policies", lambda: None)
+    monkeypatch.setattr(tools, "connect", lambda: connection)
+    embedding = MagicMock()
+    monkeypatch.setattr(tools, "embed", embedding)
+
+    with pytest.raises(RuntimeError, match="No policy chunks"):
+        tools.search_policies("West freight")
+
+    embedding.assert_not_called()
+
+
 def test_question_scope():
     assert parse_question("East since March 2025") == ("East", "2025-03")
     assert parse_question("West since 2025-07") == ("West", "2025-07")
@@ -135,11 +250,58 @@ def test_question_scope():
         parse_question("West and East")
 
 
+@pytest.mark.parametrize("rows", [[], [{"region_name": "East"}]])
+def test_missing_region_has_descriptive_validation_error(monkeypatch, rows):
+    monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
+        "sql": sql, "params": params or {}, "rows": rows})
+    with pytest.raises(ValueError, match="No sales/cost data found for West"):
+        answer_question("Why did West margin fall since July 2025?")
+    response = app.test_client().post("/", data={"question": "West"})
+    assert response.status_code == 400
+    assert b"No sales/cost data found for West" in response.data
+@pytest.mark.parametrize("before,after,direction,below_precision", [
+    (25.001, 25.004, "rose", True),
+    (25.004, 25.001, "fell", True),
+    (25.001, 25.001, "was unchanged", False),
+    (25, 26, "rose", False),
+    (26, 25, "fell", False),
+])
+def test_margin_direction_uses_unrounded_sql(before, after, direction, below_precision, monkeypatch):
+    # Execute the production aggregation over controlled rows without changing Oracle data.
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+        """)
+        for month, margin in (("2025-06", before), ("2025-07", after)):
+            con.execute("INSERT INTO sales VALUES (1, 1, ?, 100.0, 1, 100.0, 0)", (month,))
+            con.execute("INSERT INTO costs VALUES (1, 1, ?, ?, 1.0)", (month, 99 - margin))
+        sql = summary_sql()
+        tools.validate_select(sql)
+        rows = [dict(row) for row in con.execute(sql, {"cutoff": "2025-07"})]
+
+    monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
+        "sql": sql, "params": params or {}, "rows": rows})
+    monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
+    result = answer_question("West since July 2025")
+    finding = next(c for c in result["claims"] if c["kind"] == "finding")
+    rendered = "".join(p.get("text", str(p.get("value", "")) + p.get("suffix", ""))
+                       for p in finding["parts"])
+    assert rendered.startswith(f"West gross margin {direction} from ")
+    assert ("below display precision" in rendered) == below_precision
+    assert result["dropped_count"] == 0
+
+
 def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
     row = {
         "region_name": "West", "first_month": "2025-01", "last_month": "2025-09",
         "before_last_month": "2025-06", "after_first_month": "2025-07",
         "before_margin_pct": 40, "after_margin_pct": 25, "margin_drop_pts": 15,
+        "margin_direction": "fell",
         "before_discount_pct": 3, "after_discount_pct": 18,
         "before_freight_per_unit": 0, "after_freight_per_unit": 5,
         "freight_increase_pct": None,
@@ -256,6 +418,100 @@ def test_flask_live_brief_and_evidence():
     assert b"VECTOR_DISTANCE" in response.data
     assert b"west_q3_volume_push.md" in response.data
     assert b"evidence-dialog" in response.data
+
+
+@pytest.mark.parametrize("has_claims,dropped_count", [(True, 0), (True, 2), (False, 2), (False, 0)])
+def test_ui_discloses_dropped_claims_and_empty_brief(monkeypatch, has_claims, dropped_count):
+    result = {
+        "region": "West",
+        "claims": [{"kind": "finding", "parts": [{"text": "Retained finding."}]}] if has_claims else [],
+        "dropped_count": dropped_count,
+        "evidence": {},
+    }
+    monkeypatch.setattr("app.answer_question", lambda _: result)
+
+    response = app.test_client().post("/", data={"question": "West"})
+
+    assert response.status_code == 200
+    assert (b"2 claims were omitted because they failed verification." in response.data) == bool(dropped_count)
+    assert (b"No verified claims are available for this brief." in response.data) == (not has_claims)
+    assert (b"Numbers in retained claims verified against cited SQL cells." in response.data) == has_claims
+    assert (b"Retained finding." in response.data) == has_claims
+@pytest.mark.parametrize("data", [None, {}, {"unrelated": "value"}, {"question": ""}])
+def test_ui_missing_question_rejected_before_querying(monkeypatch, data):
+    def forbidden_query(*args, **kwargs):
+        pytest.fail("Missing questions must be rejected before querying")
+
+    monkeypatch.setattr("agent.run_sql", forbidden_query)
+    response = app.test_client().post("/", data=data)
+    assert response.status_code == 400
+def test_ui_restores_submit_button_on_pageshow():
+    html = app.test_client().get("/").get_data(as_text=True)
+    script = html.rsplit("<script>", 1)[1].split("</script>", 1)[0]
+    subprocess.run(["node", "-e", """
+        const assert = require('node:assert/strict');
+        const handlers = {};
+        const button = {disabled: false, textContent: 'Analyze question'};
+        const form = {addEventListener: (event, handler) => handlers[event] = handler};
+        global.document = {
+            getElementById: () => form,
+            querySelector: () => button,
+        };
+        global.window = {addEventListener: (event, handler) => handlers[event] = handler};
+    """ + script + """
+        for (let visit = 0; visit < 2; visit++) {
+            handlers.submit();
+            assert.equal(button.disabled, true);
+            assert.equal(button.textContent, 'Analyzing\u2026');
+            handlers.pageshow({persisted: true});
+            assert.equal(button.disabled, false);
+            assert.equal(button.textContent, 'Analyze question');
+        }
+    """], check=True, capture_output=True, text=True)
+def test_evidence_dialog_identifies_cited_cell(monkeypatch):
+    monkeypatch.setattr("app.answer_question", lambda _: {
+        "region": "West", "claims": [], "evidence": {},
+    })
+    html = app.test_client().post("/", data={"question": "West"}).get_data(as_text=True)
+
+    assert 'aria-describedby="evidence-description"' in html
+    assert '<p id="evidence-description"></p>' in html
+    assert "description.textContent = '';" in html  # Clear the previous citation on every open.
+    assert "description.textContent = `Cited cell: row ${index + 1}, column ${column}.`;" in html
+    assert "td.append(' (Cited cell)');" in html
+    assert "td.setAttribute('aria-describedby', 'evidence-description');" in html
+    assert html.index("description.textContent = `Cited cell:") < html.index("dialog.showModal()")
+def test_policy_citations_have_descriptive_accessible_names(monkeypatch):
+    documents = {"P1": "west_q3_volume_push.md", "P2": 'Freight & "carrier" memo.md'}
+    result = {
+        "region": "West",
+        "claims": [{"kind": "reason", "parts": [{"text": "Policy context."}],
+                    "policy_ids": list(documents)}],
+        "evidence": {id: {"kind": "policy", "rows": [{"doc": doc}]}
+                     for id, doc in documents.items()},
+    }
+    monkeypatch.setattr("app.answer_question", lambda _: result)
+
+    class CitationParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.buttons = []
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == "button" and attrs.get("class") == "citation":
+                self.buttons.append(attrs)
+
+    response = app.test_client().post("/", data={"question": "West"})
+    assert response.status_code == 200
+    parser = CitationParser()
+    parser.feed(response.get_data(as_text=True))
+    # Both inline citations and the evidence explorer must identify the document.
+    assert len(parser.buttons) == 4
+    for button in parser.buttons:
+        evidence_id = button["data-evidence"]
+        assert evidence_id in button.get("aria-label", "")
+        assert documents[evidence_id] in button["aria-label"]
 
 
 def test_ui_validation_and_safe_error(monkeypatch):
