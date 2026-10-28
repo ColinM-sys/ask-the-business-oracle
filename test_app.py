@@ -2357,14 +2357,14 @@ def test_download_brief_contains_cited_evidence_and_verification(monkeypatch):
 @pytest.mark.parametrize("region", ["West", "East"])
 def test_monthly_trend_links_selected_region_to_original_evidence_rows(monkeypatch, region):
     rows = [
-        {"region_name": "East", "sale_month": "2025-06", "margin_pct": 45,
-         "discount_pct": 2.5, "freight_per_unit": 4.25},
-        {"region_name": "West", "sale_month": "2025-06", "margin_pct": 38.9,
-         "discount_pct": 0, "freight_per_unit": 5.5},
+        {"region_name": "East", "sale_month": "2025-06", "revenue": 1450.25, "units": 100,
+         "margin_pct": 45, "discount_pct": 2.5, "freight_per_unit": 4.25},
+        {"region_name": "West", "sale_month": "2025-06", "revenue": 0, "units": 0,
+         "margin_pct": 38.9, "discount_pct": 0, "freight_per_unit": 5.5},
         {"region_name": "East", "sale_month": "2025-07", "margin_pct": 47,
-         "discount_pct": None, "freight_per_unit": 4.75},
+         "revenue": None, "discount_pct": None, "freight_per_unit": 4.75},
         {"region_name": "West", "sale_month": "2025-07", "margin_pct": 25.6,
-         "discount_pct": 18, "freight_per_unit": None},
+         "units": None, "discount_pct": 18, "freight_per_unit": None},
     ]
     monkeypatch.setattr("app.answer_question", lambda _: {
         "region": region, "claims": [],
@@ -2418,11 +2418,11 @@ def test_monthly_trend_links_selected_region_to_original_evidence_rows(monkeypat
     assert region in parser.caption
     selected = [(index, row) for index, row in enumerate(rows) if row["region_name"] == region]
     assert len(parser.rows) == len(selected)
-    columns = ("sale_month", "margin_pct", "discount_pct", "freight_per_unit")
+    columns = ("sale_month", "revenue", "units", "margin_pct", "discount_pct", "freight_per_unit")
     for cells, (index, row) in zip(parser.rows, selected):
         assert len(cells) == len(columns)
         for cell, column in zip(cells, columns):
-            value = row[column]
+            value = row.get(column)
             if value is None:
                 assert cell["text"].strip().lower() == "unavailable"
                 assert cell["button"] is None
@@ -2430,7 +2430,7 @@ def test_monthly_trend_links_selected_region_to_original_evidence_rows(monkeypat
                 expected = str(value)
                 if column in ("margin_pct", "discount_pct"):
                     expected += "%"
-                elif column == "freight_per_unit":
+                elif column in ("revenue", "freight_per_unit"):
                     expected = "$" + expected
                 assert cell["text"].strip() == expected
                 button = cell["button"]
@@ -2438,6 +2438,8 @@ def test_monthly_trend_links_selected_region_to_original_evidence_rows(monkeypat
                 assert button["data-row"] == str(index)
                 assert button["data-column"] == column
                 assert region in button["aria-label"] and row["sale_month"] in button["aria-label"]
+                if column in ("revenue", "units"):
+                    assert column in button["aria-label"] and expected in button["aria-label"]
 
 
 @pytest.mark.parametrize("missing_reason,missing_actions", [
@@ -2463,11 +2465,11 @@ def test_brief_shows_selected_region_monthly_trend_with_cell_citations(monkeypat
     rows = [
         {"region_name": "East", "sale_month": "2025-06", "margin_pct": 70,
          "discount_pct": 1, "freight_per_unit": 2},
-        {"region_name": "West", "sale_month": "2025-06", "margin_pct": 38.9,
+        {"region_name": "West", "sale_month": "2025-06", "revenue": 1200.5, "units": 75, "margin_pct": 38.9,
          "discount_pct": 0, "freight_per_unit": 5.4},
         {"region_name": "East", "sale_month": "2025-07", "margin_pct": 71,
          "discount_pct": 2, "freight_per_unit": 3},
-        {"region_name": "West", "sale_month": "2025-07", "margin_pct": None,
+        {"region_name": "West", "sale_month": "2025-07", "revenue": 0, "units": None, "margin_pct": None,
          "discount_pct": 18.25, "freight_per_unit": 8.6},
     ]
     result = {"region": "West", "claims": [], "dropped_count": 0,
@@ -2517,12 +2519,12 @@ def test_brief_shows_selected_region_monthly_trend_with_cell_citations(monkeypat
     assert len(parser.tables) == 1
     header, *body = parser.tables[0]
     labels = [cell["text"].strip().lower() for cell in header]
-    assert len(labels) == 4
-    assert all(term in label for term, label in zip(("month", "margin", "discount", "freight"), labels))
+    assert labels == ["month", "revenue ($)", "units", "gross margin (%)", "discount (%)", "freight per unit ($)"]
     assert len(body) == 2
+    columns = ("sale_month", "revenue", "units", "margin_pct", "discount_pct", "freight_per_unit")
     for table_row, evidence_index in zip(body, (1, 3)):
-        assert len(table_row) == 4
-        for cell, column, label in zip(table_row, ("sale_month", "margin_pct", "discount_pct", "freight_per_unit"), labels):
+        assert len(table_row) == len(columns)
+        for cell, column, label in zip(table_row, columns, labels):
             value = rows[evidence_index][column]
             displayed = cell["text"].strip()
             if value is None:
@@ -2536,6 +2538,8 @@ def test_brief_shows_selected_region_monthly_trend_with_cell_citations(monkeypat
             assert button["data-column"] == column
             if column == "sale_month":
                 assert displayed == value
+            elif column == "units":
+                assert displayed == str(value)
             else:
                 unit = "%" if column.endswith("_pct") else "$"
                 assert unit in displayed or unit in label
