@@ -274,6 +274,41 @@ def test_policy_probe_fallback_is_explicit_and_sanitized(
     assert "forged log entry" not in caplog.text
 
 
+@pytest.mark.parametrize("later_model", [None, "GOOD_MODEL"])
+def test_policy_probe_skips_model_with_different_input(later_model, tmp_path, monkeypatch, caplog):
+    (tmp_path / "policy.md").write_text("Business policy", encoding="utf-8")
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    result = cursor.execute.return_value
+    result.fetchone.return_value = ("POLICY_CHUNKS",)
+    result.fetchall.side_effect = [[("INPUT_MODEL",)] + ([(later_model,)] if later_model else []), []]
+    vector_result = MagicMock()
+    vector_result.fetchone.return_value = (hash_embedding("Business policy"),)
+
+    def execute(sql, *args, **kwargs):
+        if "VECTOR_EMBEDDING(INPUT_MODEL" in sql:
+            assert "USING :text AS DATA" in sql
+            raise oracledb.DatabaseError(SimpleNamespace(
+                code=54421, message="Missing mining attribute: INPUT\nprivate-driver-details"))
+        if "VECTOR_EMBEDDING(GOOD_MODEL" in sql:
+            return vector_result
+        return result
+
+    cursor.execute.side_effect = execute
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+
+    expected = later_model or "hash-v1-512"
+    assert ensure_policies() == expected
+    inserted = [call.kwargs for call in cursor.execute.call_args_list
+                if call.args[0].lstrip().startswith("INSERT INTO policy_chunks")]
+    assert inserted and all(row["backend"] == expected for row in inserted)
+    connection.commit.assert_called_once()
+    assert "INPUT_MODEL" in caplog.text and "54421" in caplog.text
+    assert "private-driver-details" not in caplog.text
+
+
 @pytest.mark.parametrize("unsupported", ["my_model", 'EVIL") FROM dual; DELETE FROM sales--\nFORGED'])
 @pytest.mark.parametrize("later_model", [None, "GOOD_MODEL"])
 def test_policy_probe_skips_unsupported_names(unsupported, later_model, tmp_path, monkeypatch):

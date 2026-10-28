@@ -63,9 +63,9 @@ def ensure_policies():
                     break
                 except oracledb.DatabaseError as exc:
                     code = getattr(exc.args[0], "code", None) if exc.args else None
-                    # ORA-40290: the model is incompatible with this SQL operator.
+                    # ORA-40290: incompatible operator; ORA-54421: missing model input.
                     # Other failures indicate broken operations and must stop ingestion.
-                    if code != 40290:
+                    if code not in (40290, 54421):
                         raise
                     _logger.warning("Embedding model %r incompatible (ORA-%05d)", model, code)
             else:
