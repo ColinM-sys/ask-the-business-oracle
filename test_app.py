@@ -1244,6 +1244,45 @@ def test_evidence_dialog_preserves_exact_integers(monkeypatch):
     assert check.returncode == 0, check.stderr
 
 
+def test_evidence_rows_region_is_keyboard_focusable_and_named(monkeypatch):
+    monkeypatch.setattr("app.answer_question", lambda _: {
+        "region": "West", "claims": [], "evidence": {},
+    })
+
+    class EvidenceParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.region = None
+            self.heading_id = None
+            self.rows_heading_id = None
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if attrs.get("id") == "evidence-rows":
+                self.region = (tag, attrs)
+            if tag == "h3":
+                self.heading_id = attrs.get("id")
+
+        def handle_data(self, data):
+            if data.strip() == "Returned rows":
+                self.rows_heading_id = self.heading_id
+
+        def handle_endtag(self, tag):
+            if tag == "h3":
+                self.heading_id = None
+
+    response = app.test_client().post("/", data={"question": "West"})
+    assert response.status_code == 200
+    parser = EvidenceParser()
+    parser.feed(response.get_data(as_text=True))
+    tag, attrs = parser.region
+    assert tag == "div"
+    assert "table-wrap" in attrs["class"].split()
+    assert attrs.get("tabindex") == "0"
+    assert attrs.get("role") == "region"
+    assert parser.rows_heading_id and attrs.get("aria-labelledby") == parser.rows_heading_id
+
+
 def test_evidence_dialog_identifies_cited_cell(monkeypatch):
     monkeypatch.setattr("app.answer_question", lambda _: {
         "region": "West", "claims": [], "evidence": {},
