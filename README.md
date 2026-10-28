@@ -10,20 +10,26 @@
 A local Flask app that explains regional margin changes with Oracle SQL evidence
 and policy retrieval. No API key or language model is required.
 
+If `.env` does not exist, copy `.env.example` to `.env`. Set `ORACLE_USER`
+(database user), `ORACLE_PASSWORD` (database password), and `ORACLE_DSN`
+(connection string, such as `host:port/service_name`) in `.env` before running
+`policies.py`. Business tables must already be loaded.
+
 ```powershell
 python -m pip install -r requirements.txt
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+# Fill in the required Oracle settings in .env before continuing.
 docker start oracle-free
 python policies.py
 python app.py
 ```
 
 Open http://127.0.0.1:5055 and ask “Why did West margin fall since July 2025?”.
-The existing `.env` is read by `db.py`; business tables must already be loaded.
-Do not commit credentials. `policies.py` creates only `policy_chunks`, probes
-registered Oracle embedding models, and otherwise uses deterministic normalized
-hashing vectors. Source changes trigger a transactional policy refresh. Queries
-use Oracle `VECTOR_DISTANCE` with cosine distance; the local hashing fallback is
-lexical retrieval rather than a semantic language model.
+`.env` is read by `db.py`; do not commit credentials. `policies.py` creates only
+`policy_chunks`, probes registered Oracle embedding models, and otherwise uses
+deterministic normalized hashing vectors. Source changes trigger a transactional
+policy refresh. Queries use Oracle `VECTOR_DISTANCE` with cosine distance; the
+local hashing fallback is lexical retrieval rather than a semantic language model.
 
 The app runs fixed analysis for margin, discount and freight, regardless of
 question wording. It recognizes West, Central, East or South and a full month
