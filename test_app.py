@@ -5,6 +5,7 @@ import re
 import runpy
 import subprocess
 import sqlite3
+from collections import OrderedDict
 from contextlib import nullcontext
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -408,6 +409,49 @@ def test_policy_search_handles_empty_table(monkeypatch):
         tools.search_policies("West freight")
 
     embedding.assert_not_called()
+
+
+def test_policy_search_caches_query_vectors_by_text_and_model(monkeypatch):
+    monkeypatch.setattr(tools, "_query_vector_cache", OrderedDict(), raising=False)
+    monkeypatch.setattr(tools, "_QUERY_VECTOR_CACHE_SIZE", 2, raising=False)
+    setup = MagicMock()
+    monkeypatch.setattr(tools, "ensure_policies", setup)
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value.__enter__.return_value
+    monkeypatch.setattr(tools, "connect", lambda: connection)
+
+    requests = [
+        ("West freight", "MODEL_V1", 1),
+        ("West freight", "MODEL_V1", 4),
+        ("West freight", "MODEL_V2", 1),
+        ("West freight", "MODEL_V1", 2),
+        ("West discount", "MODEL_V1", 1),
+        ("West freight", "MODEL_V1", 3),
+        ("West freight", "MODEL_V2", 2),
+    ]
+    vectors = {("West freight", "MODEL_V1"): [1.0],
+               ("West freight", "MODEL_V2"): [2.0],
+               ("West discount", "MODEL_V1"): [3.0]}
+    cursor.execute.return_value.fetchone.side_effect = [(model,) for _, model, _ in requests]
+    cursor.execute.return_value.fetchall.side_effect = [
+        [(i, "policy.md", "content", i / 10)] for i in range(len(requests))]
+    embedding = MagicMock(side_effect=lambda cur, text, model: SimpleNamespace(
+        tolist=lambda: vectors[text, model]))
+    monkeypatch.setattr(tools, "embed", embedding)
+
+    for i, (text, model, k) in enumerate(requests):
+        result = tools.search_policies(text, k=k)
+        assert json.loads(result["params"]["query_vector"]) == vectors[text, model]
+        assert result["params"]["k"] == k
+        assert result["rows"] == [{"id": i, "doc": "policy.md", "chunk": "content", "distance": i / 10}]
+
+    assert [call.args[1:] for call in embedding.call_args_list] == [
+        ("West freight", "MODEL_V1"), ("West freight", "MODEL_V2"),
+        ("West discount", "MODEL_V1"), ("West freight", "MODEL_V2")]
+    assert len(tools._query_vector_cache) == 2
+    assert setup.call_count == len(requests)
+    assert sum("VECTOR_DISTANCE" in call.args[0] for call in cursor.execute.call_args_list) == len(requests)
 
 
 def test_question_scope():

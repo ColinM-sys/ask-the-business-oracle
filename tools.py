@@ -1,5 +1,7 @@
 """Constrained, read-only business SQL and Oracle vector policy retrieval."""
 import json
+import threading
+from collections import OrderedDict
 
 import sqlglot
 from sqlglot import exp
@@ -9,6 +11,9 @@ from policies import embed, ensure_policies
 
 TABLES = {"sales", "costs", "customers", "discounts", "products", "regions"}
 FUNCTIONS = {"SUM", "MIN", "MAX", "AVG", "COUNT", "ROUND", "NULLIF", "COALESCE", "ABS", "AND", "OR"}
+_QUERY_VECTOR_CACHE_SIZE = 128
+_query_vector_cache = OrderedDict()
+_query_vector_lock = threading.Lock()
 
 
 def validate_select(sql):
@@ -55,6 +60,17 @@ def run_sql(select, params=None):
                     "rows": [dict(zip(columns, row)) for row in rows]}
 
 
+def _query_vector(cur, text, backend):
+    key = (text, backend)
+    with _query_vector_lock:
+        if key not in _query_vector_cache:
+            _query_vector_cache[key] = json.dumps(embed(cur, text, backend).tolist())
+            if len(_query_vector_cache) > _QUERY_VECTOR_CACHE_SIZE:
+                _query_vector_cache.popitem(last=False)
+        _query_vector_cache.move_to_end(key)
+        return _query_vector_cache[key]
+
+
 def search_policies(text, k=5):
     if not isinstance(k, int) or not 1 <= k <= 20:
         raise ValueError("k must be between one and twenty")
@@ -67,9 +83,8 @@ def search_policies(text, k=5):
         if row is None:
             raise RuntimeError("No policy chunks available")
         backend = row[0]
-        vector = embed(cur, text, backend)
         # Store the exact vector as JSON; SQL converts it back on execution/replay.
-        params = {"query_vector": json.dumps(vector.tolist()), "k": k}
+        params = {"query_vector": _query_vector(cur, text, backend), "k": k}
         sql = """SELECT id, doc, chunk, VECTOR_DISTANCE(embedding, TO_VECTOR(:query_vector), COSINE) AS distance
             FROM policy_chunks ORDER BY distance, id FETCH FIRST :k ROWS ONLY"""
         rows = cur.execute(sql, params).fetchall()
