@@ -4,6 +4,7 @@ import json
 import runpy
 import subprocess
 import sqlite3
+from datetime import datetime
 from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
@@ -124,6 +125,137 @@ def test_hashing_is_stable_and_normalized():
     assert abs(sum(v*v for v in first) - 1) < 0.000001
 
 
+@pytest.fixture
+def policy_store(tmp_path, monkeypatch):
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    store = SimpleNamespace(rows=[], models=[], connection=connection, cursor=cursor)
+
+    def execute(sql, **params):
+        sql = " ".join(sql.split())
+        if sql.startswith("SELECT table_name"):
+            cursor.fetchone.return_value = ("POLICY_CHUNKS",)
+        elif sql.startswith("SELECT model_name"):
+            cursor.fetchall.return_value = store.models
+        elif sql.startswith("SELECT DISTINCT backend, source_hash"):
+            cursor.fetchall.return_value = list(dict.fromkeys(
+                (row["backend"], row["fingerprint"]) for row in store.rows))
+        elif sql.startswith("SELECT doc, source_hash"):
+            cursor.fetchall.return_value = [(row["doc"], row["fingerprint"]) for row in store.rows]
+        elif sql.startswith("SELECT source_hash, embedding"):
+            cursor.fetchall.return_value = [(row["fingerprint"], row["vector"])
+                                           for row in store.rows if row["backend"] == params["backend"]]
+        elif sql == "DELETE FROM policy_chunks":
+            store.rows.clear()
+        elif sql.startswith("INSERT INTO policy_chunks"):
+            store.rows.append(params)
+        else:
+            pytest.fail(f"Unexpected policy SQL: {sql}")
+        return cursor
+
+    cursor.execute.side_effect = execute
+    store.embedding = MagicMock(side_effect=lambda cur, text, backend: hash_embedding(text))
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+    monkeypatch.setattr("policies.embed", store.embedding)
+    return store
+
+
+@pytest.mark.parametrize("models", [[], [("GOOD_MODEL", datetime(2025, 1, 1))]])
+def test_policy_refresh_reuses_unchanged_chunk_embeddings(policy_store, tmp_path, models):
+    policy_store.models = models
+    probes = ["Business policy"] if models else []
+    stable = "Unchanged policy."
+    first_chunk, old_chunk, new_chunk = "a" * 1000, "b" * 1000, "c" * 1000
+    (tmp_path / "stable.md").write_text(stable, encoding="utf-8")
+    changed = tmp_path / "changed.md"
+    changed.write_text(first_chunk + "\n\n" + old_chunk, encoding="utf-8")
+    ensure_policies()
+    original_vectors = {row["chunk"]: row["vector"] for row in policy_store.rows}
+
+    changed.write_text(first_chunk + "\n\n" + new_chunk, encoding="utf-8")
+    policy_store.embedding.reset_mock()
+    ensure_policies()
+
+    assert [call.args[1] for call in policy_store.embedding.call_args_list] == probes + [new_chunk]
+    assert [(row["doc"], row["chunk"]) for row in policy_store.rows] == [
+        ("changed.md", first_chunk), ("changed.md", new_chunk), ("stable.md", stable)]
+    for row in policy_store.rows:
+        if row["chunk"] in original_vectors:
+            assert row["vector"] == original_vectors[row["chunk"]]
+
+    # An unchanged corpus does not infer vectors or rewrite rows.
+    policy_store.embedding.reset_mock()
+    policy_store.connection.reset_mock()
+    ensure_policies()
+    assert [call.args[1] for call in policy_store.embedding.call_args_list] == probes
+    policy_store.connection.commit.assert_not_called()
+    assert not any(call.args[0].lstrip().startswith(("DELETE", "INSERT"))
+                   for call in policy_store.cursor.execute.call_args_list)
+
+    # Renames, removals and duplicate content refresh metadata without inference.
+    changed.rename(tmp_path / "renamed.md")
+    (tmp_path / "stable.md").unlink()
+    (tmp_path / "duplicate.md").write_text(new_chunk, encoding="utf-8")
+    policy_store.embedding.reset_mock()
+    ensure_policies()
+    assert [call.args[1] for call in policy_store.embedding.call_args_list] == probes
+    assert [(row["doc"], row["chunk"]) for row in policy_store.rows] == [
+        ("duplicate.md", new_chunk), ("renamed.md", first_chunk), ("renamed.md", new_chunk)]
+    policy_store.connection.commit.assert_called_once()
+
+
+def test_policy_refresh_embeds_duplicate_new_chunks_once(policy_store, tmp_path):
+    for name in ("first.md", "second.md"):
+        (tmp_path / name).write_text("Shared policy.", encoding="utf-8")
+
+    ensure_policies()
+
+    assert [call.args[1] for call in policy_store.embedding.call_args_list] == ["Shared policy."]
+    assert len(policy_store.rows) == 2
+
+
+@pytest.mark.parametrize("original, replacement", [
+    ([], [("GOOD_MODEL", datetime(2025, 1, 1))]),
+    ([("GOOD_MODEL", datetime(2025, 1, 1))], []),
+    ([("GOOD_MODEL", datetime(2025, 1, 1))], [("NEW_MODEL", datetime(2025, 1, 1))]),
+    ([("GOOD_MODEL", datetime(2025, 1, 1))], [("GOOD_MODEL", datetime(2025, 1, 2))]),
+])
+def test_policy_refresh_invalidates_model_changes(policy_store, tmp_path, original, replacement):
+    (tmp_path / "policy.md").write_text("Unchanged policy.", encoding="utf-8")
+    policy_store.models = original
+    ensure_policies()
+    old_key = policy_store.rows[0]["fingerprint"]
+    policy_store.models = replacement
+    policy_store.embedding.reset_mock()
+
+    ensure_policies()
+
+    calls = [call.args[1] for call in policy_store.embedding.call_args_list]
+    assert calls == (["Business policy"] if replacement else []) + ["Unchanged policy."]
+    assert policy_store.rows[0]["fingerprint"] != old_key
+    assert policy_store.rows[0]["backend"] == (replacement[0][0] if replacement else "hash-v1-512")
+
+
+def test_policy_refresh_embedding_failure_preserves_rows(policy_store, tmp_path):
+    policy = tmp_path / "policy.md"
+    policy.write_text("Original policy.", encoding="utf-8")
+    ensure_policies()
+    original_rows = list(policy_store.rows)
+    policy.write_text("Changed policy.", encoding="utf-8")
+    policy_store.embedding.side_effect = RuntimeError("Inference unavailable")
+    policy_store.connection.reset_mock()
+
+    with pytest.raises(RuntimeError, match="Inference unavailable"):
+        ensure_policies()
+
+    assert policy_store.rows == original_rows
+    policy_store.connection.commit.assert_not_called()
+    assert not any(call.args[0].lstrip().startswith(("DELETE", "INSERT"))
+                   for call in policy_store.cursor.execute.call_args_list)
+
+
 @pytest.mark.parametrize("failure", [
     RuntimeError("private-driver-details"),
     oracledb.DatabaseError(SimpleNamespace(code=3113, message="private-driver-details")),
@@ -135,7 +267,7 @@ def test_policy_probe_propagates_unexpected_failures(failure, tmp_path, monkeypa
     connection.__enter__.return_value = connection
     cursor = connection.cursor.return_value
     cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
-    cursor.execute.return_value.fetchall.side_effect = [[("BROKEN_MODEL",)], []]
+    cursor.execute.return_value.fetchall.side_effect = [[("BROKEN_MODEL", None)], []]
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
 
@@ -156,8 +288,8 @@ def test_policy_probe_propagates_unexpected_failures(failure, tmp_path, monkeypa
 
 @pytest.mark.parametrize("models, expected", [
     ([], "hash-v1-512"),
-    ([("INCOMPATIBLE_MODEL",)], "hash-v1-512"),
-    ([("INCOMPATIBLE_MODEL",), ("GOOD_MODEL",)], "GOOD_MODEL"),
+    ([("INCOMPATIBLE_MODEL", None)], "hash-v1-512"),
+    ([("INCOMPATIBLE_MODEL", None), ("GOOD_MODEL", None)], "GOOD_MODEL"),
 ])
 def test_policy_probe_fallback_is_explicit_and_sanitized(
         models, expected, tmp_path, monkeypatch, caplog):
@@ -166,7 +298,7 @@ def test_policy_probe_fallback_is_explicit_and_sanitized(
     connection.__enter__.return_value = connection
     cursor = connection.cursor.return_value
     cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
-    cursor.execute.return_value.fetchall.side_effect = [models, []]
+    cursor.execute.return_value.fetchall.side_effect = [models, [], []]
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
 
@@ -215,7 +347,7 @@ def test_empty_policy_documents_preserve_existing_rows(tmp_path, monkeypatch):
     connection.__enter__.return_value = connection
     cursor = connection.cursor.return_value
     cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
-    cursor.execute.return_value.fetchall.side_effect = [[], [("hash-v1-512", "old-hash")]]
+    cursor.execute.return_value.fetchall.side_effect = [[]]
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
 

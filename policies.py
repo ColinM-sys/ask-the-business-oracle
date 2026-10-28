@@ -41,7 +41,6 @@ def ensure_policies():
     sources = [(p.name, p.read_text(encoding="utf-8")) for p in sorted(DOCS.glob("*.md"))]
     if not sources:
         raise RuntimeError("No policy documents found")
-    fingerprint = hashlib.sha256(repr(sources).encode()).hexdigest()
     with _lock, connect() as con:
         cur = con.cursor()
         if not cur.execute("SELECT table_name FROM user_tables WHERE table_name='POLICY_CHUNKS'").fetchone():
@@ -49,12 +48,15 @@ def ensure_policies():
                 id NUMBER PRIMARY KEY, doc VARCHAR2(255), chunk VARCHAR2(4000),
                 embedding VECTOR(*, FLOAT32), backend VARCHAR2(128), source_hash VARCHAR2(64))""")
         backend = "hash-v1-512"
-        for (model,) in cur.execute(
-            "SELECT model_name FROM user_mining_models WHERE mining_function='EMBEDDING' ORDER BY model_name"
+        revision = None
+        for model, created in cur.execute(
+            "SELECT model_name, creation_date FROM user_mining_models "
+            "WHERE mining_function='EMBEDDING' ORDER BY model_name"
         ).fetchall():
             try:
                 embed(cur, "Business policy", model)
                 backend = model
+                revision = created
                 break
             except oracledb.DatabaseError as exc:
                 code = getattr(exc.args[0], "code", None) if exc.args else None
@@ -65,9 +67,6 @@ def ensure_policies():
                 _logger.warning("Embedding model %r incompatible (ORA-%05d)", model, code)
         else:
             _logger.warning("Using hash-v1-512 fallback: no compatible embedding models available")
-        existing = cur.execute("SELECT DISTINCT backend, source_hash FROM policy_chunks").fetchall()
-        if existing == [(backend, fingerprint)]:
-            return backend
         chunks = []
         for name, content in sources:
             # Keep headings with their paragraphs; these short documents fit in one chunk.
@@ -86,12 +85,23 @@ def ensure_policies():
                 chunks.append((name, chunk))
         if not chunks:
             raise RuntimeError("No policy content found")
-        vectors = [embed(cur, chunk, backend) for _, chunk in chunks]
+        # Persist content/model keys so edits and renames can reuse unchanged vectors.
+        chunks = [(doc, chunk, hashlib.sha256(repr((backend, revision, chunk)).encode()).hexdigest())
+                  for doc, chunk in chunks]
+        existing = cur.execute("SELECT doc, source_hash FROM policy_chunks ORDER BY id").fetchall()
+        if existing == [(doc, key) for doc, _, key in chunks]:
+            return backend
+        vectors = dict(cur.execute(
+            "SELECT source_hash, embedding FROM policy_chunks WHERE backend=:backend", backend=backend
+        ).fetchall())
+        for _, chunk, key in chunks:
+            if key not in vectors:
+                vectors[key] = embed(cur, chunk, backend)
         cur.execute("DELETE FROM policy_chunks")
-        for index, ((doc, chunk), vector) in enumerate(zip(chunks, vectors), 1):
+        for index, (doc, chunk, key) in enumerate(chunks, 1):
             cur.execute("""INSERT INTO policy_chunks (id,doc,chunk,embedding,backend,source_hash)
                 VALUES (:id,:doc,:chunk,:vector,:backend,:fingerprint)""",
-                id=index, doc=doc, chunk=chunk, vector=vector, backend=backend, fingerprint=fingerprint)
+                id=index, doc=doc, chunk=chunk, vector=vectors[key], backend=backend, fingerprint=key)
         con.commit()
         return backend
 
