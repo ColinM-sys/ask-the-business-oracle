@@ -2,7 +2,6 @@
 from flask import Flask, render_template, request
 
 from agent import answer_question
-from policies import ensure_policies
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024
@@ -25,5 +24,4 @@ def index():
 
 
 if __name__ == "__main__":
-    ensure_policies()
     app.run(host="127.0.0.1", port=5055, debug=False)
