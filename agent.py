@@ -68,6 +68,7 @@ def summary_sql():
         }
         for name, expression in raw[period].items():
             columns.append(f"ROUND({expression},2) AS {period}_{name}")
+            columns.append(f"({expression}) AS {period}_{name}_unrounded")
     columns.extend([
         "SUM(CASE WHEN c.unit_cogs IS NULL OR c.freight_per_unit IS NULL THEN 1 ELSE 0 END) AS missing_cost_count",
         f"{MISSING_DISCOUNT_COUNT} AS missing_discount_count",
@@ -176,7 +177,7 @@ def answer_question(question):
 
     claim("scope", [text(f"{region}: compare "), number("first_month"), text(" through "),
         number("before_last_month"), text(" with "), number("after_first_month"), text(" through "),
-        number("last_month"), text(". Margin includes COGS and freight; percentages are revenue-weighted. Discounts are weighted by gross sales; freight is weighted by units.")])
+        number("last_month"), text(". Margin includes COGS and freight; percentages are revenue-weighted. Discounts are weighted by gross sales; freight is weighted by units. Changes are calculated from unrounded values before rounding for display.")])
     direction = row["margin_direction"]
     precision_note = (" The change is below display precision."
                       if row["margin_drop_pts"] == 0 and direction != "was unchanged" else "")

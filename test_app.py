@@ -698,6 +698,48 @@ def test_margin_direction_uses_unrounded_sql(before, after, direction, below_pre
     assert result["dropped_count"] == 0
 
 
+@pytest.mark.parametrize("before,after", [(25.004, 24.996), (24.996, 25.004)])
+def test_evidence_exposes_unrounded_endpoints_for_changes(before, after, monkeypatch):
+    # Both margins and freight amounts display equally, but their changes do not.
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+        """)
+        for month, margin, freight in (("2025-06", before, 1.004), ("2025-07", after, 0.996)):
+            con.execute("INSERT INTO sales VALUES (1, 1, ?, 100.0, 1, 100.0, ?)", (month, freight))
+            con.execute("INSERT INTO costs VALUES (1, 1, ?, ?, ?)",
+                        (month, 100 - margin - freight, freight))
+
+        def run_sql(sql, params=None):
+            return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
+                con.execute(tools.validate_select(sql), params or {})]}
+
+        monkeypatch.setattr("agent.run_sql", run_sql)
+        monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
+        response = app.test_client().post("/", data={"question": "West since July 2025"})
+
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    evidence = json.loads(html.split("const evidence = ", 1)[1].split(";", 1)[0])
+    row = evidence["E2"]["rows"][0]
+    assert row["before_margin_pct"] == row["after_margin_pct"] == 25
+    assert row["margin_drop_pts"] == pytest.approx(round(before - after, 2))
+    assert row["before_margin_pct_unrounded"] == pytest.approx(before)
+    assert row["after_margin_pct_unrounded"] == pytest.approx(after)
+    assert row["before_freight_per_unit"] == row["after_freight_per_unit"] == 1
+    assert row["freight_increase_pct"] == pytest.approx(-0.8)
+    assert row["before_freight_per_unit_unrounded"] == pytest.approx(1.004)
+    assert row["after_freight_per_unit_unrounded"] == pytest.approx(0.996)
+    assert row["before_discount_pct_unrounded"] == pytest.approx(1.004)
+    assert row["after_discount_pct_unrounded"] == pytest.approx(0.996)
+    assert "before rounding" in html.lower()
+
+
 def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
     row = {
         "region_name": "West", "first_month": "2025-01", "last_month": "2025-09",
