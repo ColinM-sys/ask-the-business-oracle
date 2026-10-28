@@ -79,6 +79,22 @@ def test_readme_documents_node_test_prerequisite():
     assert "Node.js installed and available as `node` on PATH" in " ".join(test_instructions.split())
 
 
+def test_readme_documents_required_oracle_configuration():
+    root = Path(__file__).parent
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    setup = readme.split("python policies.py", 1)[0]
+    assert "Copy-Item .env.example .env" in setup
+    assert "before running `policies.py`" in " ".join(setup.split())
+    example = dict(line.split("=", 1) for line in
+                   (root / ".env.example").read_text(encoding="utf-8").splitlines()
+                   if "=" in line and not line.lstrip().startswith("#"))
+    for name in ("ORACLE_USER", "ORACLE_PASSWORD", "ORACLE_DSN"):
+        assert name in setup
+        assert name in example
+        is_empty = not example[name].strip()
+        assert is_empty, f"{name} must be blank in .env.example"
+
+
 @pytest.mark.parametrize("sql", [
     "DELETE FROM sales", "DROP TABLE sales", "UPDATE sales SET quantity=0",
     "INSERT INTO sales (sale_id) VALUES (0)", "ALTER TABLE sales ADD x NUMBER",
