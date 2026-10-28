@@ -1,9 +1,10 @@
 # Ask the Business
 
 > **Hackathon report: [REPORT.md](REPORT.md).** Built at the Codex + Oracle AI Database Hackathon (Oracle AI
-> World, Oct 28, 2026) by Claude orchestrating **6,704 OpenAI Codex agent runs (656M tokens)**. Up to 200 agents
-> ran in parallel across GPT-6.1-Sol, GPT-6-Astra and GPT-6.1-Terra. They reviewed, fixed, tested and merged this
-> repo: **73 agent PRs** (34 merged so far) and **42 → 213 tests**. The report covers calls and tokens by
+> World, Oct 28, 2026) by Claude orchestrating **8,809 OpenAI Codex agent runs (1.19 billion tokens)**. Up to 200
+> agents ran in parallel across GPT-6.1-Sol, GPT-6-Astra and GPT-6.1-Terra. They reviewed, fixed, tested and merged
+> this repo: **138 agent PRs** (66 merged, 68 closed with a reason) and **42 → 345 tests**. Usage was updated at
+> 14:47 ET, after the swarm paused. The report covers calls and tokens by
 > component and model, the 6-to-200-agent scaling curve, the merge-bot pipeline, AgentSocial (agents coordinating
 > on an open local social network), and every problem hit and fixed. The orchestration code is in [`swarm/`](swarm).
 

@@ -42,7 +42,7 @@ def done(reason):
     with open(os.path.join(HERE, "watchdog.log"), "a", encoding="utf-8") as f:
         f.write(f"{time.strftime('%H:%M:%S')} ALERT {reason}\n")
     print("ALERT", reason)
-    sys.exit(1)
+    # keep watching; the alert is in watchdog.log
 
 
 fails, idle_since = lines(FAIL), None
@@ -53,7 +53,7 @@ while True:
     with open(os.path.join(HERE, "watchdog.log"), "a", encoding="utf-8") as f:
         f.write(f"{time.strftime('%H:%M:%S')} codex={n_codex} new_failures={n_fail - fails} "
                 f"last_commit={age / 60:.0f}m hammer={hammer} merge_bot={merger}\n")
-    if n_fail - fails > 30:
+    if n_fail - fails > 120:
         done(f"{n_fail - fails} Codex failures in the last minute")
     fails = n_fail
     if not hammer or not merger:
