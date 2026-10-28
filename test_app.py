@@ -1236,6 +1236,58 @@ def test_evidence_dialog_preserves_exact_integers(monkeypatch):
     assert check.returncode == 0, check.stderr
 
 
+def test_evidence_dialog_explains_empty_rows(monkeypatch):
+    result = {
+        "region": "West", "claims": [], "evidence": {
+            "E1": {"kind": "sql", "sql": "SELECT ...", "params": {}, "rows": []},
+            "E2": {"kind": "sql", "sql": "SELECT ...", "params": {},
+                   "rows": [{"region": "West"}]},
+        },
+    }
+    monkeypatch.setattr("app.answer_question", lambda _: result)
+    response = app.test_client().post("/", data={"question": "West"})
+    assert response.status_code == 200
+    script = response.get_data(as_text=True).split("<script>", 1)[1].split("</script>", 1)[0]
+    check = subprocess.run(["node", "-e", """
+        const assert = require('node:assert/strict');
+        class Element {
+            constructor() { this.children = []; this.value = ''; }
+            set textContent(value) { this.value = String(value); this.children = []; }
+            get textContent() { return this.value + this.children.map(child => typeof child === 'string' ? child : child.textContent).join(''); }
+            append(...children) { this.children.push(...children); }
+            replaceChildren(...children) { this.value = ''; this.children = children; }
+            addEventListener() {}
+            showModal() {}
+            querySelector() { return null; }
+            createTHead() { const child = new Element(); this.append(child); return child; }
+            createTBody() { const child = new Element(); this.append(child); return child; }
+            insertRow() { const child = new Element(); this.append(child); return child; }
+            insertCell() { const child = new Element(); this.append(child); return child; }
+        }
+        const elements = {};
+        const buttons = ['E1', 'E2'].map(id => ({
+            dataset: {evidence: id},
+            addEventListener: (_, handler) => { buttonsById[id] = handler; },
+        }));
+        const buttonsById = {};
+        global.document = {
+            getElementById: id => elements[id] ||= new Element(),
+            querySelectorAll: () => buttons,
+            createElement: () => new Element(),
+        };
+    """ + script + """
+        buttonsById.E2();
+        const rows = elements['evidence-rows'];
+        assert.match(rows.textContent, /West/);
+        buttonsById.E1();
+        assert.equal(rows.textContent.trim(), 'No rows returned');
+        buttonsById.E2();
+        assert.match(rows.textContent, /West/);
+        assert.doesNotMatch(rows.textContent, /No rows returned/);
+    """], capture_output=True, text=True)
+    assert check.returncode == 0, check.stderr
+
+
 def test_evidence_dialog_identifies_cited_cell(monkeypatch):
     monkeypatch.setattr("app.answer_question", lambda _: {
         "region": "West", "claims": [], "evidence": {},
