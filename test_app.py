@@ -2,6 +2,7 @@
 import copy
 import json
 import runpy
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -294,6 +295,29 @@ def test_ui_missing_question_rejected_before_querying(monkeypatch, data):
     monkeypatch.setattr("agent.run_sql", forbidden_query)
     response = app.test_client().post("/", data=data)
     assert response.status_code == 400
+def test_ui_restores_submit_button_on_pageshow():
+    html = app.test_client().get("/").get_data(as_text=True)
+    script = html.rsplit("<script>", 1)[1].split("</script>", 1)[0]
+    subprocess.run(["node", "-e", """
+        const assert = require('node:assert/strict');
+        const handlers = {};
+        const button = {disabled: false, textContent: 'Analyze question'};
+        const form = {addEventListener: (event, handler) => handlers[event] = handler};
+        global.document = {
+            getElementById: () => form,
+            querySelector: () => button,
+        };
+        global.window = {addEventListener: (event, handler) => handlers[event] = handler};
+    """ + script + """
+        for (let visit = 0; visit < 2; visit++) {
+            handlers.submit();
+            assert.equal(button.disabled, true);
+            assert.equal(button.textContent, 'Analyzing\u2026');
+            handlers.pageshow({persisted: true});
+            assert.equal(button.disabled, false);
+            assert.equal(button.textContent, 'Analyze question');
+        }
+    """], check=True, capture_output=True, text=True)
 
 
 def test_ui_validation_and_safe_error(monkeypatch):

@@ -115,6 +115,9 @@
   </script>
   {% endif %}
   <script>
+    window.addEventListener('pageshow', () => {
+      const button = document.querySelector('.submit'); button.disabled = false; button.textContent = 'Analyze question';
+    });
     document.getElementById('question-form').addEventListener('submit', () => {
       const button = document.querySelector('.submit'); button.disabled = true; button.textContent = 'Analyzing…';
     });
