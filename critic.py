@@ -1,6 +1,7 @@
 """Deterministic cell-level grounding for all numbers in the brief."""
 from decimal import Decimal, InvalidOperation
 import re
+import unicodedata
 
 
 def supported(part, evidence):
@@ -45,8 +46,10 @@ def critique(claims, evidence):
                     number_tails[-1] += part["text"]
                 rendered += part["text"]
             else:
-                # A sign must belong to the cited value, even across text parts.
-                valid &= not bool(re.search(r"[+\-\u2212]\s*$", rendered))
+                # A sign must belong to the cited value, even before currency symbols.
+                previous = next((char for char in reversed(rendered)
+                                 if not char.isspace() and unicodedata.category(char) != "Sc"), "")
+                valid &= previous not in ("+", "-", "\u2212")
                 valid &= supported(part, evidence)
                 # Limit suffixes; the cited cell's units are not checked.
                 valid &= part.get("suffix", "") in ("", "%", " percentage points")

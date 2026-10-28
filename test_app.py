@@ -284,6 +284,27 @@ def test_critic_refuses_signs_outside_cited_value(sample_evidence, prefix, split
     assert critique([claim], sample_evidence) == ([], [claim])
 
 
+@pytest.mark.parametrize("sign", ["-", "+", "\u2212"])
+@pytest.mark.parametrize("currency", ["$", "\u20ac", "\u00a3", "\u00a5"])
+@pytest.mark.parametrize("spacing", ["", " "])
+@pytest.mark.parametrize("split", [False, True])
+def test_critic_refuses_signs_before_currency(sample_evidence, sign, currency, spacing, split):
+    sample_evidence["E1"]["rows"][0]["margin"] = 5
+    prefix = sign + spacing + currency + spacing
+    texts = [{"text": char} for char in prefix] if split else [{"text": prefix}]
+    claim = {"parts": texts + [
+        {"value": 5, "evidence": "E1", "row": 0, "column": "margin"}]}
+    assert critique([claim], sample_evidence) == ([], [claim])
+
+
+@pytest.mark.parametrize("value", [5, -5])
+def test_critic_preserves_cited_currency_value(sample_evidence, value):
+    sample_evidence["E1"]["rows"][0]["margin"] = value
+    claim = {"parts": [{"text": "$"},
+        {"value": value, "evidence": "E1", "row": 0, "column": "margin"}]}
+    assert critique([claim], sample_evidence) == ([claim], [])
+
+
 def test_critic_preserves_cited_negative_value(sample_evidence):
     sample_evidence["E1"]["rows"][0]["margin"] = -25.53
     claim = {"parts": [{"text": "Margin: "},
