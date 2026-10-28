@@ -79,6 +79,18 @@ def test_readme_documents_node_test_prerequisite():
     assert "Node.js installed and available as `node` on PATH" in " ".join(test_instructions.split())
 
 
+def test_readme_documents_live_test_dataset():
+    readme = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
+    setup = readme.split("python policies.py", 1)[0]
+    test_instructions = " ".join(readme.split("python -m pytest -q test_app.py", 1)[1].split())
+    assert "\npython load.py" in setup
+    assert "`data/oracle_load.sql`" in test_instructions
+    assert "`python load.py`" in test_instructions
+    assert "schema without the business tables" in test_instructions
+    assert "fails if they already exist" in test_instructions
+    assert "13.36 percentage points" in test_instructions
+
+
 def test_readme_documents_required_oracle_configuration():
     root = Path(__file__).parent
     readme = (root / "README.md").read_text(encoding="utf-8")

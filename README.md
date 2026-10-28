@@ -13,13 +13,15 @@ and policy retrieval. No API key or language model is required.
 If `.env` does not exist, copy `.env.example` to `.env`. Set `ORACLE_USER`
 (database user), `ORACLE_PASSWORD` (database password), and `ORACLE_DSN`
 (connection string, such as `host:port/service_name`) in `.env` before running
-`policies.py`. Business tables must already be loaded.
+`policies.py`. Load the business tables once in a new schema; skip `python load.py`
+if they already exist.
 
 ```powershell
 python -m pip install -r requirements.txt
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 # Fill in the required Oracle settings in .env before continuing.
 docker start oracle-free
+python load.py  # Once, in a schema without the business tables.
 python policies.py
 python app.py
 ```
@@ -58,9 +60,13 @@ and runs without debug mode; this demo has no production authentication layer.
 python -m pytest -q test_app.py
 ```
 
-Tests include live Oracle integration; start the local database first. They also
-require Node.js installed and available as `node` on PATH. Tests do not reload or
-alter the business tables.
+Tests include live Oracle integration; start the local database first. The business
+tables must contain the exact checked-in fixture in `data/oracle_load.sql`: run
+`python load.py` once in a schema without the business tables, or use a database
+already loaded with this unmodified fixture. The loader creates the tables and
+fails if they already exist. The West test expects a margin drop of 13.36
+percentage points. Tests also require Node.js installed and available as `node`
+on PATH. They do not reload or alter the business tables.
 
 Oracle syntax reference: [VECTOR_EMBEDDING](https://docs.oracle.com/en/database/oracle/oracle-database/26/vecse/vector_embedding.html)
 and [Oracle vector search quick start](https://docs.oracle.com/en/database/oracle/oracle-database/26/vecse/sql-quick-start-using-vector-embedding-model-uploaded-database.html).
