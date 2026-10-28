@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -49,9 +50,14 @@ def codex(prompt, cwd, write=False, tries=2, model=None):
 
 
 def _codex(prompt, cwd, write, model=None):
-    r = subprocess.run(CODEX + ["exec", "--skip-git-repo-check", "-s", "danger-full-access" if write else "read-only",
+    if os.path.abspath(cwd) == os.path.abspath(EMPTY):  # shared empty folder: give this run its own
+        cwd = tempfile.mkdtemp(dir=EMPTY)
+    # --cd makes every command line unique. watch_runaway.py on this desktop kills any 25+ processes with an
+    # identical command line, and stdin-prompted runs were identical: that was the exit-15 mass kills.
+    r = subprocess.run(CODEX + ["exec", "--skip-git-repo-check", "--cd", cwd,
+                                "-s", "danger-full-access" if write else "read-only",
+                                "-c", "mcp_servers.sqlcl.enabled=false",  # each run otherwise starts a ~130 MB SQLcl JVM
                                 *(["-m", model] if model else []),
-                                # Astra at "ultra" (task delegation) exits 15 under codex exec; run it at max.
                                 *(["-c", "model_reasoning_effort=max"] if model == "gpt-6-astra" else []),
                                 "--json", "-"], cwd=cwd, input=prompt, capture_output=True, text=True,
                        encoding="utf-8", errors="ignore", timeout=600)  # prompt on stdin: too long for argv
