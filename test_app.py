@@ -1,6 +1,7 @@
 """Unit checks and live integration against the existing local Oracle tables."""
 import copy
 import json
+import re
 import runpy
 import subprocess
 import sqlite3
@@ -400,6 +401,77 @@ def test_question_scope():
         parse_question("West and East")
 
 
+@pytest.mark.parametrize("column", ["discount_pct", "quantity", "unit_price"])
+@pytest.mark.parametrize("region_id", [1, 2])
+@pytest.mark.parametrize("month", ["2025-06", "2025-07"])
+@pytest.mark.parametrize("incomplete_when", ["both", "monthly", "summary"])
+def test_missing_discount_inputs_reject_analysis(column, region_id, month, incomplete_when, monkeypatch):
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West'), (2, 'East');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+        """)
+        for current_region in (1, 2):
+            for current_month in ("2025-06", "2025-07"):
+                con.execute("INSERT INTO sales VALUES (?, 1, ?, 90.0, 1, 100.0, 10)",
+                            (current_region, current_month))
+                con.execute("INSERT INTO costs VALUES (?, 1, ?, 60.0, 5.0)",
+                            (current_region, current_month))
+        sale_id = con.execute("INSERT INTO sales VALUES (?, 1, ?, 100.0, 1, 100.0, 0)",
+                              (region_id, month)).lastrowid
+
+        def execute(sql, params=None):
+            return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
+                con.execute(tools.validate_select(sql), params or {})]}
+
+        policies = MagicMock(return_value={"rows": []})
+        monkeypatch.setattr("agent.run_sql", execute)
+        monkeypatch.setattr("agent.search_policies", policies)
+        result = answer_question("West since July 2025")
+        region = "West" if region_id == 1 else "East"
+        monthly = next(row for row in result["evidence"]["E1"]["rows"]
+                       if row["region_name"] == region and row["sale_month"] == month)
+        summary = next(row for row in result["evidence"]["E2"]["rows"]
+                       if row["region_name"] == region)
+        period = "before" if month == "2025-06" else "after"
+        assert monthly["discount_pct"] == summary[f"{period}_discount_pct"] == 5
+        policies.reset_mock()
+
+        def set_input(value):
+            con.execute(f"UPDATE sales SET {column}=? WHERE rowid=?", (value, sale_id))
+
+        valid_value = {"discount_pct": 0, "quantity": 1, "unit_price": 100.0}[column]
+        if incomplete_when != "summary":
+            set_input(None)
+        snapshots = []
+
+        def run_sql(sql, params=None):
+            result = execute(sql, params)
+            snapshots.append(result)
+            if len(snapshots) == 1:
+                if incomplete_when == "monthly":
+                    set_input(valid_value)
+                elif incomplete_when == "summary":
+                    set_input(None)
+            return result
+
+        monkeypatch.setattr("agent.run_sql", run_sql)
+        with pytest.raises(ValueError, match="Missing discount inputs"):
+            answer_question("West since July 2025")
+        policies.assert_not_called()
+        for snapshot in snapshots:
+            for row in snapshot["rows"]:
+                if row["missing_discount_count"]:
+                    if "sale_month" in row:
+                        assert row["discount_pct"] is None
+                    else:
+                        assert row[f"{period}_discount_pct"] is None
+
+
 @pytest.mark.parametrize("region_id", [1, 2])
 @pytest.mark.parametrize("cost", [None, (None, 5.0), (60.0, None), (None, None)])
 @pytest.mark.parametrize("month,product_id", [
@@ -619,7 +691,7 @@ def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
         "before_discount_pct": 3, "after_discount_pct": 18,
         "before_freight_per_unit": 0, "after_freight_per_unit": 5,
         "freight_increase_pct": None,
-        "missing_cost_count": 0,
+        "missing_cost_count": 0, "missing_discount_count": 0,
     }
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
         "sql": sql, "params": params or {}, "rows": [row]})
@@ -707,7 +779,7 @@ def policy_rows(monkeypatch):
         "margin_direction": "fell", "before_discount_pct": 3, "after_discount_pct": 18,
         "before_freight_per_unit": 5, "after_freight_per_unit": 8,
         "freight_increase_pct": 60,
-        "missing_cost_count": 0,
+        "missing_cost_count": 0, "missing_discount_count": 0,
     }
     policies = [{"id": i, "doc": path.name, "chunk": path.read_text(encoding="utf-8").strip()}
                 for i, path in enumerate(sorted(Path(__file__).with_name("docs").glob("*.md")), 1)]
@@ -811,7 +883,7 @@ def retrieved_policy_rows(monkeypatch):
         "margin_direction": "fell", "before_discount_pct": 3, "after_discount_pct": 18,
         "before_freight_per_unit": 5, "after_freight_per_unit": 8,
         "freight_increase_pct": 60,
-        "missing_cost_count": 0,
+        "missing_cost_count": 0, "missing_discount_count": 0,
     }
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
         "sql": sql, "params": params or {}, "rows": [summary]})
@@ -971,6 +1043,39 @@ def test_ui_discloses_dropped_claims_and_empty_brief(monkeypatch, has_claims, dr
     assert (b"No verified claims are available for this brief." in response.data) == (not has_claims)
     assert (b"Numbers in retained claims verified against cited SQL cells." in response.data) == has_claims
     assert (b"Retained finding." in response.data) == has_claims
+    assert b"Explanation unavailable" in response.data
+    assert b"Recommendations unavailable" in response.data
+
+
+@pytest.mark.parametrize("reason_available,actions_available", [
+    (True, True), (True, False), (False, True), (False, False),
+])
+@pytest.mark.parametrize("missing_policy", ["not retrieved", "changed"])
+def test_ui_discloses_missing_policy_backed_sections(
+    policy_rows, reason_available, actions_available, missing_policy
+):
+    missing_docs = set()
+    if not reason_available:
+        missing_docs.add("west_q3_volume_push.md")
+    if not actions_available:
+        missing_docs.add("pricing_policy.md")
+    if missing_policy == "not retrieved":
+        policy_rows[:] = [row for row in policy_rows if row["doc"] not in missing_docs]
+    else:
+        for row in policy_rows:
+            if row["doc"] in missing_docs:
+                row["chunk"] = "Changed policy content."
+
+    response = app.test_client().post("/", data={"question": "West since July 2025"})
+
+    assert response.status_code == 200
+    assert (b"Explanation unavailable" in response.data) == (not reason_available)
+    assert (b"Recommendations unavailable" in response.data) == (not actions_available)
+    assert (b"The policy documents identify" in response.data) == reason_available
+    assert (b"Review discount approvals" in response.data) == actions_available
+    assert b"omitted because they failed verification" not in response.data
+
+
 @pytest.mark.parametrize("data", [None, {}, {"unrelated": "value"}, {"question": ""}])
 def test_ui_missing_question_rejected_before_querying(monkeypatch, data):
     def forbidden_query(*args, **kwargs):
@@ -979,6 +1084,33 @@ def test_ui_missing_question_rejected_before_querying(monkeypatch, data):
     monkeypatch.setattr("agent.run_sql", forbidden_query)
     response = app.test_client().post("/", data=data)
     assert response.status_code == 400
+
+
+def test_focus_indicator_contrasts_with_page_and_cards():
+    html = app.test_client().get("/").get_data(as_text=True)
+
+    def declaration(selector, name):
+        rule = re.search(rf"{re.escape(selector)}\s*\{{([^}}]*)\}}", html)
+        assert rule, f"Missing {selector} rule"
+        value = re.search(rf"(?:^|;)\s*{re.escape(name)}\s*:\s*([^;]+)", rule.group(1))
+        assert value, f"Missing {name} in {selector}"
+        return value.group(1).strip()
+
+    def luminance(color):
+        color = {"white": "#ffffff"}.get(color.lower(), color)
+        assert re.fullmatch(r"#[0-9a-fA-F]{6}", color)
+        channels = [int(color[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+        linear = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+                  for c in channels]
+        return sum(weight * channel for weight, channel in zip((0.2126, 0.7152, 0.0722), linear))
+
+    outline = declaration(":focus-visible", "outline").split()[-1]
+    for surface in (declaration(":root", "background"), declaration(".card", "background")):
+        dark, light = sorted((luminance(outline), luminance(surface)))
+        contrast = (light + 0.05) / (dark + 0.05)
+        assert contrast >= 3, f"Focus outline {outline} has {contrast:.2f}:1 contrast against {surface}"
+
+
 def test_ui_restores_submit_button_on_pageshow():
     html = app.test_client().get("/").get_data(as_text=True)
     script = html.rsplit("<script>", 1)[1].split("</script>", 1)[0]
@@ -1174,7 +1306,7 @@ def test_ui_validation_and_safe_error(monkeypatch):
 def test_ui_sanitizes_invalid_policy_encoding(tmp_path, monkeypatch):
     (tmp_path / "policy.md").write_bytes(b"\xff")
     monkeypatch.setattr("policies.DOCS", tmp_path)
-    row = {"region_name": "West", "missing_cost_count": 0,
+    row = {"region_name": "West", "missing_cost_count": 0, "missing_discount_count": 0,
            "before_margin_pct": 40, "after_margin_pct": 25}
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
         "sql": sql, "params": params or {}, "rows": [row]})
