@@ -620,6 +620,22 @@ def test_question_scope():
         parse_question("West and East")
 
 
+@pytest.mark.parametrize("name, expected", [
+    ("Eastern", "East"), ("eAsTeRn", "East"),
+    ("Western", "West"), ("Southern", "South"), ("Central", "Central"),
+])
+def test_question_recognizes_region_adjectives(name, expected):
+    assert parse_question(f"Why did the {name} region's margin fall since July 2025?") == (expected, "2025-07")
+
+
+def test_question_counts_region_adjectives_as_the_same_region():
+    assert parse_question("East and Eastern since July 2025") == ("East", "2025-07")
+
+
+@pytest.mark.parametrize("regions", ["West and Eastern", "Western and East", "Southern and East"])
+def test_question_rejects_multiple_regions_with_adjectives(regions):
+    with pytest.raises(ValueError, match="one region"):
+        parse_question(f"{regions} since July 2025")
 @pytest.mark.parametrize("region_id", [1, 2])
 @pytest.mark.parametrize("month", ["2025-06", "2025-07"])
 @pytest.mark.parametrize("incomplete_when", ["both", "monthly", "summary"])
@@ -1344,7 +1360,8 @@ def test_question_rejects_unsupported_explicit_dates(date):
 
 def test_question_defaults_only_without_date():
     assert parse_question("Why did West margin fall?") == ("West", "2025-07")
-@pytest.mark.parametrize("region", ["North", "north", "Northeast", "Northwest", "Southeast", "Southwest", "West and North"])
+@pytest.mark.parametrize("region", ["North", "north", "Northeast", "Northwest", "Southeast", "Southwest", "West and North",
+                                    "Northern", "Northeastern", "Northwestern", "Southeastern", "Southwestern", "West and Northern"])
 def test_unsupported_region_is_rejected_before_querying(monkeypatch, region):
     def forbidden_query(*args, **kwargs):
         pytest.fail("Unsupported regions must be rejected before querying")
