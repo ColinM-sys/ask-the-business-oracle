@@ -13,6 +13,7 @@ from db import connect
 
 DOCS = Path(__file__).parent / "docs"
 _lock = threading.Lock()
+_cache = None
 _logger = logging.getLogger(__name__)
 _model_identifier = re.compile(r"[A-Z][A-Z0-9_$#]*")
 
@@ -37,23 +38,54 @@ def embed(cursor, text, backend):
     ).fetchone()[0]
 
 
+def _source_state():
+    files = []
+    for path in sorted(DOCS.glob("*.md")):
+        stat = path.stat()
+        files.append((path, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_ino))
+    return DOCS, tuple(files)
+
+
+def _models(cur):
+    # Object identity and DDL time detect replacement even when the name is unchanged.
+    return tuple(cur.execute(
+        "SELECT model_name, object_id, last_ddl_time FROM user_mining_models "
+        "LEFT JOIN user_objects ON object_name = model_name AND object_type = 'MINING MODEL' "
+        "WHERE mining_function = 'EMBEDDING' ORDER BY model_name"
+    ).fetchall())
+
+
 def ensure_policies():
     """Refresh only on source/model changes; never modify the business tables."""
+    global _cache
+    state = _source_state()
+    cached = _cache
+    if cached is not None and cached[0] == state:
+        with connect() as con:
+            models = _models(con.cursor())
+        if _cache is cached and models == cached[1] and _source_state() == state:
+            return cached[2]
+
     with _lock:
-        sources = [(p.name, p.read_text(encoding="utf-8")) for p in sorted(DOCS.glob("*.md"))]
-        if not sources:
+        # Recheck after waiting: another thread may already have refreshed newer files.
+        state = _source_state()
+        if not state[1]:
             raise RuntimeError("No policy documents found")
-        fingerprint = hashlib.sha256(repr(sources).encode()).hexdigest()
         with connect() as con:
             cur = con.cursor()
+            models = _models(cur)
+            cached = _cache
+            if cached is not None and cached[:2] == (state, models):
+                return cached[2]
+            _cache = None
+            sources = [(path.name, path.read_text(encoding="utf-8")) for path, *_ in state[1]]
+            fingerprint = hashlib.sha256(repr((sources, models)).encode()).hexdigest()
             if not cur.execute("SELECT table_name FROM user_tables WHERE table_name='POLICY_CHUNKS'").fetchone():
                 cur.execute("""CREATE TABLE policy_chunks (
                     id NUMBER PRIMARY KEY, doc VARCHAR2(255), chunk VARCHAR2(4000),
                     embedding VECTOR(*, FLOAT32), backend VARCHAR2(128), source_hash VARCHAR2(64))""")
             backend = "hash-v1-512"
-            for (model,) in cur.execute(
-                "SELECT model_name FROM user_mining_models WHERE mining_function='EMBEDDING' ORDER BY model_name"
-            ).fetchall():
+            for model, *_ in models:
                 if not _model_identifier.fullmatch(model):
                     _logger.warning("Skipping unsupported embedding model %r", model)
                     continue
@@ -71,34 +103,35 @@ def ensure_policies():
             else:
                 _logger.warning("Using hash-v1-512 fallback: no compatible embedding models available")
             existing = cur.execute("SELECT DISTINCT backend, source_hash FROM policy_chunks").fetchall()
-            if existing == [(backend, fingerprint)]:
-                return backend
-            chunks = []
-            for name, content in sources:
-                # Keep headings with their paragraphs; these short documents fit in one chunk.
-                paragraphs = re.split(r"\n\s*\n", content.strip())
-                chunk = ""
-                for paragraph in paragraphs:
-                    # At most four UTF-8 bytes per character; each part fits VARCHAR2(4000 BYTE).
-                    for offset in range(0, len(paragraph), 1000):
-                        part = paragraph[offset:offset + 1000]
-                        if chunk and (len(chunk) + len(part) + 2 > 1800
-                                      or len((chunk + "\n\n" + part).encode("utf-8")) > 4000):
-                            chunks.append((name, chunk))
-                            chunk = ""
-                        chunk = (chunk + "\n\n" + part).strip()
-                if chunk:
-                    chunks.append((name, chunk))
-            if not chunks:
-                raise RuntimeError("No policy content found")
-            vectors = [embed(cur, chunk, backend) for _, chunk in chunks]
-            cur.execute("DELETE FROM policy_chunks")
-            for index, ((doc, chunk), vector) in enumerate(zip(chunks, vectors), 1):
-                cur.execute("""INSERT INTO policy_chunks (id,doc,chunk,embedding,backend,source_hash)
-                    VALUES (:id,:doc,:chunk,:vector,:backend,:fingerprint)""",
-                    id=index, doc=doc, chunk=chunk, vector=vector, backend=backend, fingerprint=fingerprint)
-            con.commit()
-            return backend
+            if existing != [(backend, fingerprint)]:
+                chunks = []
+                for name, content in sources:
+                    # Keep headings with their paragraphs; these short documents fit in one chunk.
+                    paragraphs = re.split(r"\n\s*\n", content.strip())
+                    chunk = ""
+                    for paragraph in paragraphs:
+                        # At most four UTF-8 bytes per character; each part fits VARCHAR2(4000 BYTE).
+                        for offset in range(0, len(paragraph), 1000):
+                            part = paragraph[offset:offset + 1000]
+                            if chunk and (len(chunk) + len(part) + 2 > 1800
+                                          or len((chunk + "\n\n" + part).encode("utf-8")) > 4000):
+                                chunks.append((name, chunk))
+                                chunk = ""
+                            chunk = (chunk + "\n\n" + part).strip()
+                    if chunk:
+                        chunks.append((name, chunk))
+                if not chunks:
+                    raise RuntimeError("No policy content found")
+                vectors = [embed(cur, chunk, backend) for _, chunk in chunks]
+                cur.execute("DELETE FROM policy_chunks")
+                for index, ((doc, chunk), vector) in enumerate(zip(chunks, vectors), 1):
+                    cur.execute("""INSERT INTO policy_chunks (id,doc,chunk,embedding,backend,source_hash)
+                        VALUES (:id,:doc,:chunk,:vector,:backend,:fingerprint)""",
+                        id=index, doc=doc, chunk=chunk, vector=vector, backend=backend, fingerprint=fingerprint)
+                con.commit()
+        if _source_state() == state:
+            _cache = (state, models, backend)
+        return backend
 
 
 if __name__ == "__main__":

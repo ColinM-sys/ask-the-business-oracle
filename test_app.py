@@ -17,6 +17,7 @@ import oracledb
 import pytest
 
 import db
+import policies
 import tools
 from db import connect
 from agent import answer_question, parse_question, summary_sql
@@ -209,6 +210,93 @@ def test_hashing_is_stable_and_normalized():
     first = hash_embedding("West freight contract")
     assert first == hash_embedding("West freight contract")
     assert abs(sum(v*v for v in first) - 1) < 0.000001
+
+
+def test_policy_setup_caches_success_and_refreshes_sources_and_models(tmp_path, monkeypatch):
+    document = tmp_path / "policy.md"
+    document.write_text("Original policy", encoding="utf-8")
+    models = [("MODEL_A", 1, 1)]
+    rows = []
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.fetchone.return_value = ("POLICY_CHUNKS",)
+
+    def execute(sql, **params):
+        if sql.startswith("SELECT model_name"):
+            # Support the old query so the test reaches the cache assertion.
+            cursor.fetchall.return_value = models if "object_id" in sql else [(m[0],) for m in models]
+        elif sql.startswith("SELECT DISTINCT backend, source_hash"):
+            cursor.fetchall.return_value = [(row["backend"], row["fingerprint"]) for row in rows]
+        elif sql.startswith("DELETE FROM policy_chunks"):
+            rows.clear()
+        elif sql.lstrip().startswith("INSERT INTO policy_chunks"):
+            rows.append(params)
+        return cursor
+
+    cursor.execute.side_effect = execute
+    monkeypatch.setattr(policies, "DOCS", tmp_path)
+    monkeypatch.setattr(policies, "connect", lambda: connection)
+    monkeypatch.setattr(policies, "_cache", None, raising=False)
+    embedding = MagicMock(side_effect=lambda cur, text, backend: hash_embedding(text))
+    monkeypatch.setattr(policies, "embed", embedding)
+    reads = []
+    read_text = Path.read_text
+
+    def track_read(path, *args, **kwargs):
+        reads.append(path)
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", track_read)
+    assert ensure_policies() == "MODEL_A"
+    assert ensure_policies() == "MODEL_A"
+    assert len(reads) == 1
+    assert sum(call.args[0].startswith("SELECT table_name")
+               for call in cursor.execute.call_args_list) == 1
+    assert sum(call.args[1] == "Business policy" for call in embedding.call_args_list) == 1
+    connection.commit.assert_called_once()
+
+    # A cache hit does not wait for another thread holding the refresh lock.
+    executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        with policies._lock:
+            assert executor.submit(ensure_policies).result(timeout=5) == "MODEL_A"
+    finally:
+        executor.shutdown(wait=True)
+
+    document.write_text("Updated policy", encoding="utf-8")
+    assert ensure_policies() == "MODEL_A"
+    assert [row["chunk"] for row in rows] == ["Updated policy"]
+    assert connection.commit.call_count == 2
+
+    # Replacing a model under the same name must rebuild the stored vectors.
+    models[:] = [("MODEL_A", 2, 2)]
+    assert ensure_policies() == "MODEL_A"
+    assert connection.commit.call_count == 3
+    models[:] = [("MODEL_A", 3, 3)]
+    monkeypatch.setattr(policies, "_cache", None)  # Simulate a new process.
+    assert ensure_policies() == "MODEL_A"
+    assert connection.commit.call_count == 4
+    models[:] = [("MODEL_B", 4, 4)]
+    assert ensure_policies() == "MODEL_B"
+    assert {row["backend"] for row in rows} == {"MODEL_B"}
+    assert connection.commit.call_count == 5
+
+    document.write_text("Another policy", encoding="utf-8")
+
+    def fail_on_chunk(cur, text, backend):
+        if text == "Another policy":
+            raise RuntimeError("Embedding failed")
+        return hash_embedding(text)
+
+    embedding.side_effect = fail_on_chunk
+    with pytest.raises(RuntimeError, match="Embedding failed"):
+        ensure_policies()
+    assert [row["chunk"] for row in rows] == ["Updated policy"]
+    embedding.side_effect = lambda cur, text, backend: hash_embedding(text)
+    assert ensure_policies() == "MODEL_B"
+    assert [row["chunk"] for row in rows] == ["Another policy"]
+    assert connection.commit.call_count == 6
 
 
 @pytest.mark.parametrize("failure", [
