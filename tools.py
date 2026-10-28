@@ -63,6 +63,8 @@ def run_sql(select, params=None):
             cur.outputtypehandler = _number_to_decimal
             cur.execute(executable, params or {})
             columns = [d[0].lower() for d in cur.description]
+            if len(columns) != len(set(columns)):
+                raise ValueError("SQL result has duplicate column names; use unique aliases")
             rows = cur.fetchmany(1001)
             if len(rows) > 1000:
                 raise EvidenceLimitError("Evidence exceeds the row limit; aggregate the query")

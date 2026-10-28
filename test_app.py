@@ -221,6 +221,25 @@ def test_guard_accepts_comments_and_harmless_string():
     tools.validate_select("SELECT 'DROP TABLE sales' AS harmless FROM regions")
 
 
+@pytest.mark.parametrize("sql, columns, rows", [
+    ("SELECT region_id, region_id + 1 AS region_id FROM regions",
+     ["REGION_ID", "REGION_ID"], [(1, 2)]),
+    ('SELECT region_id AS "ID", region_id + 1 AS "id" FROM regions',
+     ["ID", "id"], [(1, 2)]),
+    ("SELECT region_id, region_id + 1 AS region_id FROM regions WHERE 1 = 0",
+     ["REGION_ID", "REGION_ID"], []),
+])
+def test_run_sql_rejects_duplicate_evidence_columns(sql, columns, rows, monkeypatch):
+    connection = MagicMock()
+    cursor = connection.__enter__.return_value.cursor.return_value.__enter__.return_value
+    cursor.description = [(name,) for name in columns]
+    cursor.fetchmany.return_value = rows
+    monkeypatch.setattr(tools, "connect", lambda: connection)
+
+    with pytest.raises(ValueError, match="duplicate column names"):
+        tools.run_sql(sql)
+
+
 @pytest.mark.parametrize("name", ["sales", "costs", "customers", "discounts", "products", "regions"])
 def test_guard_resolves_oracle_table_names(name, monkeypatch):
     for identifier in (name, name.upper(), name.capitalize(), f'"{name.upper()}"'):
@@ -1582,6 +1601,58 @@ def test_comparison_keeps_available_margin_when_other_period_is_empty(available_
     assert result["evidence"]["E2"]["rows"][parts[0]["row"]]["region_name"] == "East"
     assert result["evidence"]["E2"]["rows"][parts[0]["row"]]["margin_direction"] is None
     assert supported(parts[0], result["evidence"])
+    assert result["dropped_count"] == 0
+
+
+@pytest.mark.parametrize("return_freight,after_freight,before,change", [
+    (18.0, 5.0, -8.0, None),
+    (10.0, 5.0, 0.0, None),
+    (10.004, 5.0, 0.0, None),
+    (9.996, 5.0, 0.0, 124900.0),
+    (5.0, 8.0, 5.0, 60.0),
+])
+def test_freight_change_requires_positive_unrounded_baseline(
+        return_freight, after_freight, before, change, monkeypatch):
+    # Returns can make the weighted freight baseline nonpositive.
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+            INSERT INTO sales VALUES (1, 1, '2025-06', 180.0, 2, 100.0, 10);
+            INSERT INTO sales VALUES (1, 2, '2025-06', -90.0, -1, 100.0, 10);
+            INSERT INTO sales VALUES (1, 1, '2025-07', 90.0, 1, 100.0, 10);
+            INSERT INTO costs VALUES (1, 1, '2025-06', 60.0, 5.0);
+        """)
+        con.execute("INSERT INTO costs VALUES (1, 2, '2025-06', 60.0, ?)", (return_freight,))
+        con.execute("INSERT INTO costs VALUES (1, 1, '2025-07', 60.0, ?)", (after_freight,))
+
+        def run_sql(sql, params=None):
+            return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
+                con.execute(tools.validate_select(sql), params or {})]}
+
+        monkeypatch.setattr("agent.run_sql", run_sql)
+        monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
+        result = answer_question("West since July 2025")
+
+    row = result["evidence"]["E2"]["rows"][0]
+    assert row["before_freight_per_unit"] == before
+    assert row["after_freight_per_unit"] == after_freight
+    if change is None:
+        assert row["freight_increase_pct"] is None
+    else:
+        assert row["freight_increase_pct"] == pytest.approx(change)
+    finding = next(c for c in result["claims"] if c["kind"] == "finding"
+                   and "Freight" in c["parts"][0].get("text", ""))
+    rendered = "".join(p.get("text", str(p.get("value", "")) + p.get("suffix", ""))
+                       for p in finding["parts"])
+    assert ("change: unavailable" in rendered) == (change is None)
+    cited = {p["column"] for p in finding["parts"] if "value" in p and supported(p, result["evidence"])}
+    assert {"before_freight_per_unit", "after_freight_per_unit"} <= cited
+    assert ("freight_increase_pct" in cited) == (change is not None)
     assert result["dropped_count"] == 0
 
 
