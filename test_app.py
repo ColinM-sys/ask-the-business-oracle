@@ -4,6 +4,8 @@ import json
 import runpy
 import subprocess
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,6 +20,12 @@ from agent import answer_question, parse_question, summary_sql
 from app import app
 from critic import critique, supported
 from policies import ensure_policies, hash_embedding
+
+
+def test_readme_documents_node_test_prerequisite():
+    readme = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
+    test_instructions = readme.split("python -m pytest -q test_app.py", 1)[1]
+    assert "Node.js installed and available as `node` on PATH" in " ".join(test_instructions.split())
 
 
 @pytest.mark.parametrize("sql", [
@@ -225,6 +233,61 @@ def test_empty_policy_documents_preserve_existing_rows(tmp_path, monkeypatch):
     assert not any(call.args[0].lstrip().startswith(("DELETE", "INSERT"))
                    for call in cursor.execute.call_args_list)
     connection.commit.assert_not_called()
+
+
+def test_delayed_policy_refresh_preserves_newer_content(tmp_path, monkeypatch):
+    document = tmp_path / "policy.md"
+    document.write_text("Old policy", encoding="utf-8")
+    waiting = threading.Event()
+    resume = threading.Event()
+    lock = threading.Lock()
+    main_thread = threading.current_thread()
+
+    class DelayedLock:
+        def __enter__(self):
+            if threading.current_thread() is not main_thread:
+                waiting.set()
+                assert resume.wait(10), "Delayed refresh was not released"
+            lock.acquire()
+
+        def __exit__(self, *args):
+            lock.release()
+
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.fetchone.return_value = ("POLICY_CHUNKS",)
+    rows = []
+
+    def execute(sql, **params):
+        if sql.startswith("SELECT model_name"):
+            cursor.fetchall.return_value = []
+        elif sql.startswith("SELECT DISTINCT backend, source_hash"):
+            cursor.fetchall.return_value = [(row["backend"], row["fingerprint"]) for row in rows]
+        elif sql.startswith("DELETE FROM policy_chunks"):
+            rows.clear()
+        elif sql.startswith("INSERT INTO policy_chunks"):
+            rows.append(params)
+        return cursor
+
+    cursor.execute.side_effect = execute
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+    monkeypatch.setattr("policies._lock", DelayedLock())
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        delayed = executor.submit(ensure_policies)
+        try:
+            assert waiting.wait(10), "Delayed refresh did not reach the lock"
+            # Commit updated content while the first refresh is waiting for the lock.
+            document.write_text("Updated policy", encoding="utf-8")
+            assert ensure_policies() == "hash-v1-512"
+        finally:
+            resume.set()
+        assert delayed.result(timeout=10) == "hash-v1-512"
+
+    assert [row["chunk"] for row in rows] == ["Updated policy"]
+    connection.commit.assert_called_once()
 
 
 def test_policy_search_handles_empty_table(monkeypatch):
@@ -585,6 +648,61 @@ def test_ui_restores_submit_button_on_pageshow():
             assert.equal(button.textContent, 'Analyze question');
         }
     """], check=True, capture_output=True, text=True)
+def test_evidence_dialog_preserves_exact_integers(monkeypatch):
+    values = [9007199254740993, -9007199254740993, 10**37 + 1,
+              9007199254740991, 0, 42, 1.25, None, True, False, "text"]
+    result = {
+        "region": "West", "claims": [],
+        "evidence": {"E1": {"kind": "sql", "sql": "SELECT ...", "params": {},
+                            "rows": [{"units": value} for value in values]}},
+    }
+    original = copy.deepcopy(result)
+    monkeypatch.setattr("app.answer_question", lambda _: result)
+    response = app.test_client().post("/", data={"question": "West"})
+    assert response.status_code == 200
+    assert result == original  # Rendering must not change the critic's evidence.
+    script = response.get_data(as_text=True).split("<script>", 1)[1].split("</script>", 1)[0]
+    check = subprocess.run(["node", "-e", """
+        const assert = require('node:assert/strict');
+        const cells = [];
+        let openEvidence;
+        const button = {
+            dataset: {evidence: 'E1'},
+            addEventListener: (_, handler) => { openEvidence = handler; },
+        };
+        const table = {
+            createTHead: () => ({insertRow: () => ({append() {}})}),
+            createTBody: () => ({insertRow: () => ({insertCell: () => {
+                const cell = {};
+                cells.push(cell);
+                return cell;
+            }})}),
+        };
+        const element = {
+            addEventListener() {}, replaceChildren() {}, showModal() {},
+            querySelector: () => null,
+        };
+        global.document = {
+            getElementById: () => element,
+            querySelectorAll: () => [button],
+            createElement: tag => tag === 'table' ? table : {},
+        };
+    """ + script + """
+        openEvidence();
+        assert.deepEqual(cells.map(cell => String(cell.textContent)), [
+            '9007199254740993', '-9007199254740993',
+            '10000000000000000000000000000000000001', '9007199254740991',
+            '0', '42', '1.25', 'NULL', 'true', 'false', 'text',
+        ]);
+        assert.deepEqual(evidence.E1.rows.map(row => row.units), [
+            '9007199254740993', '-9007199254740993',
+            '10000000000000000000000000000000000001', '9007199254740991',
+            '0', '42', 1.25, null, true, false, 'text',
+        ]);
+    """], capture_output=True, text=True)
+    assert check.returncode == 0, check.stderr
+
+
 def test_evidence_dialog_identifies_cited_cell(monkeypatch):
     monkeypatch.setattr("app.answer_question", lambda _: {
         "region": "West", "claims": [], "evidence": {},
