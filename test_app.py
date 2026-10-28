@@ -20,6 +20,12 @@ from critic import critique, supported
 from policies import ensure_policies, hash_embedding
 
 
+def test_readme_documents_node_test_prerequisite():
+    readme = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
+    test_instructions = readme.split("python -m pytest -q test_app.py", 1)[1]
+    assert "Node.js installed and available as `node` on PATH" in " ".join(test_instructions.split())
+
+
 @pytest.mark.parametrize("sql", [
     "DELETE FROM sales", "DROP TABLE sales", "UPDATE sales SET quantity=0",
     "INSERT INTO sales (sale_id) VALUES (0)", "ALTER TABLE sales ADD x NUMBER",
