@@ -78,6 +78,16 @@ def test_readme_documents_node_test_prerequisite():
     assert "Node.js installed and available as `node` on PATH" in " ".join(test_instructions.split())
 
 
+def test_readme_documents_request_time_policy_writes():
+    readme = " ".join(Path(__file__).with_name("README.md").read_text(encoding="utf-8").split())
+    assert "Each `search_policies` call runs `ensure_policies`" in readme
+    assert "creates `policy_chunks` if absent" in readme
+    assert "policy documents or the embedding backend change" in readme
+    assert "`CREATE TABLE` and tablespace quota" in readme
+    assert "`SELECT`, `DELETE`, and `INSERT` access to `policy_chunks`" in readme
+    assert "Running `python policies.py` once does not make SELECT-only runtime permissions sufficient." in readme
+
+
 @pytest.mark.parametrize("sql", [
     "DELETE FROM sales", "DROP TABLE sales", "UPDATE sales SET quantity=0",
     "INSERT INTO sales (sale_id) VALUES (0)", "ALTER TABLE sales ADD x NUMBER",
