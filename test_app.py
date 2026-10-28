@@ -866,11 +866,28 @@ def test_question_month_abbreviations(month):
 
 
 @pytest.mark.parametrize("date", ["2026-13", "2026-00", "2026/07", "2026-07-15",
-                                  "Smarch 2026", "2026", "July 26", "July",
+                                  "15 July 2025", "15th July 2025", "15th of July 2025",
+                                  "15th day of July 2025", "fifteenth of July 2025",
+                                  "twenty-first of July 2025", "15-Jul 2025",
+                                  "15/July 2025", "1 Sept. 2025",
+                                  "July 15, 2025", "Smarch 2026", "2026", "July 26", "July",
                                   "July 2025 and 2026-13"])
 def test_question_rejects_unsupported_explicit_dates(date):
     with pytest.raises(ValueError, match="date"):
         parse_question(f"West since {date}")
+
+
+def test_question_accepts_numbers_unrelated_to_the_date():
+    assert parse_question("West had 15% discounts since July 2025") == ("West", "2025-07")
+
+
+def test_day_specific_date_is_rejected_before_querying(monkeypatch):
+    def forbidden_query(*args, **kwargs):
+        pytest.fail("Day-specific dates must be rejected before querying")
+    monkeypatch.setattr("agent.run_sql", forbidden_query)
+    response = app.test_client().post("/", data={"question": "West since 15 July 2025"})
+    assert response.status_code == 400
+    assert b"Unsupported date" in response.data
 
 
 def test_question_defaults_only_without_date():
