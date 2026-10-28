@@ -3,7 +3,7 @@ Each round:
   1. FIND   - one read-only Codex reviewer per area, in parallel; each returns JSON findings
   2. FIX    - one Codex fixer per finding, each in its own git worktree on its own branch
   3. VERIFY - pytest must pass in that worktree; otherwise the branch is dropped
-  4. SHIP   - push the branch and open a PR (never to master). Claude reviews and merges.
+  4. SHIP   - push the branch and open a PR (never to master). merge_bot.py reviews and merges.
 Stops after --rounds or when a round finds nothing. Log: loop_rounds.log
     python repo_loop.py [--rounds 3] [--max-fixes 6]"""
 import argparse
@@ -124,7 +124,7 @@ def fix(n, f):
         pr = sh(["gh", "pr", "create", "--base", "master", "--head", branch, "--title", f["title"][:70], "--body",
                  f"Found by the Codex improvement loop ({f['area']}).\n\n**Problem:** {f['problem']}\n\n"
                  f"**Location:** {f['file']}:{f.get('line')}\n\nTests pass in the branch worktree.\n\n"
-                 "🤖 Generated with [Claude Code](https://claude.com/claude-code)"], path)
+                 ""], path)
         result["pr"] = pr.stdout.strip()
     sh(["git", "worktree", "remove", "--force", path], REPO)
     return result
