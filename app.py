@@ -3,7 +3,8 @@ from decimal import Decimal
 
 from flask import Flask, render_template, request
 
-from agent import DataQualityError, DiscountDataQualityError, QuestionValidationError, answer_question
+from agent import (DataQualityError, DiscountDataQualityError, QuestionValidationError,
+                   RevenueDataQualityError, answer_question)
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024
@@ -43,6 +44,8 @@ def index():
             error, status = str(exc), 400
         except DiscountDataQualityError:
             error, status = "Analysis unavailable. Correct missing discount, quantity, or unit price inputs, then retry.", 503
+        except RevenueDataQualityError:
+            error, status = "Analysis unavailable. Correct missing net revenue for sales, then retry.", 503
         except DataQualityError:
             error, status = "Analysis unavailable. Correct missing, incomplete, or duplicate monthly cost records, then retry.", 503
         except Exception:
