@@ -40,6 +40,7 @@ deterministic normalized hashing vectors. Source changes trigger a transactional
 policy refresh. To accept a revised policy, review the fixed claims in `agent.py`,
 then update both `POLICY_SHA256` (SHA-256 of the stripped full document) and
 `REVIEWED_POLICY_HASHES` (SHA-256 of its complete chunk with whitespace collapsed).
+Then restart the Flask app to load the updated fingerprints.
 The revised document must still fit in one chunk. Until both fingerprints match,
 affected explanations and recommendations remain unavailable even after refresh
 and retrieval. Queries use Oracle `VECTOR_DISTANCE` with cosine distance; the local

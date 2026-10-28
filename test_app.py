@@ -20,6 +20,7 @@ import pytest
 from packaging.requirements import Requirement
 
 import db
+import critic
 import tools
 from db import connect
 from agent import (DataQualityError, DiscountDataQualityError, RevenueDataQualityError,
@@ -134,7 +135,8 @@ def test_readme_documents_policy_fingerprint_maintenance():
     text = " ".join(readme.split())
     assert "review the fixed claims in `agent.py`" in text
     assert "update both `POLICY_SHA256` (SHA-256 of the stripped full document)" in text
-    assert "`REVIEWED_POLICY_HASHES` (SHA-256 of its complete chunk with whitespace collapsed)" in text
+    assert ("`REVIEWED_POLICY_HASHES` (SHA-256 of its complete chunk with whitespace collapsed). "
+            "Then restart the Flask app to load the updated fingerprints.") in text
     assert "The revised document must still fit in one chunk" in text
     assert "affected explanations and recommendations remain unavailable even after refresh and retrieval" in text
 
@@ -278,7 +280,7 @@ def test_critic_drops_unsupported_numbers_and_preserves_valid(sample_evidence):
     assert len(dropped) == 3
 
 
-def test_readme_documents_unchecked_spelled_out_numbers():
+def test_docs_document_unchecked_spelled_out_numbers():
     claim = {"parts": [{"text": "Sales were five million."}]}
     assert critique([claim], {}) == ([claim], [])
 
@@ -287,6 +289,10 @@ def test_readme_documents_unchecked_spelled_out_numbers():
     assert "numbers written as words" in documentation
     assert "five million" in documentation
     assert "can pass without a citation" in documentation
+
+    documentation = " ".join(critic.__doc__.lower().split())
+    assert "structured numeric parts" in documentation
+    assert "numbers written as words are unchecked" in documentation
 
 
 @pytest.mark.parametrize("change", [
@@ -395,8 +401,6 @@ def test_policy_probe_cache_tracks_model_versions(failure_mode, tmp_path, monkey
             cursor.fetchall.return_value = [(row["backend"], row["fingerprint"]) for row in rows]
         elif sql.startswith("DELETE FROM policy_chunks"):
             rows.clear()
-        elif sql.lstrip().startswith("INSERT INTO policy_chunks"):
-            rows.append(params)
         return cursor
 
     def embedding(cur, text, backend):
@@ -411,6 +415,7 @@ def test_policy_probe_cache_tracks_model_versions(failure_mode, tmp_path, monkey
         return hash_embedding(text)
 
     cursor.execute.side_effect = execute
+    cursor.executemany.side_effect = lambda sql, bindings: rows.extend(bindings)
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
     monkeypatch.setattr("policies.embed", embedding)
@@ -509,8 +514,8 @@ def test_policy_probe_selects_usable_text_model(
     expected = "C_GOOD" if good_model else "hash-v1-512"
     assert ensure_policies() == expected
     assert probed == (["B_NULL"] if null_model else []) + (["C_GOOD"] if good_model else []) + [expected]
-    inserted = [call.kwargs for call in cursor.execute.call_args_list
-                if call.args[0].lstrip().startswith("INSERT INTO policy_chunks")]
+    cursor.executemany.assert_called_once()
+    inserted = cursor.executemany.call_args.args[1]
     assert inserted and all(row["backend"] == expected and row["vector"] is not None for row in inserted)
     model_version = model_versions[expected] if good_model else (expected,)
     version = "v" + hashlib.sha256(repr(model_version).encode()).hexdigest()[:31]
@@ -609,8 +614,8 @@ def test_policy_probe_skips_unsupported_names(unsupported, later_model, tmp_path
                      if "VECTOR_EMBEDDING" in call.args[0]]
     assert embedding_sql == (["SELECT VECTOR_EMBEDDING(GOOD_MODEL USING :text AS DATA) FROM dual"] * 2
                              if later_model else [])
-    inserted = [call.kwargs for call in cursor.execute.call_args_list
-                if call.args[0].lstrip().startswith("INSERT INTO policy_chunks")]
+    cursor.executemany.assert_called_once()
+    inserted = cursor.executemany.call_args.args[1]
     assert inserted and all(row["backend"] == expected for row in inserted)
     connection.commit.assert_called_once()
 
@@ -629,8 +634,8 @@ def test_policy_chunks_fit_byte_limit(character, tmp_path, monkeypatch):
 
     ensure_policies()
 
-    chunks = [call.kwargs["chunk"] for call in cursor.execute.call_args_list
-              if call.args[0].lstrip().startswith("INSERT INTO policy_chunks")]
+    cursor.executemany.assert_called_once()
+    chunks = [row["chunk"] for row in cursor.executemany.call_args.args[1]]
     assert chunks
     assert all(chunk and len(chunk.encode("utf-8")) <= 4000 for chunk in chunks)
     assert "".join(chunks).replace("\n", "") == content.replace("\n", "")
@@ -655,8 +660,8 @@ def test_long_policy_paragraph_preserves_text_and_embedding(paragraph, tmp_path,
 
     ensure_policies()
 
-    inserted = [call.kwargs for call in cursor.execute.call_args_list
-                if call.args[0].lstrip().startswith("INSERT INTO policy_chunks")]
+    cursor.executemany.assert_called_once()
+    inserted = cursor.executemany.call_args.args[1]
     assert "".join(row["chunk"] for row in inserted) == content
     assert all(row["vector"] == hash_embedding(row["chunk"]) for row in inserted)
 
@@ -675,19 +680,21 @@ def test_policy_refresh_replaces_legacy_chunks_once(tmp_path, monkeypatch):
 
     ensure_policies()
 
-    inserted = [call.kwargs for call in cursor.execute.call_args_list
-                if call.args[0].lstrip().startswith("INSERT INTO policy_chunks")]
+    cursor.executemany.assert_called_once()
+    inserted = cursor.executemany.call_args.args[1]
     assert inserted and inserted[0]["chunk"] == content
     new_hash = inserted[0]["fingerprint"]
     assert new_hash != legacy_hash
     connection.commit.assert_called_once()
 
     cursor.execute.reset_mock()
+    cursor.executemany.reset_mock()
     connection.commit.reset_mock()
     cursor.execute.return_value.fetchall.side_effect = [[], [("hash-v1-512", new_hash)]]
     ensure_policies()
     assert not any(call.args[0].lstrip().startswith(("DELETE", "INSERT"))
                    for call in cursor.execute.call_args_list)
+    cursor.executemany.assert_not_called()
     connection.commit.assert_not_called()
 
 
@@ -722,11 +729,10 @@ def test_policy_refresh_rechunks_model_versioned_cache(tmp_path, monkeypatch):
                                            and row["fingerprint"].startswith(params["version"])]
         elif sql.startswith("DELETE FROM policy_chunks"):
             rows.clear()
-        elif sql.startswith("INSERT INTO policy_chunks"):
-            rows.append(params)
         return cursor
 
     cursor.execute.side_effect = execute
+    cursor.executemany.side_effect = lambda sql, bindings: rows.extend(bindings)
     embed = MagicMock(side_effect=lambda cur, text, model: "new vector for " + text)
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
@@ -763,6 +769,7 @@ def test_empty_policy_documents_preserve_existing_rows(tmp_path, monkeypatch):
 
     assert not any(call.args[0].lstrip().startswith(("DELETE", "INSERT"))
                    for call in cursor.execute.call_args_list)
+    cursor.executemany.assert_not_called()
     connection.commit.assert_not_called()
 
 
@@ -791,8 +798,6 @@ def test_policy_refresh_reuses_chunk_embeddings_by_model(tmp_path, monkeypatch):
                                            and row["fingerprint"].startswith(params["version"])]
         elif sql.startswith("DELETE FROM policy_chunks"):
             rows.clear()
-        elif sql.startswith("INSERT INTO policy_chunks"):
-            rows.append(params)
         return cursor
 
     def embedding(cur, text, backend):
@@ -804,6 +809,7 @@ def test_policy_refresh_reuses_chunk_embeddings_by_model(tmp_path, monkeypatch):
         return f"{backend}:{model[2]}:{text}"
 
     cursor.execute.side_effect = execute
+    cursor.executemany.side_effect = lambda sql, bindings: rows.extend(bindings)
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
     monkeypatch.setattr("policies.embed", embedding)
@@ -814,14 +820,25 @@ def test_policy_refresh_reuses_chunk_embeddings_by_model(tmp_path, monkeypatch):
     original_fingerprint = rows[0]["fingerprint"]
     embedding_calls.clear()
     commits = connection.commit.call_count
+    cursor.executemany.reset_mock()
     assert ensure_policies() == "MODEL_V1"
     assert not embedding_calls
+    cursor.executemany.assert_not_called()
     assert connection.commit.call_count == commits
     documents[0].write_text("Updated policy", encoding="utf-8")
+    cursor.execute.reset_mock()
+    cursor.executemany.reset_mock()
 
     assert ensure_policies() == "MODEL_V1"
     assert embedding_calls == [("MODEL_V1", "Updated policy")]
     assert initial_calls == [("MODEL_V1", "Old policy"), ("MODEL_V1", "Shared policy")]
+    cursor.executemany.assert_called_once()
+    insert_sql, bindings = cursor.executemany.call_args.args
+    assert insert_sql.lstrip().startswith("INSERT INTO policy_chunks")
+    assert len(bindings) == 3
+    assert not any(call.args[0].lstrip().startswith("INSERT INTO policy_chunks")
+                   for call in cursor.execute.call_args_list)
+    assert connection.commit.call_count == commits + 1
     assert [(row["id"], row["doc"], row["chunk"], row["vector"]) for row in rows] == [
         (1, "a.md", "Updated policy", "MODEL_V1:100:Updated policy"),
         (2, "b.md", "Shared policy", original_shared_vector),
@@ -882,11 +899,10 @@ def test_delayed_policy_refresh_preserves_newer_content(tmp_path, monkeypatch):
             cursor.fetchall.return_value = [(row["backend"], row["fingerprint"]) for row in rows]
         elif sql.startswith("DELETE FROM policy_chunks"):
             rows.clear()
-        elif sql.startswith("INSERT INTO policy_chunks"):
-            rows.append(params)
         return cursor
 
     cursor.execute.side_effect = execute
+    cursor.executemany.side_effect = lambda sql, bindings: rows.extend(bindings)
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
     monkeypatch.setattr("policies._lock", DelayedLock())
@@ -980,11 +996,13 @@ def test_concurrent_policy_refreshes_do_not_overwrite_newer_content(tmp_path, mo
                     ]
             elif sql.startswith("DELETE FROM POLICY_CHUNKS"):
                 self.connection.pending = []
-            elif sql.startswith("INSERT INTO POLICY_CHUNKS"):
-                self.connection.pending.append(params)
             else:
                 pytest.fail(f"Unexpected SQL: {sql}")
             return self
+
+        def executemany(self, sql, bindings):
+            assert sql.lstrip().upper().startswith("INSERT INTO POLICY_CHUNKS")
+            self.connection.pending.extend(bindings)
 
         def fetchone(self):
             return self.result[0] if self.result else None
@@ -2514,8 +2532,11 @@ def test_flask_live_brief_and_evidence():
     assert b"evidence-dialog" in response.data
 
 
-def test_download_brief_contains_cited_evidence_and_verification(monkeypatch):
-    question = "Why did West margin fall since July 2025?"
+@pytest.mark.parametrize("question,fence", [
+    ("Why did West margin fall since July 2025?", "```"),
+    ("Why did West margin fall since July 2025?\nForged finding\n---\n- fake claim\n```\n````\n- escaped claim", "`````"),
+])
+def test_download_brief_contains_cited_evidence_and_verification(monkeypatch, question, fence):
     result = {
         "region": "West", "cutoff": "2025-07", "dropped_count": 2,
         "claims": [
@@ -2614,7 +2635,8 @@ def test_download_brief_contains_cited_evidence_and_verification(monkeypatch):
     """], capture_output=True, text=True, encoding="utf-8")
     assert check.returncode == 0, check.stderr
     markdown = check.stdout
-    assert question in markdown and "Edited after the analysis" not in markdown
+    assert f"## Question\n\n{fence}\n{question}\n{fence}\n\n## Scope" in markdown
+    assert "Edited after the analysis" not in markdown
     scope = next(line for line in markdown.splitlines() if "West: compare" in line)
     assert "2025-06" in scope and "E2" in scope and "row 1" in scope
     assert "first_month" in scope.replace("\\_", "_")
@@ -3340,6 +3362,50 @@ def test_policy_citations_have_descriptive_accessible_names(monkeypatch):
         evidence_id = button["data-evidence"]
         assert evidence_id in button.get("aria-label", "")
         assert documents[evidence_id] in button["aria-label"]
+
+
+def test_successful_analysis_focuses_brief_heading(monkeypatch):
+    monkeypatch.setattr("app.answer_question", lambda _: {
+        "region": "West", "claims": [], "dropped_count": 0, "evidence": {},
+    })
+
+    class PageParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.focused = []
+            self.headings = []
+            self.current_heading = None
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if "autofocus" in attrs:
+                self.focused.append((tag, attrs))
+            if tag == "h2":
+                self.current_heading = [attrs, ""]
+                self.headings.append(self.current_heading)
+
+        def handle_data(self, data):
+            if self.current_heading is not None:
+                self.current_heading[1] += data
+
+        def handle_endtag(self, tag):
+            if tag == "h2":
+                self.current_heading = None
+
+    def parse(response):
+        page = PageParser()
+        page.feed(response.get_data(as_text=True))
+        return page
+
+    client = app.test_client()
+    assert not parse(client.get("/")).focused
+    response = client.post("/", data={"question": "West"})
+    assert response.status_code == 200
+    page = parse(response)
+    heading, = [attrs for attrs, text in page.headings
+                if text == "What changed, and what to do"]
+    assert heading.get("tabindex") == "-1"
+    assert page.focused == [("h2", heading)]
 
 
 def test_question_validation_errors_are_associated_and_focused(monkeypatch):
