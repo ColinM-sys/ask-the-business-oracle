@@ -1,7 +1,7 @@
 """Local Flask UI: python app.py, then http://127.0.0.1:5055."""
 from flask import Flask, render_template, request
 
-from agent import QuestionValidationError, answer_question
+from agent import DataQualityError, QuestionValidationError, answer_question
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024
@@ -38,6 +38,8 @@ def index():
             result = answer_question(question)
         except QuestionValidationError as exc:
             error, status = str(exc), 400
+        except DataQualityError:
+            error, status = "Analysis unavailable. Correct missing, incomplete, or duplicate monthly cost records, then retry.", 503
         except Exception:
             # Do not expose connection settings, driver errors or credentials.
             error, status = "Analysis unavailable. Check the local Oracle connection and policy setup, then retry.", 503

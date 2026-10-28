@@ -11,6 +11,10 @@ class QuestionValidationError(ValueError):
     """A user-facing problem with the requested analysis."""
 
 
+class DataQualityError(ValueError):
+    """The underlying business data cannot support a reliable analysis."""
+
+
 # SHA-256 of the complete, whitespace-normalized chunks reviewed for the fixed
 # claims below. Changed or partial chunks require reviewing both the claims and
 # these fingerprints; deriving them from current files would approve edits blindly.
@@ -121,7 +125,7 @@ def answer_question(question):
     if index is None:
         raise QuestionValidationError(f"No sales/cost data found for {region}.")
     if any(row["missing_cost_count"] for key in ("E1", "E2") for row in evidence[key]["rows"]):
-        raise ValueError("Missing monthly costs or duplicate cost rows for some sales; cannot analyze incomplete or ambiguous data.")
+        raise DataQualityError("Missing monthly costs or duplicate cost rows for some sales; cannot analyze incomplete or ambiguous data.")
     row = rows[index]
     if row["before_margin_pct"] is None or row["after_margin_pct"] is None:
         raise QuestionValidationError("The comparison date must have sales both before and after it.")
