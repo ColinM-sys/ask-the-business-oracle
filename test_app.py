@@ -339,6 +339,138 @@ def test_empty_policy_documents_preserve_existing_rows(tmp_path, monkeypatch):
     connection.commit.assert_not_called()
 
 
+def test_policy_refresh_reuses_unchanged_chunk_embeddings(tmp_path, monkeypatch):
+    document = tmp_path / "a.md"
+    unchanged_chunk = "B" * 1100
+    document.write_text("A" * 1100 + "\n\n" + unchanged_chunk, encoding="utf-8")
+    (tmp_path / "b.md").write_text("Unchanged policy", encoding="utf-8")
+    deleted = tmp_path / "c.md"
+    deleted.write_text("Deleted policy", encoding="utf-8")
+
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    rows = []
+    transaction = [None]
+    models = []
+    revision = [101, "first revision"]
+    fail_on_insert = [False]
+
+    def commit():
+        if transaction[0] is not None:
+            rows[:] = transaction[0]
+            transaction[0] = None
+
+    def rollback(*args):
+        transaction[0] = None
+
+    connection.commit.side_effect = commit
+    connection.rollback.side_effect = rollback
+    connection.__exit__.side_effect = rollback
+
+    def execute(sql, **params):
+        normalized = " ".join(sql.split())
+        if normalized.startswith("SELECT table_name"):
+            cursor.fetchone.return_value = ("POLICY_CHUNKS",)
+        elif normalized.startswith("SELECT model_name"):
+            cursor.fetchall.return_value = list(models)
+        elif normalized.startswith("SELECT object_id, last_ddl_time FROM user_objects"):
+            cursor.fetchone.return_value = tuple(revision)
+        elif match := re.match(r"SELECT (DISTINCT )?(.+?) FROM policy_chunks\b", normalized, re.I):
+            columns = [column.strip().split(".")[-1].lower()
+                       for column in match.group(2).split(",")]
+            current = transaction[0] if transaction[0] is not None else rows
+            selected = [tuple(row[column] for column in columns) for row in current
+                        if "backend" not in params or row["backend"] == params["backend"]]
+            if match.group(1):
+                selected = list(dict.fromkeys(selected))
+            cursor.fetchall.return_value = selected
+        elif normalized.startswith("DELETE FROM policy_chunks"):
+            transaction[0] = []
+        elif match := re.match(r"INSERT INTO policy_chunks \((.+?)\) VALUES \((.+?)\)", normalized, re.I):
+            if fail_on_insert[0] and transaction[0]:
+                raise RuntimeError("test insert failure")
+            if transaction[0] is None:
+                transaction[0] = list(rows)
+            columns = [column.strip().lower() for column in match.group(1).split(",")]
+            binds = [bind.strip().lstrip(":") for bind in match.group(2).split(",")]
+            transaction[0].append({column: params[bind] for column, bind in zip(columns, binds)})
+        else:
+            pytest.fail(f"Unexpected policy SQL: {normalized}")
+        return cursor
+
+    cursor.execute.side_effect = execute
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+    embedding = MagicMock(side_effect=lambda cur, chunk, backend: f"{backend}:{revision[0]}:{chunk}")
+    monkeypatch.setattr("policies.embed", embedding)
+
+    ensure_policies()
+    assert embedding.call_count == 4
+    original_vectors = {(row["doc"], row["chunk"]): row["embedding"] for row in rows}
+    embedding.reset_mock()
+
+    document.write_text("X" * 1100 + "\n\n" + unchanged_chunk, encoding="utf-8")
+    deleted.unlink()
+    (tmp_path / "d.md").write_text("Unchanged policy", encoding="utf-8")
+    ensure_policies()
+
+    assert embedding.call_count == 1
+    assert embedding.call_args.args[1].replace("\n", "") == "X" * 1100
+    assert {(row["doc"], row["chunk"].replace("\n", "")) for row in rows} == {
+        ("a.md", "X" * 1100), ("a.md", unchanged_chunk),
+        ("b.md", "Unchanged policy"), ("d.md", "Unchanged policy")}
+    assert len(rows) == 4
+    for row in rows:
+        if row["chunk"] == "Unchanged policy":
+            assert row["embedding"] == original_vectors[("b.md", row["chunk"])]
+        elif row["chunk"].replace("\n", "") == unchanged_chunk:
+            assert row["embedding"] == original_vectors[("a.md", row["chunk"])]
+
+    # Replacing an Oracle model with another version under the same name must
+    # invalidate all vectors, even when the source documents have not changed.
+    models.append(("TEST_MODEL",))
+    embedding.reset_mock()
+    ensure_policies()
+    assert embedding.call_count == 4  # one model probe and three distinct chunks
+    before_replacement = [row["embedding"] for row in rows]
+    revision[0] += 1
+    embedding.reset_mock()
+    ensure_policies()
+    assert embedding.call_count == 4
+    assert all(row["backend"] == "TEST_MODEL" for row in rows)
+    assert all(row["embedding"] != previous
+               for row, previous in zip(rows, before_replacement))
+
+    revision[1] = "later DDL"
+    embedding.reset_mock()
+    ensure_policies()
+    assert embedding.call_count == 4
+
+    # Rows written before revision tracking cannot safely be reused.
+    for row in rows:
+        row["source_hash"] = "0" * 64
+    embedding.reset_mock()
+    ensure_policies()
+    assert embedding.call_count == 4
+
+    commit_count = connection.commit.call_count
+    embedding.reset_mock()
+    ensure_policies()
+    assert [call.args[1] for call in embedding.call_args_list] == ["Business policy"]
+    assert connection.commit.call_count == commit_count
+
+    # A failed insert must leave the last committed rows intact.
+    before_failure = [row.copy() for row in rows]
+    commit_count = connection.commit.call_count
+    document.write_text("Y" * 1100 + "\n\n" + unchanged_chunk, encoding="utf-8")
+    fail_on_insert[0] = True
+    with pytest.raises(RuntimeError, match="test insert failure"):
+        ensure_policies()
+    assert rows == before_failure
+    assert connection.commit.call_count == commit_count
+
+
 def test_delayed_policy_refresh_preserves_newer_content(tmp_path, monkeypatch):
     document = tmp_path / "policy.md"
     document.write_text("Old policy", encoding="utf-8")

@@ -43,7 +43,6 @@ def ensure_policies():
         sources = [(p.name, p.read_text(encoding="utf-8")) for p in sorted(DOCS.glob("*.md"))]
         if not sources:
             raise RuntimeError("No policy documents found")
-        fingerprint = hashlib.sha256(repr(sources).encode()).hexdigest()
         with connect() as con:
             cur = con.cursor()
             if not cur.execute("SELECT table_name FROM user_tables WHERE table_name='POLICY_CHUNKS'").fetchone():
@@ -70,6 +69,17 @@ def ensure_policies():
                     _logger.warning("Embedding model %r incompatible (ORA-%05d)", model, code)
             else:
                 _logger.warning("Using hash-v1-512 fallback: no compatible embedding models available")
+            revision = (backend,)
+            if backend != "hash-v1-512":
+                model = cur.execute("""SELECT object_id, last_ddl_time FROM user_objects
+                    WHERE object_name=:name AND object_type='MINING MODEL'""", name=backend).fetchone()
+                if model is None:
+                    raise RuntimeError("Embedding model metadata not found")
+                revision += tuple(model)
+            # Keep the revision separate from the collection fingerprint within the
+            # existing column. The marker also excludes legacy, unversioned rows.
+            revision_tag = "v2" + hashlib.sha256(repr(revision).encode()).hexdigest()[:31]
+            fingerprint = revision_tag + hashlib.sha256(repr(sources).encode()).hexdigest()[:31]
             existing = cur.execute("SELECT DISTINCT backend, source_hash FROM policy_chunks").fetchall()
             if existing == [(backend, fingerprint)]:
                 return backend
@@ -91,7 +101,20 @@ def ensure_policies():
                     chunks.append((name, chunk))
             if not chunks:
                 raise RuntimeError("No policy content found")
-            vectors = [embed(cur, chunk, backend) for _, chunk in chunks]
+            cached = {}
+            if any(old_backend == backend and old_hash and old_hash.startswith(revision_tag)
+                   for old_backend, old_hash in existing):
+                for chunk, vector, source_hash in cur.execute(
+                        "SELECT chunk, embedding, source_hash FROM policy_chunks WHERE backend=:backend",
+                        backend=backend).fetchall():
+                    if source_hash and source_hash.startswith(revision_tag):
+                        cached[hashlib.sha256(chunk.encode("utf-8")).digest()] = vector
+            vectors = []
+            for _, chunk in chunks:
+                key = hashlib.sha256(chunk.encode("utf-8")).digest()
+                if key not in cached:
+                    cached[key] = embed(cur, chunk, backend)
+                vectors.append(cached[key])
             cur.execute("DELETE FROM policy_chunks")
             for index, ((doc, chunk), vector) in enumerate(zip(chunks, vectors), 1):
                 cur.execute("""INSERT INTO policy_chunks (id,doc,chunk,embedding,backend,source_hash)
