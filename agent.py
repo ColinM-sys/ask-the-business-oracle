@@ -73,6 +73,7 @@ def summary_sql():
         f"{MISSING_DISCOUNT_COUNT} AS missing_discount_count",
         f"CASE WHEN ({raw['before']['margin_pct']}) > ({raw['after']['margin_pct']}) THEN 'fell' WHEN ({raw['before']['margin_pct']}) < ({raw['after']['margin_pct']}) THEN 'rose' ELSE 'was unchanged' END AS margin_direction",
         f"ROUND(({raw['before']['margin_pct']})-({raw['after']['margin_pct']}),2) AS margin_drop_pts",
+        f"ROUND(({raw['after']['freight_per_unit']})-({raw['before']['freight_per_unit']}),2) AS freight_change_per_unit",
         f"ROUND(100*(({raw['after']['freight_per_unit']})/NULLIF(({raw['before']['freight_per_unit']}),0)-1),2) AS freight_increase_pct",
         "MIN(s.sale_month) AS first_month", "MAX(s.sale_month) AS last_month",
         "MIN(CASE WHEN s.sale_month >= :cutoff THEN s.sale_month END) AS after_first_month",
@@ -188,7 +189,8 @@ def answer_question(question):
         + [text("; after ")] + metric("after_discount_pct", suffix="%") + [text(".")])
     claim("finding", [text("Freight per unit: before ")] + metric("before_freight_per_unit", prefix="$")
         + [text("; after ")] + metric("after_freight_per_unit", prefix="$")
-        + [text("; change: ")] + metric("freight_increase_pct", suffix="%") + [text(".")])
+        + [text("; change: ")] + metric("freight_change_per_unit", prefix="$")
+        + [text(" per unit; percentage change: ")] + metric("freight_increase_pct", suffix="%") + [text(".")])
     for other_index, other in enumerate(rows):
         if other_index != index:
             claim("comparison", [text(f"{other['region_name']} margin: "),

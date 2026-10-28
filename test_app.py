@@ -698,36 +698,66 @@ def test_margin_direction_uses_unrounded_sql(before, after, direction, below_pre
     assert result["dropped_count"] == 0
 
 
-def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
-    row = {
-        "region_name": "West", "first_month": "2025-01", "last_month": "2025-09",
-        "before_last_month": "2025-06", "after_first_month": "2025-07",
-        "before_margin_pct": 40, "after_margin_pct": 25, "margin_drop_pts": 15,
-        "margin_direction": "fell",
-        "before_discount_pct": 3, "after_discount_pct": 18,
-        "before_freight_per_unit": 0, "after_freight_per_unit": 5,
-        "freight_increase_pct": None,
-        "missing_cost_count": 0, "missing_discount_count": 0,
-    }
-    monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
-        "sql": sql, "params": params or {}, "rows": [row]})
-    monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
+@pytest.mark.parametrize("before_costs,after_costs,before,after,change,percentage", [
+    ((0.0, 0.0), (5.0, 5.0), 0, 5, 5, None),
+    ((5.0, 5.0), (8.0, 8.0), 5, 8, 3, 60),
+    ((8.0, 8.0), (5.0, 5.0), 8, 5, -3, -37.5),
+    # The weighted averages are 0.004 and 0.006, so their rounded difference
+    # is 0.00, even though their displayed values differ by 0.01.
+    ((0.001, 0.013), (0.003, 0.015), 0, 0.01, 0, 50),
+])
+def test_freight_change_cites_sql_difference(
+        before_costs, after_costs, before, after, change, percentage, monkeypatch):
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+        """)
+        for month, costs in (("2025-06", before_costs), ("2025-07", after_costs)):
+            discount = 3.0 if month == "2025-06" else 18.0
+            for product, (quantity, cost) in enumerate(zip((3, 1), costs), 1):
+                con.execute("INSERT INTO sales VALUES (1, ?, ?, ?, ?, 100.0, ?)",
+                            (product, month, quantity * (100.0 - discount), quantity, discount))
+                con.execute("INSERT INTO costs VALUES (1, ?, ?, 10.0, ?)",
+                            (product, month, cost))
 
-    result = answer_question("Why did West margin fall since July 2025?")
+        def run_sql(sql, params=None):
+            return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
+                con.execute(tools.validate_select(sql), params or {})]}
 
-    findings = [c for c in result["claims"] if c["kind"] == "finding"]
-    discount = next(c for c in findings if "discount" in c["parts"][0].get("text", "").lower())
-    freight = next(c for c in findings if "freight" in c["parts"][0].get("text", "").lower())
-    render = lambda claim: "".join(p.get("text", str(p.get("value", "")) + p.get("suffix", ""))
-                                   for p in claim["parts"])
-    assert "3%" in render(discount) and "18%" in render(discount)
-    assert "$0" in render(freight) and "$5" in render(freight)
-    assert "change" in render(freight).lower() and "unavailable" in render(freight).lower()
+        monkeypatch.setattr("agent.run_sql", run_sql)
+        monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
+        result = answer_question("Why did West margin fall since July 2025?")
+
+    row = result["evidence"]["E2"]["rows"][0]
+    assert (row["before_freight_per_unit"], row["after_freight_per_unit"],
+            row["freight_change_per_unit"], row["freight_increase_pct"]) == (
+                before, after, change, percentage)
+    freight = next(c for c in result["claims"] if c["kind"] == "finding"
+                   and "freight" in c["parts"][0].get("text", "").lower())
+    rendered = "".join(p.get("text", str(p.get("value", "")) + p.get("suffix", ""))
+                       for p in freight["parts"])
+    assert f"change: ${change}" in rendered
+    assert "per unit; percentage change: " in rendered
+    assert ("percentage change: unavailable" in rendered) == (percentage is None)
+    discount = next(c for c in result["claims"] if c["kind"] == "finding"
+                    and "discount" in c["parts"][0].get("text", "").lower())
+    for column, value in (("before_discount_pct", 3), ("after_discount_pct", 18)):
+        part = next(p for p in discount["parts"] if p.get("column") == column)
+        assert part["value"] == value and part["suffix"] == "%"
+        assert supported(part, result["evidence"])
+    for column in ("before_freight_per_unit", "after_freight_per_unit", "freight_change_per_unit"):
+        part = next(p for p in freight["parts"] if p.get("column") == column)
+        assert supported(part, result["evidence"])
+    percentage_parts = [p for p in freight["parts"] if p.get("column") == "freight_increase_pct"]
+    assert len(percentage_parts) == (percentage is not None)
+    if percentage_parts:
+        assert supported(percentage_parts[0], result["evidence"])
     assert result["dropped_count"] == 0
-    for finding in (discount, freight):
-        for part in finding["parts"]:
-            if "value" in part:
-                assert supported(part, result["evidence"])
 
 
 @pytest.mark.parametrize("unavailable_metric", ["discount", "freight"])
@@ -782,7 +812,8 @@ def test_undefined_metric_preserves_other_metric(unavailable_metric, unavailable
                 assert row[f"{period}_{column}"] == expected
                 assert f"{period}_{column}" in cited_columns
         if metric == "freight" and unavailable_metric == "freight":
-            assert "change: unavailable" in rendered
+            assert row["freight_change_per_unit"] is None
+            assert "; change: unavailable per unit; percentage change: unavailable" in rendered
     assert result["dropped_count"] == 0
 
 
@@ -794,7 +825,7 @@ def policy_rows(monkeypatch):
         "before_margin_pct": 40, "after_margin_pct": 25, "margin_drop_pts": 15,
         "margin_direction": "fell", "before_discount_pct": 3, "after_discount_pct": 18,
         "before_freight_per_unit": 5, "after_freight_per_unit": 8,
-        "freight_increase_pct": 60,
+        "freight_change_per_unit": 3, "freight_increase_pct": 60,
         "missing_cost_count": 0, "missing_discount_count": 0,
     }
     policies = [{"id": i, "doc": path.name, "chunk": path.read_text(encoding="utf-8").strip()}
@@ -898,7 +929,7 @@ def retrieved_policy_rows(monkeypatch):
         "before_margin_pct": 40, "after_margin_pct": 25, "margin_drop_pts": 15,
         "margin_direction": "fell", "before_discount_pct": 3, "after_discount_pct": 18,
         "before_freight_per_unit": 5, "after_freight_per_unit": 8,
-        "freight_increase_pct": 60,
+        "freight_change_per_unit": 3, "freight_increase_pct": 60,
         "missing_cost_count": 0, "missing_discount_count": 0,
     }
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
