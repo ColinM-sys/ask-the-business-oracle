@@ -1,5 +1,7 @@
 """Constrained, read-only business SQL and Oracle vector policy retrieval."""
+from collections import OrderedDict
 import json
+import threading
 
 import sqlglot
 from sqlglot import exp
@@ -9,6 +11,8 @@ from policies import embed, ensure_policies
 
 TABLES = {"sales", "costs", "customers", "discounts", "products", "regions"}
 FUNCTIONS = {"SUM", "MIN", "MAX", "AVG", "COUNT", "ROUND", "NULLIF", "COALESCE", "ABS", "AND", "OR"}
+_query_embedding_cache = OrderedDict()
+_query_embedding_lock = threading.Lock()
 
 
 def validate_select(sql):
@@ -55,6 +59,22 @@ def run_sql(select, params=None):
                     "rows": [dict(zip(columns, row)) for row in rows]}
 
 
+def _query_vector(cur, text, backend, version):
+    # Without Oracle object metadata there is no safe version to cache.
+    if backend != "hash-v1-512" and None in version:
+        return json.dumps(embed(cur, text, backend).tolist())
+    key = (text, backend, version)
+    with _query_embedding_lock:
+        if key in _query_embedding_cache:
+            _query_embedding_cache.move_to_end(key)
+            return _query_embedding_cache[key]
+        vector = json.dumps(embed(cur, text, backend).tolist())
+        _query_embedding_cache[key] = vector
+        if len(_query_embedding_cache) > 128:
+            _query_embedding_cache.popitem(last=False)
+        return vector
+
+
 def search_policies(text, k=5):
     if not isinstance(k, int) or not 1 <= k <= 20:
         raise ValueError("k must be between one and twenty")
@@ -63,13 +83,16 @@ def search_policies(text, k=5):
     ensure_policies()
     with connect() as con, con.cursor() as cur:
         cur.execute("SET TRANSACTION READ ONLY")
-        row = cur.execute("SELECT backend FROM policy_chunks FETCH FIRST 1 ROW ONLY").fetchone()
+        row = cur.execute("""SELECT p.backend, m.object_id, m.last_ddl_time
+            FROM policy_chunks p LEFT JOIN user_objects m
+              ON m.object_name = p.backend AND m.object_type = 'MINING MODEL'
+              AND m.subobject_name IS NULL
+            FETCH FIRST 1 ROW ONLY""").fetchone()
         if row is None:
             raise RuntimeError("No policy chunks available")
         backend = row[0]
-        vector = embed(cur, text, backend)
         # Store the exact vector as JSON; SQL converts it back on execution/replay.
-        params = {"query_vector": json.dumps(vector.tolist()), "k": k}
+        params = {"query_vector": _query_vector(cur, text, backend, tuple(row[1:])), "k": k}
         sql = """SELECT id, doc, chunk, VECTOR_DISTANCE(embedding, TO_VECTOR(:query_vector), COSINE) AS distance
             FROM policy_chunks ORDER BY distance, id FETCH FIRST :k ROWS ONLY"""
         rows = cur.execute(sql, params).fetchall()

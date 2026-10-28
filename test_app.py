@@ -1,4 +1,6 @@
 """Unit checks and live integration against the existing local Oracle tables."""
+from array import array
+from collections import OrderedDict
 import copy
 import json
 import re
@@ -408,6 +410,85 @@ def test_policy_search_handles_empty_table(monkeypatch):
         tools.search_policies("West freight")
 
     embedding.assert_not_called()
+
+
+def test_policy_search_caches_exact_text_and_model_version(monkeypatch):
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value.__enter__.return_value
+    cursor.execute.return_value.fetchone.side_effect = [
+        ("MODEL_V1", 10, "date1"), ("MODEL_V1", 10, "date1"),
+        ("MODEL_V1", 10, "date1"), ("MODEL_V2", 20, "date1"),
+        ("MODEL_V1", 10, "date1"), ("MODEL_V1", 11, "date1"),
+        ("MODEL_V1", 11, "date2"), ("MODEL_V1", 11, "date2")]
+    cursor.execute.return_value.fetchall.return_value = [(1, "policy.md", "policy", 0.1)]
+    monkeypatch.setattr(tools, "ensure_policies", MagicMock())
+    monkeypatch.setattr(tools, "connect", lambda: connection)
+    monkeypatch.setattr(tools, "_query_embedding_cache", OrderedDict(), raising=False)
+    embedding = MagicMock(side_effect=lambda cur, text, backend: array("f", [embedding.call_count]))
+    monkeypatch.setattr(tools, "embed", embedding)
+
+    results = [tools.search_policies("West freight", k=5),
+               tools.search_policies("West freight", k=1),
+               tools.search_policies("West freight "),
+               tools.search_policies("West freight"),
+               tools.search_policies("West freight"),
+               tools.search_policies("West freight"),
+               tools.search_policies("West freight"),
+               tools.search_policies("West freight")]
+
+    assert [call.args[1:] for call in embedding.call_args_list] == [
+        ("West freight", "MODEL_V1"), ("West freight ", "MODEL_V1"),
+        ("West freight", "MODEL_V2"), ("West freight", "MODEL_V1"),
+        ("West freight", "MODEL_V1")]
+    assert [json.loads(result["params"]["query_vector"]) for result in results] == [
+        [1], [1], [2], [3], [1], [4], [5], [5]]
+    assert [result["params"]["k"] for result in results] == [5, 1, 5, 5, 5, 5, 5, 5]
+    assert all(result["rows"] == [{"id": 1, "doc": "policy.md", "chunk": "policy", "distance": 0.1}]
+               for result in results)
+    assert sum("VECTOR_DISTANCE" in call.args[0] for call in cursor.execute.call_args_list) == 8
+
+
+def test_policy_search_only_caches_models_with_a_known_version(monkeypatch):
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value.__enter__.return_value
+    cursor.execute.return_value.fetchone.side_effect = [
+        ("MODEL", None, None), ("MODEL", None, None),
+        ("hash-v1-512", None, None), ("hash-v1-512", None, None)]
+    cursor.execute.return_value.fetchall.return_value = []
+    monkeypatch.setattr(tools, "ensure_policies", lambda: None)
+    monkeypatch.setattr(tools, "connect", lambda: connection)
+    monkeypatch.setattr(tools, "_query_embedding_cache", OrderedDict(), raising=False)
+    embedding = MagicMock(side_effect=lambda cur, text, backend: array("f", [embedding.call_count]))
+    monkeypatch.setattr(tools, "embed", embedding)
+
+    results = [tools.search_policies("West freight") for _ in range(4)]
+
+    assert [json.loads(result["params"]["query_vector"]) for result in results] == [
+        [1], [2], [3], [3]]
+    assert embedding.call_count == 3
+
+
+def test_policy_search_embedding_cache_evicts_least_recently_used(monkeypatch):
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value.__enter__.return_value
+    cursor.execute.return_value.fetchone.return_value = ("MODEL_V1", 10, "date1")
+    cursor.execute.return_value.fetchall.return_value = []
+    monkeypatch.setattr(tools, "ensure_policies", lambda: None)
+    monkeypatch.setattr(tools, "connect", lambda: connection)
+    monkeypatch.setattr(tools, "_query_embedding_cache", OrderedDict(), raising=False)
+    embedding = MagicMock(side_effect=lambda cur, text, backend: array("f", [float(text)]))
+    monkeypatch.setattr(tools, "embed", embedding)
+
+    for number in range(128):
+        tools.search_policies(str(number))
+    for text in ("0", "128", "0", "1"):
+        tools.search_policies(text)
+
+    assert [call.args[1] for call in embedding.call_args_list] == [
+        *(str(number) for number in range(128)), "128", "1"]
 
 
 def test_question_scope():
