@@ -6,6 +6,11 @@ from critic import critique
 from policies import DOCS
 from tools import run_sql, search_policies
 
+
+class QuestionValidationError(ValueError):
+    """A user-facing problem with the requested analysis."""
+
+
 # SHA-256 of the complete, whitespace-normalized chunks reviewed for the fixed
 # claims below. Changed or partial chunks require reviewing both the claims and
 # these fingerprints; deriving them from current files would approve edits blindly.
@@ -25,7 +30,10 @@ POLICY_SHA256 = {
     "regional_playbook.md": "6a3fd585c58b2528206a9545db63db828c836ce0a265e1fb3fc90525d6ab03d8",
 }
 
-JOIN = """FROM sales s LEFT JOIN costs c ON c.region_id=s.region_id
+JOIN = """FROM sales s LEFT JOIN
+    (SELECT region_id, product_id, cost_month, MIN(unit_cogs) AS unit_cogs,
+        MIN(freight_per_unit) AS freight_per_unit FROM costs
+        GROUP BY region_id, product_id, cost_month HAVING COUNT(*)=1) c ON c.region_id=s.region_id
     AND c.product_id=s.product_id AND c.cost_month=s.sale_month
     JOIN regions r ON r.region_id=s.region_id"""
 MONTHLY_SQL = f"""SELECT r.region_name, s.sale_month,
@@ -35,7 +43,8 @@ MONTHLY_SQL = f"""SELECT r.region_name, s.sale_month,
         /NULLIF(SUM(s.net_revenue),0),2) AS margin_pct,
     ROUND(SUM(s.quantity*s.unit_price*s.discount_pct)
         /NULLIF(SUM(s.quantity*s.unit_price),0),2) AS discount_pct,
-    ROUND(SUM(s.quantity*c.freight_per_unit)/NULLIF(SUM(s.quantity),0),2) AS freight_per_unit
+    ROUND(SUM(s.quantity*c.freight_per_unit)/NULLIF(SUM(s.quantity),0),2) AS freight_per_unit,
+    SUM(CASE WHEN c.unit_cogs IS NULL OR c.freight_per_unit IS NULL THEN 1 ELSE 0 END) AS missing_cost_count
     {JOIN} GROUP BY r.region_name,s.sale_month ORDER BY r.region_name,s.sale_month"""
 
 
@@ -56,7 +65,7 @@ def summary_sql():
         for name, expression in raw[period].items():
             columns.append(f"ROUND({expression},2) AS {period}_{name}")
     columns.extend([
-        "COUNT(*)-COUNT(c.cost_month) AS missing_cost_count",
+        "SUM(CASE WHEN c.unit_cogs IS NULL OR c.freight_per_unit IS NULL THEN 1 ELSE 0 END) AS missing_cost_count",
         f"CASE WHEN ({raw['before']['margin_pct']}) > ({raw['after']['margin_pct']}) THEN 'fell' WHEN ({raw['before']['margin_pct']}) < ({raw['after']['margin_pct']}) THEN 'rose' ELSE 'was unchanged' END AS margin_direction",
         f"ROUND(({raw['before']['margin_pct']})-({raw['after']['margin_pct']}),2) AS margin_drop_pts",
         f"ROUND(100*(({raw['after']['freight_per_unit']})/NULLIF(({raw['before']['freight_per_unit']}),0)-1),2) AS freight_increase_pct",
@@ -77,11 +86,11 @@ def parse_question(question):
     unsupported = re.search(
         r"\b(north|northwest|northeast|southwest|southeast)\b", question, re.I)
     if unsupported:
-        raise ValueError(f"Unsupported region: {unsupported[0]}. Choose West, Central, East, or South.")
+        raise QuestionValidationError(f"Unsupported region: {unsupported[0]}. Choose West, Central, East, or South.")
     region_matches = [r for r in ("West", "Central", "East", "South")
                       if re.search(rf"\b{r}\b", question, re.I)]
     if len(region_matches) > 1:
-        raise ValueError("Ask about one region at a time; the evidence includes all regions for comparison.")
+        raise QuestionValidationError("Ask about one region at a time; the evidence includes all regions for comparison.")
     cutoff = "2025-07"
     date = re.search(r"\b(20\d{2})-(0[1-9]|1[0-2])\b(?![-/\d])", question)
     month_pattern = r"\b(" + "|".join(MONTHS) + r")\b"
@@ -95,13 +104,13 @@ def parse_question(question):
     remaining = question[:matched.start()] + question[matched.end():] if matched else question
     if (re.search(r"\b\d{4}\b|\b\d+[-/]\d+\b", remaining)
             or re.search(month_pattern, remaining, re.I)):
-        raise ValueError("Unsupported date; use YYYY-MM or a month name and four-digit year.")
+        raise QuestionValidationError("Unsupported date; use YYYY-MM or a month name and four-digit year.")
     return region_matches[0] if region_matches else "West", cutoff
 
 
 def answer_question(question):
     if not isinstance(question, str) or not question.strip() or len(question) > 1000:
-        raise ValueError("Enter a business question of up to one thousand characters.")
+        raise QuestionValidationError("Enter a business question of up to one thousand characters.")
     region, cutoff = parse_question(question)
     evidence = {
         "E1": {"kind": "sql", **run_sql(MONTHLY_SQL)},
@@ -110,16 +119,17 @@ def answer_question(question):
     rows = evidence["E2"]["rows"]
     index = next((i for i, row in enumerate(rows) if row["region_name"] == region), None)
     if index is None:
-        raise ValueError(f"No sales/cost data found for {region}.")
-    if any(row["missing_cost_count"] for row in rows):
-        raise ValueError("Missing monthly costs for some sales; cannot analyze incomplete data.")
+        raise QuestionValidationError(f"No sales/cost data found for {region}.")
+    if any(row["missing_cost_count"] for key in ("E1", "E2") for row in evidence[key]["rows"]):
+        raise ValueError("Missing monthly costs or duplicate cost rows for some sales; cannot analyze incomplete or ambiguous data.")
     row = rows[index]
     if row["before_margin_pct"] is None or row["after_margin_pct"] is None:
-        raise ValueError("The comparison date must have sales both before and after it.")
+        raise QuestionValidationError("The comparison date must have sales both before and after it.")
     policies = search_policies(f"{region} margin discount freight policy " + question)
     for policy in policies["rows"]:
-        evidence[f"P{policy['id']}"] = {"kind": "policy", "sql": policies["sql"],
-            "params": policies["params"], "rows": [policy]}
+        evidence[f"P{policy['id']}"] = {"kind": "policy",
+            "sql": f"SELECT * FROM (\n{policies['sql']}\n) WHERE id = :policy_id",
+            "params": {**policies["params"], "policy_id": policy["id"]}, "rows": [policy]}
 
     def text(value):
         return {"text": value}
@@ -177,7 +187,10 @@ def answer_question(question):
     if region == "West" and cutoff == "2025-07":
         push, freight = policy_ids("west_q3_volume_push.md"), policy_ids("freight_contract_memo.md")
         if push and freight:
-            claim("reason", [text("The policy documents identify a regional volume discount push and a replacement freight contract. The discount program bypassed senior sales approval and Finance review. These changes are consistent with the observed margin decline; this comparison does not isolate their individual causal effects.")], push + freight)
+            impact = ("These changes are consistent with the observed margin decline"
+                      if direction == "fell" else f"The observed margin {direction}")
+            claim("reason", [text("The policy documents identify a regional volume discount push and a replacement freight contract. The discount program bypassed senior sales approval and Finance review. "
+                f"{impact}; this comparison does not isolate their individual causal effects.")], push + freight)
     else:
         claim("reason", [text("Use the discount and freight movements to investigate the margin change. The retrieved West-specific documents do not establish a cause for this region and comparison period.")])
     pricing = policy_ids("pricing_policy.md")
