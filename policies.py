@@ -74,6 +74,8 @@ def ensure_policies():
                     chunk = (chunk + "\n\n" + part).strip()
             if chunk:
                 chunks.append((name, chunk))
+        if not chunks:
+            raise RuntimeError("No policy chunks generated from policy documents")
         vectors = [embed(cur, chunk, backend) for _, chunk in chunks]
         cur.execute("DELETE FROM policy_chunks")
         for index, ((doc, chunk), vector) in enumerate(zip(chunks, vectors), 1):
