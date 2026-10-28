@@ -141,11 +141,13 @@ def parse_question(question):
         cutoff = date.group(0)
     elif named:
         cutoff = named[2] + "-" + MONTHS[named[1].lower()]
-    # A recognized date must not hide another unsupported date expression.
+    # A recognized date must not hide another unsupported date expression or day.
     matched = date or named
     remaining = question[:matched.start()] + question[matched.end():] if matched else question
     if (re.search(r"\b\d{4}\b|\b\d+[-/]\d+\b", remaining)
-            or re.search(month_pattern, remaining, re.I)):
+            or re.search(month_pattern, remaining, re.I)
+            or (named and re.search(r"\b\d+(?:st|nd|rd|th)?(?:\s+of)?[\s,./-]+$",
+                                    question[:named.start()], re.I))):
         raise QuestionValidationError("Unsupported date; use YYYY-MM or a month name and four-digit year.")
     return region_matches[0] if region_matches else "West", cutoff
 

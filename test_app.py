@@ -1979,6 +1979,20 @@ def test_question_rejects_unsupported_explicit_dates(date):
         parse_question(f"West since {date}")
 
 
+@pytest.mark.parametrize("date", ["15 July 2025", "1st July 2025", "2nd of July 2025",
+                                  "15 Jul. 2025", "15-July 2025", "15/Jul 2025"])
+def test_question_rejects_day_qualified_named_dates_before_querying(date, monkeypatch):
+    def forbidden_query(*args, **kwargs):
+        pytest.fail("Unsupported dates must be rejected before querying")
+    monkeypatch.setattr("agent.run_sql", forbidden_query)
+    with pytest.raises(ValueError, match="Unsupported date"):
+        answer_question(f"West since {date}")
+
+
+def test_question_accepts_unrelated_numbers_before_named_month():
+    assert parse_question("West margin fell 15% since July 2025") == ("West", "2025-07")
+
+
 def test_question_defaults_only_without_date():
     assert parse_question("Why did West margin fall?") == ("West", "2025-07")
 @pytest.mark.parametrize("region", ["North", "north", "Northeast", "Northwest", "Southeast", "Southwest", "West and North",
