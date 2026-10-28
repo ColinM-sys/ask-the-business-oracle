@@ -1,4 +1,10 @@
-"""Idempotent policy ingestion; local hashing fallback needs no API key."""
+"""Idempotent policy ingestion; local hashing fallback needs no API key.
+
+The lock coordinates threads only within one process. Serialize ingestion across
+processes sharing an Oracle schema, including CLI runs of policies.py alongside
+Flask requests. Concurrent processes require additional database-level coordination;
+transactional replacement does not serialize processes.
+"""
 from array import array
 import hashlib
 import logging

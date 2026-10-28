@@ -17,6 +17,7 @@ import oracledb
 import pytest
 
 import db
+import policies
 import tools
 from db import connect
 from agent import answer_question, parse_question, summary_sql
@@ -203,6 +204,15 @@ def test_critic_documents_unchecked_text_modifiers(sample_evidence):
     assert "other unit or magnitude modifiers" in documentation
     assert "quadrillion" in documentation
     assert "may pass unchecked" in documentation
+
+
+def test_policy_ingestion_documents_process_coordination():
+    documentation = " ".join(policies.__doc__.lower().split())
+    assert "the lock coordinates threads only within one process" in documentation
+    assert "serialize ingestion across processes sharing an oracle schema" in documentation
+    assert "cli runs of policies.py alongside flask requests" in documentation
+    assert "concurrent processes require additional database-level coordination" in documentation
+    assert "transactional replacement does not serialize processes" in documentation
 
 
 def test_hashing_is_stable_and_normalized():
