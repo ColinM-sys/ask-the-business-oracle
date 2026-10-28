@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ask the Business</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, sans-serif; color: #183537; background: #f3f5ef; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    main { max-width: 1050px; margin: auto; padding: 48px 24px; }
+    .eyebrow { text-transform: uppercase; letter-spacing: .16em; color: #52736c; font-size: .75rem; font-weight: 700; }
+    h1 { font-size: clamp(2rem, 5vw, 3.4rem); letter-spacing: -.04em; margin: 12px 0; }
+    .intro { color: #52736c; max-width: 660px; line-height: 1.6; }
+    form { display: flex; gap: 12px; margin: 28px 0; flex-wrap: wrap; }
+    label { width: 100%; font-weight: 650; }
+    input { flex: 1; min-width: 230px; padding: 16px; border: 1px solid #b9ccc2; border-radius: 10px; font: inherit; background: white; }
+    button { font: inherit; cursor: pointer; }
+    .submit { border: 0; border-radius: 10px; background: #1d5c4f; color: white; padding: 16px 24px; font-weight: 650; }
+    .card { background: white; border: 1px solid #dbe3d8; border-radius: 16px; padding: 26px; margin: 22px 0; }
+    h2 { margin-top: 0; font-size: 1.35rem; }
+    p { line-height: 1.7; }
+    .scope, .comparison { color: #52736c; font-size: .9rem; }
+    .finding { font-size: 1.1rem; }
+    .number, .citation { color: #175d50; background: #e9f4eb; border: 0; border-bottom: 1px dashed #308371; padding: 2px 4px; border-radius: 3px; }
+    .number { font-weight: 700; }
+    .citation { margin-left: 6px; font-size: .8rem; }
+    .action { border-left: 3px solid #8fbfab; padding-left: 16px; }
+    .error { color: #903d30; background: #fff0e8; padding: 16px; border-radius: 8px; }
+    .hint { color: #52736c; font-size: .85rem; }
+    dialog { border: 1px solid #b9ccc2; border-radius: 14px; padding: 24px; width: min(95vw, 1000px); max-height: 85vh; color: #183537; }
+    dialog::backdrop { background: #18353788; }
+    .close { float: right; background: #e9f4eb; border: 0; padding: 8px 14px; border-radius: 6px; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #f3f5ef; padding: 16px; border-radius: 8px; font-size: .85rem; }
+    .table-wrap { overflow: auto; max-height: 350px; }
+    table { border-collapse: collapse; font-size: .8rem; width: 100%; }
+    td, th { text-align: left; border-bottom: 1px solid #dbe3d8; padding: 10px; min-width: 90px; }
+    th { position: sticky; top: 0; background: #e9f4eb; }
+    td { white-space: pre-wrap; max-width: 650px; }
+    .selected { background: #fff1c7; }
+    details { margin-top: 18px; }
+    summary { cursor: pointer; }
+    :focus-visible { outline: 3px solid #d99c3a; outline-offset: 3px; }
+  </style>
+</head>
+<body>
+<main>
+  <div class="eyebrow">Oracle AI Database · Evidence-led decisions</div>
+  <h1>Ask the Business</h1>
+  <p class="intro">Understand what changed, explore the evidence, and decide what to do next. Every number opens the SQL and rows behind it.</p>
+  <form method="post" id="question-form">
+    <label for="question">Your business question</label>
+    <input id="question" name="question" maxlength="1000" value="{{ question }}" required>
+    <button class="submit" type="submit">Analyze question</button>
+  </form>
+  <p class="hint">Fixed analysis of margin, discounts and freight. Name a region and comparison month; defaults are West and July 2025. Uses all available sales on each side of that month.</p>
+  {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+  {% if result %}
+  <article class="card" aria-live="polite">
+    <div class="eyebrow">Business brief · {{ result.region }}</div>
+    <h2>What changed, and what to do</h2>
+    {% for claim in result.claims %}
+      <p class="{{ claim.kind }}">
+      {%- for part in claim.parts -%}
+        {%- if 'text' in part -%}{{ part.text }}
+        {%- else -%}<button type="button" class="number" data-evidence="{{ part.evidence }}" data-row="{{ part.row }}" data-column="{{ part.column }}" aria-label="Evidence for {{ part.value }}{{ part.suffix }}">{{ part.value }}{{ part.suffix }}</button>{%- endif -%}
+      {%- endfor -%}
+      {% for id in claim.policy_ids %}<button type="button" class="citation" data-evidence="{{ id }}">{{ id }}</button>{% endfor %}
+      </p>
+    {% endfor %}
+    <p class="hint">Numbers verified against cited SQL cells. Policy citations support the qualitative explanation.</p>
+    <details><summary>Explore all evidence</summary>
+      <p>{% for id in result.evidence %}<button type="button" class="citation" data-evidence="{{ id }}">{{ id }}</button>{% endfor %}</p>
+    </details>
+  </article>
+  <dialog id="evidence-dialog" aria-labelledby="evidence-title">
+    <button type="button" class="close" id="close-dialog">Close</button>
+    <h2 id="evidence-title">Evidence</h2>
+    <h3>SQL</h3><pre id="evidence-sql"></pre>
+    <h3>Bound parameters</h3><pre id="evidence-params"></pre>
+    <h3>Returned rows</h3><div class="table-wrap" id="evidence-rows"></div>
+  </dialog>
+  <script>
+    const evidence = {{ result.evidence | tojson }};
+    const dialog = document.getElementById('evidence-dialog');
+    document.querySelectorAll('[data-evidence]').forEach(button => button.addEventListener('click', () => {
+      const item = evidence[button.dataset.evidence];
+      document.getElementById('evidence-title').textContent = button.dataset.evidence + ' · ' + (item.kind === 'sql' ? 'Business data' : 'Policy search');
+      document.getElementById('evidence-sql').textContent = item.sql;
+      document.getElementById('evidence-params').textContent = JSON.stringify(item.params, null, 2);
+      const table = document.createElement('table');
+      const columns = Object.keys(item.rows[0] || {});
+      const head = table.createTHead().insertRow();
+      columns.forEach(column => { const th = document.createElement('th'); th.textContent = column; head.append(th); });
+      const body = table.createTBody();
+      item.rows.forEach((row, index) => {
+        const tr = body.insertRow();
+        columns.forEach(column => {
+          const td = tr.insertCell(); td.textContent = row[column] === null ? 'NULL' : row[column];
+          if (String(index) === button.dataset.row && column === button.dataset.column) td.className = 'selected';
+        });
+      });
+      document.getElementById('evidence-rows').replaceChildren(table);
+      dialog.showModal();
+      dialog.querySelector('.selected')?.scrollIntoView({block: 'nearest'});
+    }));
+    document.getElementById('close-dialog').addEventListener('click', () => dialog.close());
+  </script>
+  {% endif %}
+  <script>
+    document.getElementById('question-form').addEventListener('submit', () => {
+      const button = document.querySelector('.submit'); button.disabled = true; button.textContent = 'Analyzing…';
+    });
+  </script>
+</main>
+</body>
+</html>
