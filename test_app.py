@@ -334,6 +334,73 @@ def test_hashing_is_stable_and_normalized():
     assert abs(sum(v*v for v in first) - 1) < 0.000001
 
 
+@pytest.mark.parametrize("text_type", ["VARCHAR2", "CLOB", "NVARCHAR2", "NCLOB"])
+@pytest.mark.parametrize("image, null_model, good_model", [
+    (True, False, True),
+    (False, True, True),
+    (False, True, False),
+])
+def test_policy_probe_selects_usable_text_model(
+        text_type, image, null_model, good_model, tmp_path, monkeypatch):
+    (tmp_path / "policy.md").write_text("Business policy", encoding="utf-8")
+    metadata = sqlite3.connect(":memory:")
+    metadata.execute("""CREATE TABLE user_mining_models
+        (model_name TEXT, mining_function TEXT, creation_date TEXT)""")
+    metadata.execute("""CREATE TABLE user_mining_model_attributes
+        (model_name TEXT, attribute_name TEXT, attribute_type TEXT, data_type TEXT)""")
+    metadata.execute("""CREATE TABLE user_objects
+        (object_name TEXT, object_type TEXT, subobject_name TEXT, object_id INTEGER)""")
+    models = []
+    if image:
+        models.append(("A_IMAGE", "UNSTRUCTURED", "BLOB"))
+    if null_model:
+        models.append(("B_NULL", "TEXT", text_type))
+    if good_model:
+        models.append(("C_GOOD", "TEXT", text_type))
+    model_versions = {}
+    for object_id, (name, attribute_type, data_type) in enumerate(models, 1):
+        created = f"created-{name}"
+        model_versions[name] = (name, created, object_id)
+        metadata.execute("INSERT INTO user_mining_models VALUES (?, 'EMBEDDING', ?)", (name, created))
+        metadata.execute("INSERT INTO user_objects VALUES (?, 'MINING MODEL', NULL, ?)", (name, object_id))
+        metadata.execute("INSERT INTO user_mining_model_attributes VALUES (?, 'DATA', ?, ?)",
+                         (name, attribute_type, data_type))
+        metadata.execute("INSERT INTO user_mining_model_attributes VALUES (?, 'ORA$ONNXTARGET', 'VECTOR', 'VECTOR')",
+                         (name,))
+
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.fetchone.return_value = ("POLICY_CHUNKS",)
+    cursor.fetchall.return_value = []
+    cursor.execute.side_effect = lambda sql, **params: (
+        metadata.execute(sql) if "user_mining_models" in sql.lower() else cursor)
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+    probed = []
+
+    def embedding(cur, text, backend):
+        probed.append(backend)
+        if backend == "A_IMAGE":
+            raise oracledb.DatabaseError(SimpleNamespace(code=40284))
+        if backend == "B_NULL":
+            return None
+        return hash_embedding(text)
+
+    monkeypatch.setattr("policies.embed", embedding)
+    expected = "C_GOOD" if good_model else "hash-v1-512"
+    assert ensure_policies() == expected
+    assert probed == (["B_NULL"] if null_model else []) + (["C_GOOD"] if good_model else []) + [expected]
+    inserted = [call.kwargs for call in cursor.execute.call_args_list
+                if call.args[0].lstrip().startswith("INSERT INTO policy_chunks")]
+    assert inserted and all(row["backend"] == expected and row["vector"] is not None for row in inserted)
+    model_version = model_versions[expected] if good_model else (expected,)
+    version = "v" + hashlib.sha256(repr(model_version).encode()).hexdigest()[:31]
+    assert all(row["fingerprint"].startswith(version) for row in inserted)
+    connection.commit.assert_called_once()
+    metadata.close()
+
+
 @pytest.mark.parametrize("failure", [
     RuntimeError("private-driver-details"),
     oracledb.DatabaseError(SimpleNamespace(code=3113, message="private-driver-details")),

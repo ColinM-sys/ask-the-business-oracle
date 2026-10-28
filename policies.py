@@ -64,13 +64,20 @@ def ensure_policies():
                 """SELECT model_name, creation_date,
                     (SELECT object_id FROM user_objects WHERE object_name=m.model_name
                         AND object_type='MINING MODEL' AND subobject_name IS NULL)
-                    FROM user_mining_models m WHERE mining_function='EMBEDDING' ORDER BY model_name"""
+                    FROM user_mining_models m
+                    WHERE mining_function='EMBEDDING' AND EXISTS (
+                        SELECT 1 FROM user_mining_model_attributes a
+                        WHERE a.model_name=m.model_name AND a.attribute_type='TEXT'
+                        AND a.data_type IN ('VARCHAR2', 'CLOB', 'NVARCHAR2', 'NCLOB')
+                    ) ORDER BY model_name"""
             ).fetchall():
                 if not _model_identifier.fullmatch(model):
                     _logger.warning("Skipping unsupported embedding model %r", model)
                     continue
                 try:
-                    embed(cur, "Business policy", model)
+                    if embed(cur, "Business policy", model) is None:
+                        _logger.warning("Embedding model %r returned no vector", model)
+                        continue
                     backend = model
                     model_version = (model, created, object_id)
                     break
