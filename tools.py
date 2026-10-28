@@ -42,17 +42,25 @@ def validate_select(sql):
 
 
 def run_sql(select, params=None):
-    executable = validate_select(select)
+    return run_sql_batch([(select, params)])[0]
+
+
+def run_sql_batch(queries):
+    """Execute business SELECTs against one read-only snapshot."""
+    queries = [(select, params, validate_select(select)) for select, params in queries]
     with connect() as con:
         with con.cursor() as cur:
             cur.execute("SET TRANSACTION READ ONLY")
-            cur.execute(executable, params or {})
-            columns = [d[0].lower() for d in cur.description]
-            rows = cur.fetchmany(1001)
-            if len(rows) > 1000:
-                raise ValueError("Evidence exceeds the row limit; aggregate the query")
-            return {"sql": select, "params": params or {},
-                    "rows": [dict(zip(columns, row)) for row in rows]}
+            results = []
+            for select, params, executable in queries:
+                cur.execute(executable, params or {})
+                columns = [d[0].lower() for d in cur.description]
+                rows = cur.fetchmany(1001)
+                if len(rows) > 1000:
+                    raise ValueError("Evidence exceeds the row limit; aggregate the query")
+                results.append({"sql": select, "params": params or {},
+                                "rows": [dict(zip(columns, row)) for row in rows]})
+            return results
 
 
 def search_policies(text, k=5):

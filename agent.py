@@ -2,7 +2,7 @@
 import re
 
 from critic import critique
-from tools import run_sql, search_policies
+from tools import run_sql_batch, search_policies
 
 JOIN = """FROM sales s JOIN costs c ON c.region_id=s.region_id
     AND c.product_id=s.product_id AND c.cost_month=s.sale_month
@@ -81,9 +81,10 @@ def answer_question(question):
     if not isinstance(question, str) or not question.strip() or len(question) > 1000:
         raise ValueError("Enter a business question of up to one thousand characters.")
     region, cutoff = parse_question(question)
+    monthly, summary = run_sql_batch([(MONTHLY_SQL, None), (summary_sql(), {"cutoff": cutoff})])
     evidence = {
-        "E1": {"kind": "sql", **run_sql(MONTHLY_SQL)},
-        "E2": {"kind": "sql", **run_sql(summary_sql(), {"cutoff": cutoff})},
+        "E1": {"kind": "sql", **monthly},
+        "E2": {"kind": "sql", **summary},
     }
     rows = evidence["E2"]["rows"]
     index = next((i for i, row in enumerate(rows) if row["region_name"] == region), None)

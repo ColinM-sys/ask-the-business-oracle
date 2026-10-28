@@ -4,6 +4,7 @@ import json
 import runpy
 import subprocess
 import sqlite3
+from contextlib import closing
 from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
@@ -250,10 +251,77 @@ def test_question_scope():
         parse_question("West and East")
 
 
+def test_business_evidence_shares_snapshot_during_update(tmp_path, monkeypatch):
+    database = tmp_path / "business.db"
+    connections = []
+    updated = False
+    with closing(sqlite3.connect(database)) as writer:
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            INSERT INTO sales VALUES (1, 1, '2025-06', 100.0, 1, 100.0, 0),
+                                     (1, 1, '2025-07', 100.0, 1, 100.0, 0);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+            INSERT INTO costs VALUES (1, 1, '2025-06', 55.0, 5.0),
+                                     (1, 1, '2025-07', 70.0, 5.0);
+        """)
+
+        def business_connection():
+            con = sqlite3.connect(database, isolation_level=None)
+            cur = con.cursor()
+            connection = MagicMock()
+            connection.__enter__.return_value = connection
+            connection.__exit__.side_effect = lambda *_: con.close()
+            cursor = connection.cursor.return_value
+            cursor.__enter__.return_value = cursor
+            cursor.__exit__.side_effect = lambda *_: cur.close()
+
+            def execute(sql, params=None):
+                # SQLite's explicit transaction supplies the snapshot for this test.
+                cur.execute("BEGIN" if sql == "SET TRANSACTION READ ONLY" else sql, params or {})
+                cursor.description = cur.description
+                return cursor
+
+            def fetchmany(limit):
+                nonlocal updated
+                rows = cur.fetchmany(limit)
+                if not updated:
+                    writer.execute("UPDATE costs SET freight_per_unit=25 WHERE cost_month='2025-07'")
+                    writer.commit()
+                    updated = True
+                return rows
+
+            cursor.execute.side_effect = execute
+            cursor.fetchmany.side_effect = fetchmany
+            connections.append(connection)
+            return connection
+
+        monkeypatch.setattr(tools, "connect", business_connection)
+        monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
+
+        result = answer_question("West since July 2025")
+
+        assert updated
+        assert writer.execute("SELECT freight_per_unit FROM costs WHERE cost_month='2025-07'").fetchone() == (25,)
+    monthly = next(row for row in result["evidence"]["E1"]["rows"] if row["sale_month"] == "2025-07")
+    summary = result["evidence"]["E2"]["rows"][0]
+    assert monthly["freight_per_unit"] == summary["after_freight_per_unit"] == 5
+    assert monthly["margin_pct"] == summary["after_margin_pct"] == 25
+    freight_claim = next(part for claim in result["claims"] for part in claim["parts"]
+                         if part.get("column") == "after_freight_per_unit")
+    assert freight_claim["value"] == monthly["freight_per_unit"]
+    assert result["dropped_count"] == 0
+    assert len(connections) == 1
+    connections[0].__exit__.assert_called_once()
+
+
 @pytest.mark.parametrize("rows", [[], [{"region_name": "East"}]])
 def test_missing_region_has_descriptive_validation_error(monkeypatch, rows):
-    monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
-        "sql": sql, "params": params or {}, "rows": rows})
+    monkeypatch.setattr("agent.run_sql_batch", lambda queries: [
+        {"sql": sql, "params": params or {}, "rows": rows} for sql, params in queries])
     with pytest.raises(ValueError, match="No sales/cost data found for West"):
         answer_question("Why did West margin fall since July 2025?")
     response = app.test_client().post("/", data={"question": "West"})
@@ -284,8 +352,8 @@ def test_margin_direction_uses_unrounded_sql(before, after, direction, below_pre
         tools.validate_select(sql)
         rows = [dict(row) for row in con.execute(sql, {"cutoff": "2025-07"})]
 
-    monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
-        "sql": sql, "params": params or {}, "rows": rows})
+    monkeypatch.setattr("agent.run_sql_batch", lambda queries: [
+        {"sql": sql, "params": params or {}, "rows": rows} for sql, params in queries])
     monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
     result = answer_question("West since July 2025")
     finding = next(c for c in result["claims"] if c["kind"] == "finding")
@@ -306,8 +374,8 @@ def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
         "before_freight_per_unit": 0, "after_freight_per_unit": 5,
         "freight_increase_pct": None,
     }
-    monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
-        "sql": sql, "params": params or {}, "rows": [row]})
+    monkeypatch.setattr("agent.run_sql_batch", lambda queries: [
+        {"sql": sql, "params": params or {}, "rows": [row]} for sql, params in queries])
     monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
 
     result = answer_question("Why did West margin fall since July 2025?")
@@ -341,7 +409,7 @@ def test_question_defaults_only_without_date():
 def test_unsupported_region_is_rejected_before_querying(monkeypatch, region):
     def forbidden_query(*args, **kwargs):
         pytest.fail("Unsupported regions must be rejected before querying")
-    monkeypatch.setattr("agent.run_sql", forbidden_query)
+    monkeypatch.setattr("agent.run_sql_batch", forbidden_query)
     with pytest.raises(ValueError, match="Unsupported region"):
         answer_question(f"Why did {region} margin fall since July 2025?")
     assert parse_question("Why did margin fall since July 2025?") == ("West", "2025-07")
@@ -442,7 +510,7 @@ def test_ui_missing_question_rejected_before_querying(monkeypatch, data):
     def forbidden_query(*args, **kwargs):
         pytest.fail("Missing questions must be rejected before querying")
 
-    monkeypatch.setattr("agent.run_sql", forbidden_query)
+    monkeypatch.setattr("agent.run_sql_batch", forbidden_query)
     response = app.test_client().post("/", data=data)
     assert response.status_code == 400
 def test_ui_restores_submit_button_on_pageshow():
