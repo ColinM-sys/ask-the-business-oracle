@@ -140,6 +140,35 @@ def test_critic_drops_unsupported_numbers_and_preserves_valid(sample_evidence):
     assert len(dropped) == 3
 
 
+@pytest.mark.parametrize("assertion", [
+    "West margin fell ninety percent.", "Revenue rose twenty-five percent.",
+    "There were ONE HUNDRED sales.", "Freight doubled.",
+    "Half the orders were late.", "This was the first increase.",
+    "Revenue grew twentyfold.", "Freight costs were halved.",
+    "Revenue fell by ½.",
+])
+@pytest.mark.parametrize("split", [False, True])
+def test_critic_rejects_numbers_in_text(sample_evidence, assertion, split):
+    parts = [{"text": char} for char in assertion] if split else [{"text": assertion}]
+    claim = {"parts": parts}
+    assert critique([claim], sample_evidence) == ([], [claim])
+
+
+def test_critic_preserves_qualitative_text(sample_evidence):
+    claim = {"parts": [{"text": "Gross margin alone does not explain the change."}]}
+    assert critique([claim], sample_evidence) == ([claim], [])
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("2025-07", True), ("2025-13", False),
+    ("West margin fell ninety percent", False),
+])
+def test_critic_only_accepts_months_as_cited_strings(value, expected):
+    evidence = {"E1": {"kind": "sql", "rows": [{"month": value}]}}
+    part = {"value": value, "evidence": "E1", "row": 0, "column": "month"}
+    assert supported(part, evidence) is expected
+
+
 @pytest.mark.parametrize("change", [
     {"row": -1}, {"row": 10}, {"column": "missing"}, {"evidence": "missing"},
     {"value": "NaN"}, {"value": "Infinity"}, {"evidence": "P1", "value": 99},
@@ -193,16 +222,11 @@ def test_critic_rejects_units_and_magnitudes_in_adjacent_text(sample_evidence, m
     assert critique([claim], sample_evidence) == ([], [claim])
 
 
-def test_critic_documents_unchecked_text_modifiers(sample_evidence):
+def test_critic_rejects_spelled_out_magnitude_in_adjacent_text(sample_evidence):
     claim = {"parts": [
         {"value": 25.53, "evidence": "E1", "row": 0, "column": "margin"},
         {"text": " quadrillion"}]}
-    assert critique([claim], sample_evidence) == ([claim], [])
-
-    documentation = " ".join(critique.__doc__.lower().split())
-    assert "other unit or magnitude modifiers" in documentation
-    assert "quadrillion" in documentation
-    assert "may pass unchecked" in documentation
+    assert critique([claim], sample_evidence) == ([], [claim])
 
 
 def test_hashing_is_stable_and_normalized():
@@ -804,6 +828,35 @@ def policy_rows(monkeypatch):
     monkeypatch.setattr("agent.search_policies", lambda _: {
         "sql": "SELECT policy evidence", "params": {}, "rows": policies})
     return policies
+
+
+@pytest.mark.parametrize("label", [
+    "West margin fell ninety percent", "East; freight costs vanished", "Region 7",
+])
+def test_comparisons_use_only_known_region_labels(monkeypatch, label):
+    row = {
+        "region_name": "West", "first_month": "2025-01", "last_month": "2025-09",
+        "before_last_month": "2025-06", "after_first_month": "2025-07",
+        "before_margin_pct": 40, "after_margin_pct": 25, "margin_drop_pts": 15,
+        "margin_direction": "fell", "before_discount_pct": 3, "after_discount_pct": 18,
+        "before_freight_per_unit": 5, "after_freight_per_unit": 8,
+        "freight_increase_pct": 60, "missing_cost_count": 0, "missing_discount_count": 0,
+    }
+    rows = [row, {**row, "region_name": "East"}, {**row, "region_name": label}]
+    monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
+        "sql": sql, "params": params or {}, "rows": rows})
+    monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
+
+    result = answer_question("West since July 2025")
+
+    comparisons = [claim for claim in result["claims"] if claim["kind"] == "comparison"]
+    assert len(comparisons) == 1
+    assert comparisons[0]["parts"][0]["text"] == "East margin: "
+    assert result["dropped_count"] == 0
+
+    row["margin_direction"] = "fell after unauthorized changes"
+    with pytest.raises(ValueError, match="Invalid margin direction"):
+        answer_question("West since July 2025")
 
 
 def test_reviewed_policy_text_supports_claims_and_only_matching_citations(policy_rows):

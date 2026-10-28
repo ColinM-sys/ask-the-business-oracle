@@ -3,6 +3,19 @@ from decimal import Decimal, InvalidOperation
 import re
 
 
+NUMBER_WORDS = re.compile(
+    r"\b(?:(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+    r"thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|"
+    r"twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:fold)?|"
+    r"first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|"
+    r"eleventh|twelfth|thirteenth|fourteenth|fifteenth|sixteenth|seventeenth|"
+    r"eighteenth|nineteenth|twentieth|thirtieth|fortieth|fiftieth|sixtieth|"
+    r"seventieth|eightieth|ninetieth|"
+    r"(?:hundred|thousand|[a-z]+illion|googol(?:plex)?)(?:th)?|"
+    r"half|halves|halve(?:d)?|halving|quarter|dozen|couple|single|once|twice|thrice|"
+    r"double(?:d)?|doubling|triple(?:d)?|tripling|quadruple(?:d)?|quadrupling)s?\b", re.IGNORECASE)
+
+
 def supported(part, evidence):
     source = evidence.get(part.get("evidence"), {})
     if source.get("kind") != "sql":
@@ -15,7 +28,8 @@ def supported(part, evidence):
         value = part["value"]
         if isinstance(cell, (int, float, Decimal)) and not isinstance(cell, bool):
             return Decimal(str(value)).is_finite() and Decimal(str(value)) == Decimal(str(cell))
-        return isinstance(cell, str) and str(value) == cell
+        return (isinstance(cell, str) and str(value) == cell
+                and bool(re.fullmatch(r"[0-9]{4}-(?:0[1-9]|1[0-2])", cell)))
     except (KeyError, IndexError, TypeError, InvalidOperation, ValueError):
         return False
 
@@ -23,21 +37,21 @@ def supported(part, evidence):
 def critique(claims, evidence):
     """Drop an entire claim if a numeric part lacks an exact cited SQL cell.
 
-    Plain text cannot carry digits (including dates); numerical segments must
-    name the evidence, row, column and exact value. Policy text is evidence for
-    qualitative reasons only, never an authority for business numbers. Numeric
-    suffixes are limited to "", "%", and " percentage points", without checking
-    the cell's units. Only selected adjacent text modifiers are rejected; other
-    unit or magnitude modifiers, such as "quadrillion", may pass unchecked.
+    Plain text cannot carry numeric characters or number words; numerical
+    segments must name the evidence, row, column and exact value. String cells
+    are restricted to YYYY-MM dates. Policy text is evidence for qualitative
+    reasons only, never an authority for business numbers. Numeric suffixes are
+    limited to "", "%", and " percentage points", without checking cell units.
     """
     kept, dropped = [], []
     for claim in claims:
         valid = bool(claim.get("parts"))
         rendered = ""
+        text_runs = [""]
         number_tails = []
         for part in claim.get("parts", []):
             if "text" in part:
-                valid &= not bool(re.search(r"\d", part["text"]))
+                text_runs[-1] += part["text"]
                 if number_tails:
                     number_tails[-1] += part["text"]
                 rendered += part["text"]
@@ -49,6 +63,10 @@ def critique(claims, evidence):
                 valid &= part.get("suffix", "") in ("", "%", " percentage points")
                 rendered += str(part.get("value", "")) + str(part.get("suffix") or "")
                 number_tails.append("")
+                text_runs.append("")
+        # Check complete text runs so splitting a number word across parts cannot hide it.
+        valid &= not any(NUMBER_WORDS.search(run) or any(c.isnumeric() for c in run)
+                         for run in text_runs)
         # Join adjacent text parts so splitting a modifier cannot hide it.
         valid &= not any(re.match(
             r"\s*(?:%|(?:hundred|thousand|million|billion|trillion|percent|percentage|"
