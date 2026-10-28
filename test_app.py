@@ -94,6 +94,19 @@ def test_readme_documents_node_test_prerequisite():
     assert "Node.js installed and available as `node` on PATH" in " ".join(test_instructions.split())
 
 
+def test_readme_explains_independent_rounding():
+    readme = " ".join(Path(__file__).with_name("README.md").read_text(encoding="utf-8").split())
+    assert "Changes and margin direction use unrounded aggregates." in readme
+    assert "SQL rounds period metrics and changes independently to two decimal places" in readme
+    assert "subtracting displayed endpoints may give a different result" in readme
+def test_readme_documents_request_time_policy_writes():
+    readme = " ".join(Path(__file__).with_name("README.md").read_text(encoding="utf-8").split())
+    assert "Each `search_policies` call runs `ensure_policies`" in readme
+    assert "creates `policy_chunks` if absent" in readme
+    assert "policy documents or the embedding backend change" in readme
+    assert "`CREATE TABLE` and tablespace quota" in readme
+    assert "`SELECT`, `DELETE`, and `INSERT` access to `policy_chunks`" in readme
+    assert "Running `python policies.py` once does not make SELECT-only runtime permissions sufficient." in readme
 def test_readme_documents_required_oracle_configuration():
     root = Path(__file__).parent
     readme = (root / "README.md").read_text(encoding="utf-8")
@@ -1249,6 +1262,45 @@ def test_evidence_dialog_preserves_exact_integers(monkeypatch):
         ]);
     """], capture_output=True, text=True)
     assert check.returncode == 0, check.stderr
+
+
+def test_evidence_rows_region_is_keyboard_focusable_and_named(monkeypatch):
+    monkeypatch.setattr("app.answer_question", lambda _: {
+        "region": "West", "claims": [], "evidence": {},
+    })
+
+    class EvidenceParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.region = None
+            self.heading_id = None
+            self.rows_heading_id = None
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if attrs.get("id") == "evidence-rows":
+                self.region = (tag, attrs)
+            if tag == "h3":
+                self.heading_id = attrs.get("id")
+
+        def handle_data(self, data):
+            if data.strip() == "Returned rows":
+                self.rows_heading_id = self.heading_id
+
+        def handle_endtag(self, tag):
+            if tag == "h3":
+                self.heading_id = None
+
+    response = app.test_client().post("/", data={"question": "West"})
+    assert response.status_code == 200
+    parser = EvidenceParser()
+    parser.feed(response.get_data(as_text=True))
+    tag, attrs = parser.region
+    assert tag == "div"
+    assert "table-wrap" in attrs["class"].split()
+    assert attrs.get("tabindex") == "0"
+    assert attrs.get("role") == "region"
+    assert parser.rows_heading_id and attrs.get("aria-labelledby") == parser.rows_heading_id
 
 
 def test_evidence_dialog_identifies_cited_cell(monkeypatch):
