@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ask the Business</title>
+</head>
+<body>
+  <p id="status">Start the app with <code>python app.py</code> to open a secure browser session.</p>
+  <script>
+    const token = window.location.hash.slice(1);
+    if (token) {
+      history.replaceState(null, '', '/');
+      fetch('/session', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: new URLSearchParams({token}),
+      }).then(response => {
+        if (response.ok) window.location.replace('/');
+        else document.getElementById('status').textContent = 'Unable to start the session. Restart the app and try again.';
+      }).catch(() => {
+        document.getElementById('status').textContent = 'Unable to start the session. Restart the app and try again.';
+      });
+    }
+  </script>
+</body>
+</html>

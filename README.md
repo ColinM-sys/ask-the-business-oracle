@@ -24,7 +24,10 @@ python policies.py
 python app.py
 ```
 
-Open http://127.0.0.1:5055 and ask “Why did West margin fall since July 2025?”.
+`python app.py` opens a browser with a startup credential in the URL fragment;
+the app exchanges it for a session. Ask “Why did West margin fall since July
+2025?”. The bare URL alone cannot authenticate. Stop and rerun `python app.py`
+to start a fresh session.
 `.env` is read by `db.py`; do not commit credentials. `policies.py` creates only
 `policy_chunks`, probes registered Oracle embedding models, and otherwise uses
 deterministic normalized hashing vectors. Source changes trigger a transactional
@@ -51,8 +54,9 @@ were retrieved; West's explanation applies to the default change point.
 `run_sql` parses one SELECT, limits tables and functions to an allowlist, rejects
 writes/locks/sequences/procedural calls, and executes in a read-only transaction.
 It refuses evidence over the row limit instead of silently truncating it.
-Policy setup is the separate write path. The Flask server binds only to localhost
-and runs without debug mode; this demo has no production authentication layer.
+Policy setup is the separate write path. The Flask server binds only to localhost,
+checks loopback hosts and requires a session credential. It runs without debug
+mode; this demo has no production authentication layer.
 
 ```powershell
 python -m pytest -q test_app.py

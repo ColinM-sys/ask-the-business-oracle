@@ -25,6 +25,41 @@ from critic import critique, supported
 from policies import ensure_policies, hash_embedding
 
 
+class SessionTokenParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.token = None
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "input" and attrs.get("name") == "session_token":
+            self.token = attrs.get("value")
+
+
+def session_token(response):
+    parser = SessionTokenParser()
+    parser.feed(response.get_data(as_text=True))
+    assert parser.token
+    return parser.token
+
+
+def authenticated_client(server=app):
+    client = server.test_client()
+    response = client.post("/session", data={"token": server.config["BOOTSTRAP_TOKEN"]})
+    assert response.status_code in (200, 302, 303, 204)
+    token = session_token(client.get("/"))
+
+    class AuthenticatedClient:
+        def get(self, *args, **kwargs):
+            return client.get(*args, **kwargs)
+
+        def post(self, *args, **kwargs):
+            kwargs["data"] = {"session_token": token, **(kwargs.get("data") or {})}
+            return client.post(*args, **kwargs)
+
+    return AuthenticatedClient()
+
+
 @pytest.mark.parametrize("wallet", [None, "test-wallet"])
 def test_connect_reuses_pool_and_preserves_settings(monkeypatch, wallet):
     monkeypatch.setattr(db, "_pool", None, raising=False)
@@ -527,7 +562,7 @@ def test_missing_monthly_costs_reject_incomplete_analysis(region_id, month, prod
         with pytest.raises(ValueError, match="Missing monthly costs"):
             answer_question("West since July 2025")
         policies.assert_not_called()
-        response = app.test_client().post("/", data={"question": "West since July 2025"})
+        response = authenticated_client().post("/", data={"question": "West since July 2025"})
         assert response.status_code == 503
         assert b"Missing monthly costs" not in response.data
 
@@ -649,7 +684,7 @@ def test_missing_region_has_descriptive_validation_error(monkeypatch, rows):
         "sql": sql, "params": params or {}, "rows": rows})
     with pytest.raises(ValueError, match="No sales/cost data found for West"):
         answer_question("Why did West margin fall since July 2025?")
-    response = app.test_client().post("/", data={"question": "West"})
+    response = authenticated_client().post("/", data={"question": "West"})
     assert response.status_code == 400
     assert b"No sales/cost data found for West" in response.data
 @pytest.mark.parametrize("before,after,direction,below_precision", [
@@ -1031,7 +1066,7 @@ def test_select_preserves_semicolon_in_string():
 
 
 def test_flask_live_brief_and_evidence():
-    client = app.test_client()
+    client = authenticated_client()
     assert client.get("/").status_code == 200
     response = client.post("/", data={"question": "Why did West margin fall since July 2025?"})
     assert response.status_code == 200
@@ -1052,7 +1087,7 @@ def test_ui_discloses_dropped_claims_and_empty_brief(monkeypatch, has_claims, dr
     }
     monkeypatch.setattr("app.answer_question", lambda _: result)
 
-    response = app.test_client().post("/", data={"question": "West"})
+    response = authenticated_client().post("/", data={"question": "West"})
 
     assert response.status_code == 200
     assert (b"2 claims were omitted because they failed verification." in response.data) == bool(dropped_count)
@@ -1082,7 +1117,7 @@ def test_ui_reports_unavailable_policy_claims(
             if policy["doc"] in unavailable:
                 policy["chunk"] = "This policy has changed."
 
-    response = app.test_client().post("/", data={"question": question})
+    response = authenticated_client().post("/", data={"question": question})
 
     assert response.status_code == 200
     assert b'data-evidence="E2"' in response.data
@@ -1113,7 +1148,7 @@ def test_ui_discloses_missing_policy_backed_sections(
             if row["doc"] in missing_docs:
                 row["chunk"] = "Changed policy content."
 
-    response = app.test_client().post("/", data={"question": "West since July 2025"})
+    response = authenticated_client().post("/", data={"question": "West since July 2025"})
 
     assert response.status_code == 200
     assert (b"Explanation unavailable" in response.data) == (not reason_available)
@@ -1129,12 +1164,12 @@ def test_ui_missing_question_rejected_before_querying(monkeypatch, data):
         pytest.fail("Missing questions must be rejected before querying")
 
     monkeypatch.setattr("agent.run_sql", forbidden_query)
-    response = app.test_client().post("/", data=data)
+    response = authenticated_client().post("/", data=data)
     assert response.status_code == 400
 
 
 def test_focus_indicator_contrasts_with_page_and_cards():
-    html = app.test_client().get("/").get_data(as_text=True)
+    html = authenticated_client().get("/").get_data(as_text=True)
 
     def declaration(selector, name):
         rule = re.search(rf"{re.escape(selector)}\s*\{{([^}}]*)\}}", html)
@@ -1159,7 +1194,7 @@ def test_focus_indicator_contrasts_with_page_and_cards():
 
 
 def test_ui_restores_submit_button_on_pageshow():
-    html = app.test_client().get("/").get_data(as_text=True)
+    html = authenticated_client().get("/").get_data(as_text=True)
     script = html.rsplit("<script>", 1)[1].split("</script>", 1)[0]
     subprocess.run(["node", "-e", """
         const assert = require('node:assert/strict');
@@ -1191,7 +1226,7 @@ def test_evidence_dialog_preserves_exact_integers(monkeypatch):
     }
     original = copy.deepcopy(result)
     monkeypatch.setattr("app.answer_question", lambda _: result)
-    response = app.test_client().post("/", data={"question": "West"})
+    response = authenticated_client().post("/", data={"question": "West"})
     assert response.status_code == 200
     assert result == original  # Rendering must not change the critic's evidence.
     script = response.get_data(as_text=True).split("<script>", 1)[1].split("</script>", 1)[0]
@@ -1240,7 +1275,7 @@ def test_evidence_dialog_identifies_cited_cell(monkeypatch):
     monkeypatch.setattr("app.answer_question", lambda _: {
         "region": "West", "claims": [], "evidence": {},
     })
-    html = app.test_client().post("/", data={"question": "West"}).get_data(as_text=True)
+    html = authenticated_client().post("/", data={"question": "West"}).get_data(as_text=True)
 
     assert 'aria-describedby="evidence-description"' in html
     assert '<p id="evidence-description"></p>' in html
@@ -1270,7 +1305,7 @@ def test_policy_citations_have_descriptive_accessible_names(monkeypatch):
             if tag == "button" and attrs.get("class") == "citation":
                 self.buttons.append(attrs)
 
-    response = app.test_client().post("/", data={"question": "West"})
+    response = authenticated_client().post("/", data={"question": "West"})
     assert response.status_code == 200
     parser = CitationParser()
     parser.feed(response.get_data(as_text=True))
@@ -1312,7 +1347,7 @@ def test_question_validation_errors_are_associated_and_focused(monkeypatch):
         parser.feed(response.get_data(as_text=True))
         return parser
 
-    client = app.test_client()
+    client = authenticated_client()
     for data, status, message in [
         ({"question": ""}, 400, "Enter a business question"),
         ({"question": "North"}, 400, "Unsupported region"),
@@ -1339,7 +1374,7 @@ def test_question_validation_errors_are_associated_and_focused(monkeypatch):
 
 
 def test_ui_validation_and_safe_error(monkeypatch):
-    client = app.test_client()
+    client = authenticated_client()
     assert client.post("/", data={"question": ""}).status_code == 400
     assert client.post("/", data={"question": "West since July 2030"}).status_code == 400
     def failure(_):
@@ -1358,7 +1393,7 @@ def test_ui_sanitizes_invalid_policy_encoding(tmp_path, monkeypatch):
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
         "sql": sql, "params": params or {}, "rows": [row]})
 
-    response = app.test_client().post("/", data={"question": "West since July 2025"})
+    response = authenticated_client().post("/", data={"question": "West since July 2025"})
 
     assert response.status_code == 503
     assert b"Analysis unavailable. Check the local Oracle connection and policy setup, then retry." in response.data
@@ -1370,7 +1405,7 @@ def test_ui_sanitizes_downstream_value_error(monkeypatch):
         raise ValueError("private-internal-details")
 
     monkeypatch.setattr("agent.run_sql", failure)
-    response = app.test_client().post("/", data={"question": "West"})
+    response = authenticated_client().post("/", data={"question": "West"})
 
     assert response.status_code == 503
     assert b"Analysis unavailable. Check the local Oracle connection and policy setup, then retry." in response.data
@@ -1384,25 +1419,48 @@ def test_script_starts_and_shows_unavailable_when_setup_fails(monkeypatch):
     monkeypatch.setattr("policies.ensure_policies", failure)
     monkeypatch.setattr("tools.connect", failure)
     started = []
+    browser_opened = threading.Event()
+    browser_urls = []
 
-    def run(server, **kwargs):
-        started.append(server)
-        client = server.test_client()
-        assert client.get("/").status_code == 200
-        response = client.post("/", data={"question": "West"})
-        assert response.status_code == 503
-        assert b"Analysis unavailable. Check the local Oracle connection and policy setup, then retry." in response.data
-        assert b"secret-driver-settings" not in response.data
+    def make_server(host, port, server, **kwargs):
+        assert host == "127.0.0.1" and port == 5055
 
-    monkeypatch.setattr("flask.Flask.run", run)
+        class FakeServer:
+            def serve_forever(self):
+                started.append(server)
+                client = authenticated_client(server)
+                assert client.get("/").status_code == 200
+                response = client.post("/", data={"question": "West"})
+                assert response.status_code == 503
+                assert b"Analysis unavailable. Check the local Oracle connection and policy setup, then retry." in response.data
+                assert b"secret-driver-settings" not in response.data
+
+            def server_close(self):
+                pass
+
+        return FakeServer()
+
+    def open_browser(url):
+        browser_urls.append(url)
+        browser_opened.set()
+        return True
+
+    monkeypatch.setattr("werkzeug.serving.make_server", make_server)
+    monkeypatch.setattr("webbrowser.open", open_browser)
     runpy.run_path(str(Path(__file__).with_name("app.py")), run_name="__main__")
     assert len(started) == 1
+    assert browser_opened.wait(5)
+    expected_url = "http://127.0.0.1:5055/#" + started[0].config["BOOTSTRAP_TOKEN"]
+    browser_url_is_valid = browser_urls[0] == expected_url
+    assert browser_url_is_valid
+
+
 def test_ui_oversized_submission(monkeypatch):
     def unexpected_analysis(_):
         pytest.fail("Oversized submissions must not run analysis")
 
     monkeypatch.setattr("app.answer_question", unexpected_analysis)
-    response = app.test_client().post(
+    response = authenticated_client().post(
         "/", data={"question": "x" * (app.config["MAX_CONTENT_LENGTH"] + 1)}
     )
     assert response.status_code == 413
@@ -1412,6 +1470,123 @@ def test_ui_oversized_submission(monkeypatch):
 
 
 def test_ui_escapes_question():
-    response = app.test_client().post("/", data={"question": '<script>alert("x")</script> West'})
+    response = authenticated_client().post("/", data={"question": '<script>alert("x")</script> West'})
     assert response.status_code == 200
     assert b'<script>alert("x")</script>' not in response.data
+
+
+def test_browser_bootstraps_the_session_without_leaving_the_fragment():
+    html = app.test_client().get("/").get_data(as_text=True)
+    script = html.split("<script>", 1)[1].split("</script>", 1)[0]
+    subprocess.run(["node", "-e", """
+        const assert = require('node:assert/strict');
+        const actions = [];
+        global.window = {location: {
+            hash: '#test-capability',
+            replace: path => actions.push(['redirect', path]),
+        }};
+        global.history = {replaceState: (_, __, path) => actions.push(['clear', path])};
+        global.fetch = (path, options) => {
+            actions.push(['exchange', path]);
+            assert.equal(options.method, 'POST');
+            assert.equal(options.body.get('token'), 'test-capability');
+            return Promise.resolve({ok: true});
+        };
+    """ + script + """
+        setImmediate(() => assert.deepEqual(actions, [
+            ['clear', '/'], ['exchange', '/session'], ['redirect', '/'],
+        ]));
+    """], check=True, capture_output=True, text=True)
+
+
+def test_missing_host_is_rejected():
+    response = app.test_client().get("/", environ_overrides={"HTTP_HOST": None})
+    assert 400 <= response.status_code < 500
+
+
+@pytest.mark.parametrize("host", [
+    "evil.example", "localhost.evil.example", "127.0.0.1.evil.example",
+    "localhost@evil.example", "localhost:invalid", "localhost:0", "localhost:65536",
+    "127.1", "0.0.0.0", "[::2]",
+])
+def test_rejects_untrusted_hosts_even_with_a_valid_session(host, monkeypatch):
+    def forbidden_analysis(_):
+        pytest.fail("Untrusted hosts must not run analysis")
+
+    monkeypatch.setattr("app.answer_question", forbidden_analysis)
+    response = app.test_client().get("/", headers={"Host": host})
+    assert 400 <= response.status_code < 500
+    client = app.test_client()
+    client.post("/session", data={"token": app.config["BOOTSTRAP_TOKEN"]})
+    token = session_token(client.get("/"))
+    cookie = client.get_cookie(app.config["SESSION_COOKIE_NAME"])
+    assert cookie is not None
+
+    attacker = app.test_client(use_cookies=False)
+    headers = {"Host": host, "Cookie": f'{app.config["SESSION_COOKIE_NAME"]}={cookie.value}'}
+    responses = [
+        attacker.get("/", headers=headers),
+        attacker.post("/", headers=headers, data={"question": "West", "session_token": token}),
+        attacker.post("/session", headers=headers, data={"token": app.config["BOOTSTRAP_TOKEN"]}),
+    ]
+    assert all(400 <= response.status_code < 500 for response in responses)
+    assert all(b"VECTOR_DISTANCE" not in response.data for response in responses)
+
+
+@pytest.mark.parametrize("host", ["localhost", "LOCALHOST:5055", "127.0.0.1:5055", "[::1]:5055"])
+def test_loopback_hosts_accept_authenticated_questions(host, monkeypatch):
+    monkeypatch.setattr("app.answer_question", lambda _: {
+        "region": "West", "claims": [], "evidence": {},
+    })
+    client = app.test_client()
+    headers = {"Host": host}
+    response = client.post("/session", headers=headers, data={"token": app.config["BOOTSTRAP_TOKEN"]})
+    assert response.status_code < 400
+    token = session_token(client.get("/", headers=headers))
+    response = client.post("/", headers=headers, data={"question": "West", "session_token": token})
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize("supplied", [None, "", "wrong", "\u2603"])
+def test_anonymous_visitors_cannot_obtain_a_session(supplied, monkeypatch):
+    def forbidden_analysis(_):
+        pytest.fail("Anonymous visitors must not run analysis")
+
+    monkeypatch.setattr("app.answer_question", forbidden_analysis)
+    client = app.test_client()
+    response = client.get("/")
+    parser = SessionTokenParser()
+    parser.feed(response.get_data(as_text=True))
+    assert parser.token is None
+    assert client.get_cookie(app.config["SESSION_COOKIE_NAME"]) is None
+
+    data = {} if supplied is None else {"token": supplied}
+    response = client.post("/session", data=data)
+    assert 400 <= response.status_code < 500
+    assert client.get_cookie(app.config["SESSION_COOKIE_NAME"]) is None
+    response = client.post("/", data={"question": "West", "session_token": "wrong"})
+    assert 400 <= response.status_code < 500
+
+
+def test_session_cookie_and_question_token_protect_analysis(monkeypatch):
+    def forbidden_analysis(_):
+        pytest.fail("Requests without the session's token must not run analysis")
+
+    monkeypatch.setattr("app.answer_question", forbidden_analysis)
+    clients = [app.test_client(), app.test_client()]
+    tokens = []
+    for client in clients:
+        response = client.post("/session", data={"token": app.config["BOOTSTRAP_TOKEN"]})
+        assert response.status_code < 400
+        cookie = client.get_cookie(app.config["SESSION_COOKIE_NAME"])
+        assert cookie is not None
+        assert cookie.http_only and cookie.same_site == "Strict"
+        tokens.append(session_token(client.get("/")))
+
+    client = clients[0]
+    for supplied in (None, "", "wrong", "\u2603", tokens[1]):
+        data = {"question": "West"}
+        if supplied is not None:
+            data["session_token"] = supplied
+        response = client.post("/", data=data)
+        assert 400 <= response.status_code < 500

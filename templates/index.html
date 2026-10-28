@@ -49,6 +49,7 @@
   <h1>Ask the Business</h1>
   <p class="intro">Understand what changed, explore the evidence, and decide what to do next. Every number opens the SQL and rows behind it.</p>
   <form method="post" id="question-form">
+    <input type="hidden" name="session_token" value="{{ session['token'] }}">
     <label for="question">Your business question</label>
     <input id="question" name="question" maxlength="1000" value="{{ question }}" required{% if question_error %} aria-invalid="true" aria-describedby="question-error" autofocus{% endif %}>
     <button class="submit" type="submit">Analyze question</button>
