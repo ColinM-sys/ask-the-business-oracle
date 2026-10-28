@@ -52,13 +52,20 @@ def ensure_policies():
                     embedding VECTOR(*, FLOAT32), backend VARCHAR2(128), source_hash VARCHAR2(64))""")
             backend = "hash-v1-512"
             for (model,) in cur.execute(
-                "SELECT model_name FROM user_mining_models WHERE mining_function='EMBEDDING' ORDER BY model_name"
+                """SELECT model_name FROM user_mining_models m
+                WHERE mining_function='EMBEDDING' AND EXISTS (
+                    SELECT 1 FROM user_mining_model_attributes a
+                    WHERE a.model_name=m.model_name AND a.attribute_type='TEXT'
+                    AND a.data_type IN ('VARCHAR2', 'CLOB', 'NVARCHAR2', 'NCLOB')
+                ) ORDER BY model_name"""
             ).fetchall():
                 if not _model_identifier.fullmatch(model):
                     _logger.warning("Skipping unsupported embedding model %r", model)
                     continue
                 try:
-                    embed(cur, "Business policy", model)
+                    if embed(cur, "Business policy", model) is None:
+                        _logger.warning("Embedding model %r returned no vector", model)
+                        continue
                     backend = model
                     break
                 except oracledb.DatabaseError as exc:
