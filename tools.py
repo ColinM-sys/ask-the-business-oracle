@@ -1,5 +1,7 @@
 """Constrained, read-only business SQL and Oracle vector policy retrieval."""
 import json
+from contextlib import contextmanager
+from functools import partial
 
 import sqlglot
 from sqlglot import exp
@@ -41,18 +43,28 @@ def validate_select(sql):
     return tree.sql(dialect="oracle", comments=False)
 
 
-def run_sql(select, params=None):
+def _run_sql(cur, select, params=None):
     executable = validate_select(select)
-    with connect() as con:
-        with con.cursor() as cur:
-            cur.execute("SET TRANSACTION READ ONLY")
-            cur.execute(executable, params or {})
-            columns = [d[0].lower() for d in cur.description]
-            rows = cur.fetchmany(1001)
-            if len(rows) > 1000:
-                raise ValueError("Evidence exceeds the row limit; aggregate the query")
-            return {"sql": select, "params": params or {},
-                    "rows": [dict(zip(columns, row)) for row in rows]}
+    cur.execute(executable, params or {})
+    columns = [d[0].lower() for d in cur.description]
+    rows = cur.fetchmany(1001)
+    if len(rows) > 1000:
+        raise ValueError("Evidence exceeds the row limit; aggregate the query")
+    return {"sql": select, "params": params or {},
+            "rows": [dict(zip(columns, row)) for row in rows]}
+
+
+@contextmanager
+def sql_snapshot():
+    with connect() as con, con.cursor() as cur:
+        cur.execute("SET TRANSACTION READ ONLY")
+        yield partial(_run_sql, cur)
+
+
+def run_sql(select, params=None):
+    validate_select(select)  # Refuse invalid SQL before acquiring a connection.
+    with sql_snapshot() as query:
+        return query(select, params)
 
 
 def search_policies(text, k=5):
