@@ -83,17 +83,27 @@ def component(prompt, cwd):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--date", default="2026/10/28")
+    ap.add_argument("--cwd-contains", default="", help="only runs whose working folder contains this text")
+    ap.add_argument("--since", default="", help="only runs started at/after this stamp, e.g. 2026-10-28T14-45")
+    ap.add_argument("--out", default="usage_report.json")
     a = ap.parse_args()
     files = sorted(glob.glob(os.path.join(os.path.expanduser("~"), ".codex", "sessions", *a.date.split("/"),
                                           "rollout-*.jsonl")))
+    files = [p for p in files if os.path.basename(p)[8:27] >= a.since]
     by = defaultdict(lambda: defaultdict(int))
     models = defaultdict(lambda: defaultdict(int))
     first = last = None
+    kept = []
     for path in files:
         stamp = os.path.basename(path)[8:27]
-        first, last = first or stamp, stamp
         model, u, done, cwd = scan(path)
+        if a.cwd_contains.lower() not in cwd.lower():
+            continue
+        kept.append(path)
+        first, last = first or stamp, stamp
         comp = component(first_prompt(path), cwd)
+        if comp == "Other" and a.cwd_contains:  # another project's runs: group by their working folder
+            comp = os.path.basename(cwd.rstrip("\\/")) or "Other"
         for d in (by[comp], by["TOTAL"], models[model]):
             d["calls"] += 1
             d["completed"] += done
@@ -102,9 +112,10 @@ if __name__ == "__main__":
             d["output"] += u.get("output_tokens", 0)
             d["reasoning"] += u.get("reasoning_output_tokens", 0)
             d["total"] += u.get("total_tokens", 0)
+    files = kept
     out = {"files": len(files), "first": first, "last": last,
            "by_component": {k: dict(v) for k, v in by.items()}, "by_model": {k: dict(v) for k, v in models.items()}}
-    json.dump(out, open("usage_report.json", "w"), indent=1)
+    json.dump(out, open(a.out, "w"), indent=1)
 
     def table(rows, label):
         print(f"| {label} | Codex calls | completed | input tokens | (cached) | output tokens | (reasoning) | total |")
