@@ -1076,7 +1076,31 @@ def test_updated_policy_source_invalidates_unchanged_retrieved_chunk(policy_rows
     result = answer_question("West since July 2025")
 
     assert not any(claim["kind"] == "reason" for claim in result["claims"])
-    assert len([claim for claim in result["claims"] if claim["kind"] == "action"]) == 3
+    assert not any(claim["kind"] == "action" for claim in result["claims"])
+    assert result["dropped_count"] == 0
+
+
+@pytest.mark.parametrize("revision", ["unchanged", "superseding", "missing"])
+def test_fixed_policy_claims_require_reviewed_complete_corpus(policy_rows, tmp_path, monkeypatch, revision):
+    for policy in policy_rows:
+        (tmp_path / policy["doc"]).write_text(policy["chunk"], encoding="utf-8")
+    if revision == "superseding":
+        (tmp_path / "superseding.md").write_text(
+            "The West discount push is revoked; do not follow the earlier freight recommendations.",
+            encoding="utf-8")
+    elif revision == "missing":
+        (tmp_path / "regional_playbook.md").unlink()
+    monkeypatch.setattr("agent.DOCS", tmp_path)
+
+    # The search results still contain only the original, unchanged chunks.
+    result = answer_question("West since July 2025")
+
+    policy_claims = [claim for claim in result["claims"] if claim["kind"] in {"reason", "action"}]
+    if revision == "unchanged":
+        assert [claim["kind"] for claim in policy_claims] == ["reason", "action", "action", "action"]
+    else:
+        assert policy_claims == []
+    assert len([claim for claim in result["claims"] if claim["kind"] == "finding"]) == 3
     assert result["dropped_count"] == 0
 
 
