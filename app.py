@@ -1,10 +1,28 @@
 """Local Flask UI: python app.py, then http://127.0.0.1:5055."""
+import os
+from hmac import compare_digest
+
 from flask import Flask, render_template, request
 
 from agent import answer_question
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024
+app.config["TRUSTED_HOSTS"] = ["127.0.0.1", "localhost"]
+
+
+@app.before_request
+def require_authentication():
+    secret = os.environ.get("APP_AUTH_SECRET")
+    if not secret:
+        return "Set APP_AUTH_SECRET before starting the server.", 503
+    auth = request.authorization
+    if (auth is None or auth.type != "basic" or auth.username != "atb"
+            or auth.password is None
+            or not compare_digest(auth.password.encode("utf-8"), secret.encode("utf-8"))):
+        return "Authentication required.", 401, {
+            "WWW-Authenticate": 'Basic realm="Ask the Business", charset="UTF-8"',
+        }
 
 
 @app.errorhandler(413)

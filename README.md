@@ -7,10 +7,13 @@ and policy retrieval. No API key or language model is required.
 python -m pip install -r requirements.txt
 docker start oracle-free
 python policies.py
+$env:APP_AUTH_SECRET = [System.Net.NetworkCredential]::new('', (Read-Host 'App authentication secret' -AsSecureString)).Password
 python app.py
 ```
 
-Open http://127.0.0.1:5055 and ask “Why did West margin fall since July 2025?”.
+Enter a long, unique secret at the prompt. Open http://127.0.0.1:5055 and sign in
+with username `atb` and that secret, then ask “Why did West margin fall since July 2025?”.
+The app refuses access if `APP_AUTH_SECRET` is unset or empty.
 The existing `.env` is read by `db.py`; business tables must already be loaded.
 Do not commit credentials. `policies.py` creates only `policy_chunks`, probes
 registered Oracle embedding models, and otherwise uses deterministic normalized
@@ -39,7 +42,8 @@ were retrieved; West's explanation applies to the default change point.
 writes/locks/sequences/procedural calls, and executes in a read-only transaction.
 It refuses evidence over the row limit instead of silently truncating it.
 Policy setup is the separate write path. The Flask server binds only to localhost
-and runs without debug mode; this demo has no production authentication layer.
+and runs without debug mode. It accepts only `127.0.0.1` and `localhost` Host
+headers and requires HTTP Basic authentication using `APP_AUTH_SECRET`.
 
 ```powershell
 python -m pytest -q test_app.py
