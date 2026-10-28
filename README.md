@@ -14,9 +14,8 @@ Open http://127.0.0.1:5055 and ask â€œWhy did West margin fall since July 2025?â
 The existing `.env` is read by `db.py`; business tables must already be loaded.
 Do not commit credentials. `policies.py` creates only `policy_chunks`, probes
 registered Oracle embedding models, and otherwise uses deterministic normalized
-hashing vectors. Source changes trigger a transactional policy refresh. Queries
-use Oracle `VECTOR_DISTANCE` with cosine distance; the local hashing fallback is
-lexical retrieval rather than a semantic language model.
+hashing vectors. Queries use Oracle `VECTOR_DISTANCE` with cosine distance; the
+local hashing fallback is lexical retrieval rather than a semantic language model.
 
 The app runs fixed analysis for margin, discount and freight, regardless of
 question wording. It recognizes West, Central, East or South and a full month
@@ -38,8 +37,17 @@ were retrieved; West's explanation applies to the default change point.
 `run_sql` parses one SELECT, limits tables and functions to an allowlist, rejects
 writes/locks/sequences/procedural calls, and executes in a read-only transaction.
 It refuses evidence over the row limit instead of silently truncating it.
-Policy setup is the separate write path. The Flask server binds only to localhost
-and runs without debug mode; this demo has no production authentication layer.
+`search_policies()` calls `ensure_policies()` on every policy search, including
+normal POST requests. The runtime database user needs `CREATE TABLE` when
+`policy_chunks` is missing, tablespace quota (or `UNLIMITED TABLESPACE`) for
+storage, and `SELECT`, `DELETE` and `INSERT` access to `policy_chunks`. If the
+table is empty or the source documents or selected embedding backend change,
+refresh deletes and replaces all rows and commits. The table is shared by
+requests and other app instances using the same schema, so refreshes change their
+policy state too. Instances with different documents or embedding backends can
+overwrite each other's policy state.
+The Flask server binds only to localhost and runs without debug mode; this demo
+has no production authentication layer.
 
 ```powershell
 python -m pytest -q test_app.py

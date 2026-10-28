@@ -78,6 +78,18 @@ def test_readme_documents_node_test_prerequisite():
     assert "Node.js installed and available as `node` on PATH" in " ".join(test_instructions.split())
 
 
+def test_readme_documents_runtime_policy_refresh():
+    readme = " ".join(Path(__file__).with_name("README.md").read_text(encoding="utf-8").split())
+    assert "`search_policies()` calls `ensure_policies()` on every policy search" in readme
+    assert "including normal POST requests" in readme
+    assert "`CREATE TABLE`" in readme and "tablespace quota" in readme
+    assert "`SELECT`, `DELETE` and `INSERT` access to `policy_chunks`" in readme
+    assert "source documents or selected embedding backend change" in readme
+    assert "deletes and replaces all rows and commits" in readme
+    assert "shared by requests and other app instances using the same schema" in readme
+    assert "Policy setup is the separate write path" not in readme
+
+
 @pytest.mark.parametrize("sql", [
     "DELETE FROM sales", "DROP TABLE sales", "UPDATE sales SET quantity=0",
     "INSERT INTO sales (sale_id) VALUES (0)", "ALTER TABLE sales ADD x NUMBER",
