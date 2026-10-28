@@ -184,6 +184,7 @@ def test_hashing_is_stable_and_normalized():
 
 @pytest.mark.parametrize("failure", [
     RuntimeError("private-driver-details"),
+    ValueError("private-driver-details"),
     oracledb.DatabaseError(SimpleNamespace(code=3113, message="private-driver-details")),
     oracledb.DatabaseError(SimpleNamespace(code=40284, message="private-driver-details")),
 ])
@@ -243,6 +244,36 @@ def test_policy_probe_fallback_is_explicit_and_sanitized(
     assert ("Using hash-v1-512 fallback" in caplog.text) == (expected == "hash-v1-512")
     assert "private-driver-details" not in caplog.text
     assert "forged log entry" not in caplog.text
+
+
+@pytest.mark.parametrize("models, expected", [
+    ([("my_model",)], "hash-v1-512"),
+    ([("my_model",), ("GOOD_MODEL",)], "GOOD_MODEL"),
+    ([("MODEL\" USING :text AS DATA) FROM dual --",)], "hash-v1-512"),
+])
+def test_policy_probe_skips_unusable_model_names(models, expected, tmp_path, monkeypatch):
+    (tmp_path / "policy.md").write_text("Business policy", encoding="utf-8")
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
+    cursor.execute.return_value.fetchall.side_effect = [models, []]
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+
+    assert ensure_policies() == expected
+
+    embedding_queries = [call.args[0] for call in cursor.execute.call_args_list
+                         if call.args[0].startswith("SELECT VECTOR_EMBEDDING")]
+    if expected == "GOOD_MODEL":
+        assert len(embedding_queries) == 2
+        assert all("VECTOR_EMBEDDING(GOOD_MODEL USING" in sql for sql in embedding_queries)
+    else:
+        assert not embedding_queries
+    inserts = [call for call in cursor.execute.call_args_list
+               if call.args[0].lstrip().startswith("INSERT INTO policy_chunks")]
+    assert len(inserts) == 1 and inserts[0].kwargs["backend"] == expected
+    connection.commit.assert_called_once()
 
 
 @pytest.mark.parametrize("character", ["界", "😀"])
