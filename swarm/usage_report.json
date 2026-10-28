@@ -1,25 +1,25 @@
 {
- "files": 8809,
+ "files": 11739,
  "first": "2026-10-28T12-36-00",
- "last": "2026-10-28T14-39-42",
+ "last": "2026-10-28T17-03-05",
  "by_component": {
   "Setup tests": {
-   "calls": 19,
-   "completed": 19,
-   "input": 502779,
+   "calls": 21,
+   "completed": 21,
+   "input": 516098,
    "cached": 234119,
-   "output": 2323,
+   "output": 2328,
    "reasoning": 33,
-   "total": 505102
+   "total": 518426
   },
   "TOTAL": {
-   "calls": 8809,
-   "completed": 5395,
-   "input": 1175266690,
-   "cached": 992971418,
-   "output": 13838007,
-   "reasoning": 9644194,
-   "total": 1189104697
+   "calls": 11739,
+   "completed": 8115,
+   "input": 2096040613,
+   "cached": 1834697066,
+   "output": 22666925,
+   "reasoning": 15575098,
+   "total": 2118707538
   },
   "Swarm scaling test": {
    "calls": 442,
@@ -40,31 +40,31 @@
    "total": 538676
   },
   "AgentSocial": {
-   "calls": 2177,
-   "completed": 1988,
-   "input": 418565313,
-   "cached": 345936802,
-   "output": 2023281,
-   "reasoning": 573117,
-   "total": 420588594
+   "calls": 2809,
+   "completed": 2481,
+   "input": 648851704,
+   "cached": 549517575,
+   "output": 3019973,
+   "reasoning": 894280,
+   "total": 651871677
   },
   "Repo loop: reviewers": {
-   "calls": 5007,
-   "completed": 1985,
-   "input": 401103698,
-   "cached": 333652318,
-   "output": 8797542,
-   "reasoning": 7701066,
-   "total": 409901240
+   "calls": 5905,
+   "completed": 2864,
+   "input": 590160152,
+   "cached": 498203815,
+   "output": 12896941,
+   "reasoning": 11455949,
+   "total": 603057093
   },
   "Repo loop: fixers": {
-   "calls": 439,
-   "completed": 417,
-   "input": 175835188,
-   "cached": 163690001,
-   "output": 1503791,
-   "reasoning": 713935,
-   "total": 177338979
+   "calls": 1049,
+   "completed": 1020,
+   "input": 502126275,
+   "cached": 474909584,
+   "output": 3871781,
+   "reasoning": 1902483,
+   "total": 505998056
   },
   "project": {
    "calls": 90,
@@ -85,13 +85,301 @@
    "total": 0
   },
   "Merge bots": {
-   "calls": 549,
-   "completed": 504,
-   "input": 103890054,
-   "cached": 94934773,
-   "output": 992523,
-   "reasoning": 573971,
-   "total": 104882577
+   "calls": 1103,
+   "completed": 1030,
+   "input": 223742840,
+   "cached": 206693479,
+   "output": 2006054,
+   "reasoning": 1150625,
+   "total": 225748894
+  },
+  "tmpveknq_df": {
+   "calls": 1,
+   "completed": 1,
+   "input": 13384,
+   "cached": 0,
+   "output": 22,
+   "reasoning": 14,
+   "total": 13406
+  },
+  "tmpii87ealv": {
+   "calls": 1,
+   "completed": 1,
+   "input": 13386,
+   "cached": 0,
+   "output": 21,
+   "reasoning": 13,
+   "total": 13407
+  },
+  "tmplrj2e9sl": {
+   "calls": 1,
+   "completed": 1,
+   "input": 13388,
+   "cached": 0,
+   "output": 21,
+   "reasoning": 13,
+   "total": 13409
+  },
+  "tmpbe78rw_k": {
+   "calls": 1,
+   "completed": 1,
+   "input": 13384,
+   "cached": 0,
+   "output": 21,
+   "reasoning": 13,
+   "total": 13405
+  },
+  "tmpk42m1tjg": {
+   "calls": 1,
+   "completed": 1,
+   "input": 13388,
+   "cached": 0,
+   "output": 26,
+   "reasoning": 18,
+   "total": 13414
+  },
+  "review_8": {
+   "calls": 8,
+   "completed": 8,
+   "input": 1252318,
+   "cached": 1138256,
+   "output": 9557,
+   "reasoning": 2121,
+   "total": 1261875
+  },
+  "review_3": {
+   "calls": 4,
+   "completed": 4,
+   "input": 482587,
+   "cached": 440587,
+   "output": 4130,
+   "reasoning": 795,
+   "total": 486717
+  },
+  "review_7": {
+   "calls": 18,
+   "completed": 16,
+   "input": 3468146,
+   "cached": 3122420,
+   "output": 24535,
+   "reasoning": 6699,
+   "total": 3492681
+  },
+  "review_4": {
+   "calls": 7,
+   "completed": 7,
+   "input": 1254634,
+   "cached": 1149547,
+   "output": 8903,
+   "reasoning": 2013,
+   "total": 1263537
+  },
+  "review_5": {
+   "calls": 20,
+   "completed": 18,
+   "input": 3434919,
+   "cached": 3081416,
+   "output": 23172,
+   "reasoning": 5353,
+   "total": 3458091
+  },
+  "review_9": {
+   "calls": 4,
+   "completed": 4,
+   "input": 639899,
+   "cached": 584282,
+   "output": 4923,
+   "reasoning": 1291,
+   "total": 644822
+  },
+  "review_10": {
+   "calls": 12,
+   "completed": 12,
+   "input": 2284149,
+   "cached": 2059567,
+   "output": 15411,
+   "reasoning": 3878,
+   "total": 2299560
+  },
+  "review_11": {
+   "calls": 8,
+   "completed": 8,
+   "input": 2975735,
+   "cached": 2814371,
+   "output": 16053,
+   "reasoning": 4356,
+   "total": 2991788
+  },
+  "review_12": {
+   "calls": 8,
+   "completed": 8,
+   "input": 1179521,
+   "cached": 1067259,
+   "output": 8304,
+   "reasoning": 1502,
+   "total": 1187825
+  },
+  "review_13": {
+   "calls": 4,
+   "completed": 4,
+   "input": 517790,
+   "cached": 464007,
+   "output": 3636,
+   "reasoning": 731,
+   "total": 521426
+  },
+  "review_14": {
+   "calls": 8,
+   "completed": 8,
+   "input": 1607895,
+   "cached": 1460645,
+   "output": 10315,
+   "reasoning": 2314,
+   "total": 1618210
+  },
+  "review_15": {
+   "calls": 4,
+   "completed": 4,
+   "input": 660534,
+   "cached": 587658,
+   "output": 4399,
+   "reasoning": 1049,
+   "total": 664933
+  },
+  "review_16": {
+   "calls": 15,
+   "completed": 15,
+   "input": 2792978,
+   "cached": 2513918,
+   "output": 18572,
+   "reasoning": 3687,
+   "total": 2811550
+  },
+  "review_6": {
+   "calls": 7,
+   "completed": 7,
+   "input": 1451545,
+   "cached": 1309944,
+   "output": 10506,
+   "reasoning": 2310,
+   "total": 1462051
+  },
+  "review_17": {
+   "calls": 3,
+   "completed": 3,
+   "input": 812538,
+   "cached": 743896,
+   "output": 5768,
+   "reasoning": 1567,
+   "total": 818306
+  },
+  "review_18": {
+   "calls": 4,
+   "completed": 4,
+   "input": 596836,
+   "cached": 528717,
+   "output": 3848,
+   "reasoning": 679,
+   "total": 600684
+  },
+  "review_20": {
+   "calls": 4,
+   "completed": 4,
+   "input": 763374,
+   "cached": 692436,
+   "output": 5290,
+   "reasoning": 1309,
+   "total": 768664
+  },
+  "review_19": {
+   "calls": 16,
+   "completed": 12,
+   "input": 2965585,
+   "cached": 2638110,
+   "output": 20073,
+   "reasoning": 4400,
+   "total": 2985658
+  },
+  "review_22": {
+   "calls": 4,
+   "completed": 4,
+   "input": 741825,
+   "cached": 681245,
+   "output": 5391,
+   "reasoning": 1332,
+   "total": 747216
+  },
+  "review_21": {
+   "calls": 4,
+   "completed": 4,
+   "input": 861802,
+   "cached": 783184,
+   "output": 5083,
+   "reasoning": 1358,
+   "total": 866885
+  },
+  "review_23": {
+   "calls": 12,
+   "completed": 12,
+   "input": 2867223,
+   "cached": 2602145,
+   "output": 18980,
+   "reasoning": 4315,
+   "total": 2886203
+  },
+  "review_25": {
+   "calls": 12,
+   "completed": 12,
+   "input": 6473141,
+   "cached": 6084271,
+   "output": 38344,
+   "reasoning": 14629,
+   "total": 6511485
+  },
+  "review_24": {
+   "calls": 4,
+   "completed": 4,
+   "input": 737709,
+   "cached": 659138,
+   "output": 5601,
+   "reasoning": 1180,
+   "total": 743310
+  },
+  "review_26": {
+   "calls": 4,
+   "completed": 4,
+   "input": 1287053,
+   "cached": 1190992,
+   "output": 9606,
+   "reasoning": 2240,
+   "total": 1296659
+  },
+  "review_27": {
+   "calls": 16,
+   "completed": 12,
+   "input": 3058155,
+   "cached": 2758034,
+   "output": 20861,
+   "reasoning": 4514,
+   "total": 3079016
+  },
+  "review_28": {
+   "calls": 11,
+   "completed": 7,
+   "input": 2298175,
+   "cached": 2062189,
+   "output": 14943,
+   "reasoning": 3417,
+   "total": 2313118
+  },
+  "review_29": {
+   "calls": 8,
+   "completed": 7,
+   "input": 7740890,
+   "cached": 7396855,
+   "output": 34986,
+   "reasoning": 10546,
+   "total": 7775876
   }
  },
  "by_model": {
@@ -114,22 +402,22 @@
    "total": 0
   },
   "gpt-6-astra": {
-   "calls": 1868,
-   "completed": 678,
-   "input": 149262871,
-   "cached": 121152397,
-   "output": 2111349,
-   "reasoning": 1576364,
-   "total": 151374220
+   "calls": 2092,
+   "completed": 898,
+   "input": 157864445,
+   "cached": 121273610,
+   "output": 3281230,
+   "reasoning": 2704102,
+   "total": 161145675
   },
   "gpt-6.1-terra": {
-   "calls": 4392,
-   "completed": 2706,
-   "input": 854036581,
-   "cached": 763502723,
-   "output": 10537387,
-   "reasoning": 7844424,
-   "total": 864573968
+   "calls": 7098,
+   "completed": 5206,
+   "input": 1766208930,
+   "cached": 1605107158,
+   "output": 18196424,
+   "reasoning": 12647590,
+   "total": 1784405354
   }
  }
 }

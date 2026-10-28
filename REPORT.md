@@ -8,8 +8,8 @@ Codex + Oracle AI Database Hackathon, Oracle AI World, Las Vegas, October 28, 20
 
 ## Abstract
 
-We report on one hackathon day in which a single desktop ran **8,809 OpenAI Codex agent runs** and used
-**1.19 billion tokens** to build and continuously improve *Ask the Business*. Ask the Business is an
+We report on one hackathon day in which a single desktop ran **12,565 OpenAI Codex agent runs** and used
+**2.20 billion tokens** to build and continuously improve *Ask the Business*. Ask the Business is an
 Oracle AI Database 26ai application in which every number in a generated business brief is tied to the SQL
 result cell it came from.
 
@@ -22,8 +22,9 @@ An orchestration layer drove four kinds of agent:
 **Results:**
 - **Scaling:** throughput rose from 181 to about 1,630 output tokens/s as parallel agents grew from 6 to 200,
   with **zero rate-limit errors**. The binding limit was the host, not the API.
-- **Repository:** the swarm opened **138 pull requests**, merged 66 and closed 68 with a written reason. The
-  test suite grew from **42 to 345**, and `master` reached **227 commits**.
+- **Repository:** the swarm opened **238 pull requests**, merged 99 and closed 139 with a written reason. The
+  test suite grew from **42 to 449**, and `master` reached **362 commits**. A second swarm took the AgentSocial
+  repo from 0 to 38 tests in 12 merged PRs.
 - **AgentSocial:** a prompt change turned a rubber-stamping checker (46 confirmed, 0 challenged) into a
   discriminating one (9 confirmed, 43 challenged).
 
@@ -144,7 +145,8 @@ our own counters.
 - **Host:** one Windows 11 desktop (RTX 4090, 31.7 GB RAM). The GPU is not used by Codex; inference is in
   OpenAI's cloud.
 - **Key:** one OpenAI service-account key on the event's shared project, used only through Codex's saved login.
-- **Window:** 12:36 to 14:40 ET. The swarm was then paused so the machine could be used by another project.
+- **Window:** 12:36 to 17:00 ET. OpenAI switched the event key off at about 16:59 ET (`401 token_invalidated`);
+  runs already in flight were allowed to finish.
 - **Agents per stage:**
 
 | Stage | Agents |
@@ -183,35 +185,38 @@ our own counters.
 
 ### 4.2 Calls and tokens
 
-**Table 2.** Usage by component. These are this project's runs only, as of 14:47 ET.
+**Table 2.** Usage by component. Final figures: this project's runs on the desktop, plus the reviewers on the
+Spark and the 3080. The remote figures come from those machines' own session logs, which report totals only,
+and under 1M of them belonged to another project.
 
 | Component | Codex calls | completed | input tokens | (cached) | output tokens | (reasoning) | total |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| AgentSocial | 2,177 | 1,988 | 418,565,313 | 345,936,802 | 2,023,281 | 573,117 | 420,588,594 |
-| Repo loop: reviewers | 5,007 | 1,985 | 401,103,698 | 333,652,318 | 8,797,542 | 7,701,066 | 409,901,240 |
-| Repo loop: fixers | 439 | 417 | 175,835,188 | 163,690,001 | 1,503,791 | 713,935 | 177,338,979 |
-| Merge bots | 549 | 504 | 103,890,054 | 94,934,773 | 992,523 | 573,971 | 104,882,577 |
+| AgentSocial fact-checking network | 2,809 | 2,481 | 648,851,704 | 549,517,575 | 3,019,973 | 894,280 | 651,871,677 |
+| Repo loops: reviewers (this desktop) | 5,905 | 2,864 | 590,160,152 | 498,203,815 | 12,896,941 | 11,455,949 | 603,057,093 |
+| Repo loops: fixers | 1,049 | 1,020 | 502,126,275 | 474,909,584 | 3,871,781 | 1,902,483 | 505,998,056 |
+| Merge bots | 1,332 | 1,242 | 278,949,796 | 257,308,568 | 2,357,244 | 1,240,210 | 281,307,040 |
+| Repo loops: reviewers on Spark + 3080 | 826 | n/a | n/a | n/a | n/a | n/a | 79,481,921 |
 | Swarm scaling test | 442 | 441 | 74,285,317 | 54,041,597 | 503,692 | 80,333 | 74,789,009 |
+| Setup tests and checks | 26 | 26 | 583,028 | 234,119 | 2,439 | 104 | 585,467 |
 | Killed before the prompt was logged | 175 | 40 | 560,320 | 0 | 200 | 0 | 560,520 |
 | App build (Codex) | 1 | 1 | 524,021 | 481,808 | 14,655 | 1,739 | 538,676 |
-| Setup tests | 19 | 19 | 502,779 | 234,119 | 2,323 | 33 | 505,102 |
-| **Total** | **8,809** | **5,395** | **1,175,266,690** | **992,971,418** | **13,838,007** | **9,644,194** | **1,189,104,697** |
+| **Total** | **12,565** | | | | | | **2,198,189,459** |
 
 **Table 3.** Usage by model.
 
 | Model | Codex calls | completed | total tokens | output tokens |
 |---|---:|---:|---:|---:|
-| GPT-6.1-Terra | 4,392 | 2,706 | 864,573,968 | 10,537,387 |
+| GPT-6.1-Terra | 7,098 | 5,206 | 1,784,405,354 | 18,196,424 |
 | GPT-6.1-Sol | 2,408 | 2,011 | 173,156,509 | 1,189,271 |
-| GPT-6-Astra | 1,868 | 678 | 151,374,220 | 2,111,349 |
+| GPT-6-Astra | 2,092 | 898 | 161,145,675 | 3,281,230 |
 | (killed before the model was logged) | 141 | 0 | 0 | 0 |
 
-Across the whole event key that day, as of 14:47 ET, the totals were **9,092 runs and 1.195B tokens**. That
-figure includes a few runs for other private projects.
+Across the whole event key that day, the final total on all three machines was **13,444 runs and 2.94B tokens**.
+That figure includes about 0.74B tokens for another private project.
 
 **Cost structure:**
-- **Input dominates.** 98.8% of tokens are input, and 84.5% of input was served from cache.
-- **Output is small.** Output is 1.2% of tokens, and 70% of that is reasoning.
+- **Input dominates.** 98.9% of tokens are input, and 87.5% of input was served from cache.
+- **Output is small.** Output is 1.1% of tokens, and 69% of that is reasoning.
 - **Fixed overhead.** Every call carries about 13.4k tokens of Codex system instructions.
 - **Reviewers are prompt-heavy.** Each reviewer receives the whole app, about 150k tokens.
 - **Most of the bill is reading, not writing.**
@@ -225,11 +230,12 @@ figure includes a few runs for other private projects.
 | Codex initial build | — | — | — | — | 42 |
 | Rounds 1–2 | 4 + 4 | 12 PRs | 12 | 10 (2 duplicates closed) | 93 |
 | Round 3 | 200 | 277 → 24 | 15 | 10 (5 closed with reasons) | 137 |
-| Pipelined rounds (four) | 200 each | streamed | 20/20, 26/26, 28/28, + a partial round | by merge bots | 213 → 345 |
+| Pipelined rounds | 200 each | streamed | 20/20, 26/26, 28/28, then more until the key was switched off | by merge bots | 213 → 449 |
 
 **Totals:**
-- **138** agent PRs: **66 merged**, 68 closed with a written reason, 4 open at pause.
-- `master` reached **227 commits**.
+- **238** agent PRs: **99 merged**, 139 closed with a written reason.
+- `master` reached **362 commits**.
+- **AgentSocial repo (second swarm):** 30 agent PRs, 12 merged and 17 closed with reasons; tests went from **0 to 38**.
 - Of 149 logged fixes, **139 passed** the full suite and **10 failed** and were dropped.
 
 **Examples of merged fixes:**
@@ -268,8 +274,8 @@ required it to quote the verified sentence verbatim and to judge scope, date, sa
 confirmed **9** and challenged **43**, with specific reasons. For example: "verbatim quote, but a 96-person lab
 study does not support the claim as stated".
 
-**Totals:** 101 agent profiles and 1,586 public posts (711 evidence, 323 confirmations, 296 challenges,
-120 verdicts), covering 136 claims. Of 49 tracked claims, 18 settled after their verdicts repeated, 29 were
+**Totals:** 101 agent profiles and 1,767 public posts (787 evidence, 339 confirmations, 350 challenges,
+136 verdicts), covering 155 claims. Of 49 tracked claims, 18 settled after their verdicts repeated, 29 were
 checked once, and 2 remained contested at pause.
 
 ## 5 Failure analysis
@@ -317,8 +323,8 @@ termination are still counted.
 
 ## 7 Conclusion
 
-A single desktop sustained a 200-agent Codex swarm, about 1.6k output tok/s at peak, and spent 1.19B tokens
-improving a working Oracle AI Database application. The test suite grew eightfold and every number in the
+A single desktop sustained a 200-agent Codex swarm, about 1.6k output tok/s at peak, and spent 2.20B tokens
+improving a working Oracle AI Database application. The test suite grew more than tenfold and every number in the
 app stayed traceable to SQL.
 
 The difficult parts were operational, not model quality: process lifetimes, sandboxes and orchestration
