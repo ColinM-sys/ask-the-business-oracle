@@ -75,7 +75,12 @@ It refuses evidence over the row limit instead of silently truncating it.
 `search_policies()` calls `ensure_policies()` on every policy search, including
 normal POST requests. It creates `policy_chunks` if absent and transactionally
 deletes and replaces all rows and commits when the table is empty or the source
-documents or selected embedding backend change. The runtime database user needs
+documents or selected embedding backend change. Each search serializes policy setup
+within its process and unconditionally acquires an exclusive `policy_chunks` database
+table lock before checking whether a refresh is needed, even when the documents and
+backend are unchanged. The database lock waits up to five seconds; if it times out,
+the search fails and a POST returns HTTP 503. Retry the request after the lock is
+released; the app does not retry automatically. The runtime database user needs
 `CREATE TABLE` when the table is missing, tablespace quota (or
 `UNLIMITED TABLESPACE`) for storage, and `SELECT`, `DELETE`, and `INSERT` access
 to `policy_chunks` (the table owner has these privileges). Running

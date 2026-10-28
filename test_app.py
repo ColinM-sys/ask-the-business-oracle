@@ -137,6 +137,12 @@ def test_readme_documents_runtime_policy_refresh():
     readme = " ".join(Path(__file__).with_name("README.md").read_text(encoding="utf-8").split())
     assert "`search_policies()` calls `ensure_policies()` on every policy search" in readme
     assert "including normal POST requests" in readme
+    assert "Each search serializes policy setup within its process" in readme
+    assert "unconditionally acquires an exclusive `policy_chunks` database table lock" in readme
+    assert "before checking whether a refresh is needed, even when the documents and backend are unchanged" in readme
+    assert "database lock waits up to five seconds" in readme
+    assert "search fails and a POST returns HTTP 503" in readme
+    assert "Retry the request after the lock is released; the app does not retry automatically" in readme
     assert "`CREATE TABLE`" in readme and "tablespace quota" in readme
     assert "`SELECT`, `DELETE`, and `INSERT` access to `policy_chunks`" in readme
     assert "source documents or selected embedding backend change" in readme
