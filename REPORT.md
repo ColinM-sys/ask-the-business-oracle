@@ -1,7 +1,7 @@
 # A 200-Agent Codex Swarm on Oracle AI Database: Review–Fix–Merge Pipelines, Scaling Measurements, and Open Agent Coordination
 
 **Colin McDonough**
-*Orchestration by Claude Opus 5.5 (Anthropic); agents by OpenAI Codex CLI 0.165.0*
+*Agents: OpenAI Codex CLI 0.165.0 (GPT-6.1-Sol, GPT-6-Astra, GPT-6.1-Terra)*
 Codex + Oracle AI Database Hackathon, Oracle AI World, Las Vegas, October 28, 2026
 
 ---
@@ -13,7 +13,7 @@ We report on one hackathon day in which a single desktop ran **8,809 OpenAI Code
 Oracle AI Database 26ai application in which every number in a generated business brief is tied to the SQL
 result cell it came from.
 
-A Claude orchestrator drove four kinds of agent:
+An orchestration layer drove four kinds of agent:
 - **Reviewers:** 200 per round, in 8 areas.
 - **Fixers:** up to 80 per round, each in its own git worktree.
 - **Merge bots:** 20 reviewer-mergers.
@@ -108,7 +108,8 @@ Every agent is one `codex exec` process.
 Each reviewer gets a lens, such as "think like an attacker", "numbers and rounding" or "Oracle SQL specifics".
 That way 25 reviewers in the same area look in different places.
 
-The merge bots enforce rules that come from human-closed PRs. They refuse changes that:
+The merge bots enforce rules learned from PRs that were closed in review before the bots existed. They refuse
+changes that:
 - need DBA/SYS setup
 - change the schema at runtime for locking
 - hardcode data-file content
@@ -119,7 +120,8 @@ A watchdog (`watchdog.py`) logs failure bursts, stalls and commit droughts.
 
 ### 2.4 AgentSocial
 
-AgentSocial is a local social network. Every agent posts a public profile card (role, skills, current task) and
+AgentSocial has its own repository: [ColinM-sys/agentsocial](https://github.com/ColinM-sys/agentsocial).
+It is a local social network. Every agent posts a public profile card (role, skills, current task) and
 public posts. For each claim:
 - **2–8 scouts** post evidence, for or against, with verbatim quotes and URLs.
 - A **checker** finds the scouts by reading their profiles and replies CONFIRMED or CHALLENGE.
@@ -297,8 +299,8 @@ termination are still counted.
   step crashed.
 - **The model changed mid-run.** The default moved from Sol to Terra, so per-model comparisons aren't controlled
   experiments.
-- **Agents wrote the tests.** A passing suite shows internal consistency, not independent correctness. Human
-  review covered the first 20 merges; later merges relied on the merge bots.
+- **Agents wrote the tests.** A passing suite shows internal consistency, not independent correctness. The first
+  20 merges were reviewed outside the swarm before merging; later merges relied on the merge bots.
 - **One host and one day.** Concurrency limits reflect this machine's RAM and process budget, about 175 MB per
   active agent.
 
@@ -330,6 +332,11 @@ python swarm\usage_report.py --cwd-contains "Codex Hackathon Oct28" --out usage.
 The key is read from Codex's own login (`codex login --with-api-key`), and no key is stored in this repository.
 The orchestration code is in [`swarm/`](swarm), and the raw totals are in
 [`swarm/usage_report.json`](swarm/usage_report.json).
+
+## Acknowledgments
+
+The agents ran on OpenAI Codex with the event's API key. The orchestration scripts were developed with AI coding
+assistance (Claude Code), consistent with the co-author trailers in the commit history.
 
 ## References
 
