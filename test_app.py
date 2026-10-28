@@ -77,6 +77,24 @@ def test_question_scope():
         parse_question("West and East")
 
 
+@pytest.mark.parametrize("month", ["Jul", "jul.", "Sept", "SEP"])
+def test_question_month_abbreviations(month):
+    expected = "07" if month.lower().startswith("jul") else "09"
+    assert parse_question(f"West since {month} 2026") == ("West", f"2026-{expected}")
+
+
+@pytest.mark.parametrize("date", ["2026-13", "2026-00", "2026/07", "2026-07-15",
+                                  "Smarch 2026", "2026", "July 26", "July",
+                                  "July 2025 and 2026-13"])
+def test_question_rejects_unsupported_explicit_dates(date):
+    with pytest.raises(ValueError, match="date"):
+        parse_question(f"West since {date}")
+
+
+def test_question_defaults_only_without_date():
+    assert parse_question("Why did West margin fall?") == ("West", "2025-07")
+
+
 @pytest.fixture(scope="module")
 def west_answer():
     return answer_question("Why did West margin fall since July 2025?")
