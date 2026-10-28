@@ -1042,6 +1042,36 @@ def test_flask_live_brief_and_evidence():
     assert b"evidence-dialog" in response.data
 
 
+@pytest.mark.parametrize("host", [
+    "rebind.example:5055", "localhost.rebind.example:5055",
+    "127.0.0.1.rebind.example:5055", "rebind.example,localhost:5055",
+    "localhost@rebind.example:5055",
+])
+@pytest.mark.parametrize("method", ["GET", "POST"])
+def test_ui_rejects_untrusted_hosts_before_analysis(monkeypatch, host, method):
+    analysis = MagicMock(return_value={"region": "West", "claims": [], "evidence": {}})
+    monkeypatch.setattr("app.answer_question", analysis)
+
+    response = app.test_client().open("/", method=method, headers={"Host": host},
+                                      data={"question": "West"})
+
+    assert response.status_code == 400
+    analysis.assert_not_called()
+
+
+@pytest.mark.parametrize("host", ["localhost", "localhost:5055", "127.0.0.1", "127.0.0.1:5055"])
+@pytest.mark.parametrize("method", ["GET", "POST"])
+def test_ui_accepts_local_hosts(monkeypatch, host, method):
+    analysis = MagicMock(return_value={"region": "West", "claims": [], "evidence": {}})
+    monkeypatch.setattr("app.answer_question", analysis)
+
+    response = app.test_client().open("/", method=method, headers={"Host": host},
+                                      data={"question": "West"})
+
+    assert response.status_code == 200
+    assert analysis.call_count == (method == "POST")
+
+
 @pytest.mark.parametrize("has_claims,dropped_count", [(True, 0), (True, 2), (False, 2), (False, 0)])
 def test_ui_discloses_dropped_claims_and_empty_brief(monkeypatch, has_claims, dropped_count):
     result = {

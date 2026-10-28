@@ -51,8 +51,9 @@ were retrieved; West's explanation applies to the default change point.
 `run_sql` parses one SELECT, limits tables and functions to an allowlist, rejects
 writes/locks/sequences/procedural calls, and executes in a read-only transaction.
 It refuses evidence over the row limit instead of silently truncating it.
-Policy setup is the separate write path. The Flask server binds only to localhost
-and runs without debug mode; this demo has no production authentication layer.
+Policy setup is the separate write path. The Flask server binds only to localhost,
+accepts only localhost Host headers, and runs without debug mode. This demo has
+no authentication; add authentication before allowing access by untrusted users.
 
 ```powershell
 python -m pytest -q test_app.py
