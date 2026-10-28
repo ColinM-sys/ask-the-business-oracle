@@ -1411,8 +1411,6 @@ def test_missing_region_has_descriptive_validation_error(monkeypatch, rows):
     response = app.test_client().post("/", data={"question": "West"})
     assert response.status_code == 400
     assert b"No sales/cost data found for West" in response.data
-
-
 @pytest.mark.parametrize("cutoff,valid", [
     ("2025-02", False), ("2025-03", False), ("2025-08", True), ("2025-09", False),
 ])
@@ -1447,14 +1445,20 @@ def test_cutoff_error_shows_selected_region_coverage(monkeypatch, cutoff, valid)
             policies.assert_not_called()
 
 
-@pytest.mark.parametrize("before,after,direction,below_precision", [
-    (25.001, 25.004, "rose", True),
-    (25.004, 25.001, "fell", True),
-    (25.001, 25.001, "was unchanged", False),
-    (25, 26, "rose", False),
-    (26, 25, "fell", False),
+@pytest.mark.parametrize("before,after,direction,below_precision,displayed,rounding_note", [
+    (25.001, 25.004, "rose", True, (25, 25, 0), False),
+    (25.004, 25.001, "fell", True, (25, 25, 0), False),
+    (25.001, 25.001, "was unchanged", False, (25, 25, 0), False),
+    (25, 26, "rose", False, (25, 26, -1), False),
+    (26, 25, "fell", False, (26, 25, 1), False),
+    (25.004, 24.996, "fell", False, (25, 25, 0.01), True),
+    (24.996, 25.004, "rose", False, (25, 25, -0.01), True),
+    (25.006, 25.004, "fell", True, (25.01, 25, 0), True),
+    (25.014, 24.996, "fell", False, (25.01, 25, 0.02), True),
+    (25.28, 25.29, "rose", False, (25.28, 25.29, -0.01), False),
 ])
-def test_margin_direction_uses_unrounded_sql(before, after, direction, below_precision, monkeypatch, policy_rows):
+def test_margin_direction_uses_unrounded_sql(before, after, direction, below_precision, displayed,
+                                              rounding_note, monkeypatch, policy_rows):
     # Execute the production aggregation over controlled rows without changing Oracle data.
     with sqlite3.connect(":memory:") as con:
         con.row_factory = sqlite3.Row
@@ -1472,6 +1476,7 @@ def test_margin_direction_uses_unrounded_sql(before, after, direction, below_pre
         tools.validate_select(sql)
         rows = [dict(row) for row in con.execute(sql, {"cutoff": "2025-07"})]
 
+    assert tuple(rows[0][key] for key in ("before_margin_pct", "after_margin_pct", "margin_drop_pts")) == displayed
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
         "sql": sql, "params": params or {}, "rows": rows})
     result = answer_question("West since July 2025")
@@ -1480,6 +1485,7 @@ def test_margin_direction_uses_unrounded_sql(before, after, direction, below_pre
                        for p in finding["parts"])
     assert rendered.startswith(f"West gross margin {direction} from ")
     assert ("below display precision" in rendered) == below_precision
+    assert ("The displayed margins and change are independently rounded from unrounded aggregates." in rendered) == rounding_note
     reason = next(c for c in result["claims"] if c["kind"] == "reason")
     explanation = "".join(p["text"] for p in reason["parts"])
     if direction == "fell":
@@ -2183,6 +2189,212 @@ def test_flask_live_brief_and_evidence():
     assert b"evidence-dialog" in response.data
 
 
+def test_download_brief_contains_cited_evidence_and_verification(monkeypatch):
+    question = "Why did West margin fall since July 2025?"
+    result = {
+        "region": "West", "cutoff": "2025-07", "dropped_count": 2,
+        "claims": [
+            {"kind": "scope", "parts": [{"text": "West: compare "},
+                {"value": "2025-06", "suffix": "", "evidence": "E2", "row": 0,
+                 "column": "first_month"}, {"text": " with July."}]},
+            {"kind": "finding", "parts": [
+                {"text": "Margin fell to "},
+                {"value": 25.6, "suffix": "%", "evidence": "E2", "row": 0,
+                 "column": "margin_pct"}, {"text": "."}]},
+            {"kind": "reason", "parts": [{"text": "A volume push affected pricing."}],
+             "policy_ids": ["P1"]},
+            {"kind": "action", "parts": [{"text": "Review discounts."}]},
+        ],
+        "evidence": {
+            "E2": {"kind": "sql", "sql": "SELECT margin_pct, units FROM sales WHERE month >= :cutoff",
+                   "params": {"cutoff": "2025-07"},
+                   "rows": [{"margin_pct": 25.6, "first_month": "2025-06",
+                             "units": 9007199254740993}]},
+            "P1": {"kind": "policy", "sql": "SELECT chunk FROM policy_chunks WHERE id = :policy_id",
+                   "params": {"policy_id": 1}, "rows": [{"id": 1, "doc": "volume_push.md",
+                                                           "chunk": "Discounts increased in West."}]},
+            "E9": {"kind": "sql", "sql": "SELECT uncited FROM sales", "params": {}, "rows": []},
+        },
+    }
+    monkeypatch.setattr("app.answer_question", lambda _: result)
+    client = app.test_client()
+    assert b'id="download-brief"' not in client.get("/").data
+    response = client.post("/", data={"question": question})
+    html = response.get_data(as_text=True)
+    assert response.status_code == 200
+    assert 'id="download-brief"' in html and "Download brief" in html
+
+    class BriefParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.claims, self.notices = [], []
+            self.current = self.button = None
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if "data-claim" in attrs or "data-notice" in attrs:
+                self.current = {"childNodes": [], "textContent": "", "dataset": {
+                    "claimKind": attrs.get("data-claim-kind", "")}}
+                (self.claims if "data-claim" in attrs else self.notices).append(self.current)
+            elif self.current is not None and tag == "button":
+                self.button = {"nodeType": 1, "textContent": "", "dataset": {
+                    key[5:]: value for key, value in attrs.items() if key.startswith("data-")}}
+                self.current["childNodes"].append(self.button)
+
+        def handle_data(self, data):
+            if self.current is not None:
+                self.current["textContent"] += data
+                if self.button is not None:
+                    self.button["textContent"] += data
+                else:
+                    self.current["childNodes"].append({"nodeType": 3, "textContent": data})
+
+        def handle_endtag(self, tag):
+            if tag == "button":
+                self.button = None
+            elif tag == "p":
+                self.current = None
+
+    page = BriefParser()
+    page.feed(html)
+    assert len(page.claims) == len(result["claims"])
+    script = html.split("<script>", 1)[1].split("</script>", 1)[0]
+    dom = json.dumps({"claims": page.claims, "notices": page.notices})
+    check = subprocess.run(["node", "-e", """
+        const assert = require('node:assert/strict');
+        const page = """ + dom + """;
+        const handlers = {};
+        let blob, clicked = false;
+        const anchor = {click() { clicked = true; }, remove() {}};
+        const element = {addEventListener() {}};
+        const button = {addEventListener(event, handler) { handlers[event] = handler; }};
+        global.Node = {TEXT_NODE: 3, ELEMENT_NODE: 1};
+        global.document = {
+            getElementById: id => id === 'download-brief' ? button :
+                id === 'question' ? {value: 'Edited after the analysis'} : element,
+            querySelectorAll: selector => selector === '[data-claim]' ? page.claims :
+                selector === '[data-notice]' ? page.notices : [],
+            createElement: tag => { assert.equal(tag, 'a'); return anchor; },
+            body: {appendChild() {}, append() {}},
+        };
+        URL.createObjectURL = value => { blob = value; return 'blob:brief'; };
+        URL.revokeObjectURL = () => {};
+    """ + script + """
+        assert.equal(typeof handlers.click, 'function');
+        handlers.click();
+        assert.ok(clicked && blob);
+        assert.match(anchor.download, /\\.md$/);
+        assert.match(blob.type, /^text\\/(markdown|plain)/);
+        blob.text().then(text => process.stdout.write(text));
+    """], capture_output=True, text=True, encoding="utf-8")
+    assert check.returncode == 0, check.stderr
+    markdown = check.stdout
+    assert question in markdown and "Edited after the analysis" not in markdown
+    scope = next(line for line in markdown.splitlines() if "West: compare" in line)
+    assert "2025-06" in scope and "E2" in scope and "row 1" in scope
+    assert "first_month" in scope.replace("\\_", "_")
+    finding = next(line for line in markdown.splitlines() if "Margin fell to" in line)
+    assert "25.6%" in finding and "E2" in finding and "row 1" in finding
+    assert "margin_pct" in finding.replace("\\_", "_")
+    reason = next(line for line in markdown.splitlines() if "A volume push affected pricing." in line)
+    assert "P1" in reason
+    assert "Review discounts." in markdown
+    assert "2 claims were omitted because they failed verification." in markdown
+    assert "Numbers in retained claims verified against cited SQL cells." in markdown
+    assert "Policy-backed recommendations are unavailable for this brief." in markdown
+    assert "SELECT margin_pct, units FROM sales WHERE month >= :cutoff" in markdown
+    assert '"cutoff": "2025-07"' in markdown and '"margin_pct": 25.6' in markdown
+    assert "9007199254740993" in markdown
+    assert "SELECT chunk FROM policy_chunks WHERE id = :policy_id" in markdown
+    assert '"policy_id": 1' in markdown
+    assert "volume_push.md" in markdown.replace("\\_", "_") and "Discounts increased in West." in markdown
+    assert "SELECT uncited FROM sales" not in markdown
+@pytest.mark.parametrize("region", ["West", "East"])
+def test_monthly_trend_links_selected_region_to_original_evidence_rows(monkeypatch, region):
+    rows = [
+        {"region_name": "East", "sale_month": "2025-06", "margin_pct": 45,
+         "discount_pct": 2.5, "freight_per_unit": 4.25},
+        {"region_name": "West", "sale_month": "2025-06", "margin_pct": 38.9,
+         "discount_pct": 0, "freight_per_unit": 5.5},
+        {"region_name": "East", "sale_month": "2025-07", "margin_pct": 47,
+         "discount_pct": None, "freight_per_unit": 4.75},
+        {"region_name": "West", "sale_month": "2025-07", "margin_pct": 25.6,
+         "discount_pct": 18, "freight_per_unit": None},
+    ]
+    monkeypatch.setattr("app.answer_question", lambda _: {
+        "region": region, "claims": [],
+        "evidence": {"E1": {"kind": "sql", "sql": "SELECT ...", "params": {}, "rows": rows}},
+    })
+
+    class TrendParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.in_table = self.in_body = self.in_caption = False
+            self.caption = ""
+            self.rows = []
+            self.cell = None
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == "table" and attrs.get("id") == "monthly-trend":
+                self.in_table = True
+            elif self.in_table and tag == "caption":
+                self.in_caption = True
+            elif self.in_table and tag == "tbody":
+                self.in_body = True
+            elif self.in_body and tag == "tr":
+                self.rows.append([])
+            elif self.in_body and tag in ("td", "th"):
+                self.cell = {"text": "", "button": None}
+                self.rows[-1].append(self.cell)
+            elif self.cell is not None and tag == "button":
+                self.cell["button"] = attrs
+
+        def handle_data(self, data):
+            if self.in_caption:
+                self.caption += data
+            if self.cell is not None:
+                self.cell["text"] += data
+
+        def handle_endtag(self, tag):
+            if tag == "caption":
+                self.in_caption = False
+            elif self.in_body and tag in ("td", "th"):
+                self.cell = None
+            elif tag == "tbody":
+                self.in_body = False
+            elif tag == "table":
+                self.in_table = False
+
+    response = app.test_client().post("/", data={"question": region})
+    assert response.status_code == 200
+    parser = TrendParser()
+    parser.feed(response.get_data(as_text=True))
+    assert region in parser.caption
+    selected = [(index, row) for index, row in enumerate(rows) if row["region_name"] == region]
+    assert len(parser.rows) == len(selected)
+    columns = ("sale_month", "margin_pct", "discount_pct", "freight_per_unit")
+    for cells, (index, row) in zip(parser.rows, selected):
+        assert len(cells) == len(columns)
+        for cell, column in zip(cells, columns):
+            value = row[column]
+            if value is None:
+                assert cell["text"].strip().lower() == "unavailable"
+                assert cell["button"] is None
+            else:
+                expected = str(value)
+                if column in ("margin_pct", "discount_pct"):
+                    expected += "%"
+                elif column == "freight_per_unit":
+                    expected = "$" + expected
+                assert cell["text"].strip() == expected
+                button = cell["button"]
+                assert button["data-evidence"] == "E1"
+                assert button["data-row"] == str(index)
+                assert button["data-column"] == column
+                assert region in button["aria-label"] and row["sale_month"] in button["aria-label"]
+
+
 @pytest.mark.parametrize("missing_reason,missing_actions", [
     (False, False), (True, False), (False, True), (True, True),
 ])
@@ -2200,6 +2412,8 @@ def test_ui_discloses_missing_explanation_and_actions(policy_rows, missing_reaso
     assert (b"No verified actions are available for this brief." in response.data) == missing_actions
     assert (b"The policy documents identify a regional volume discount push" in response.data) == (not missing_reason)
     assert (b"Review discount approvals with Sales and Finance" in response.data) == (not missing_actions)
+
+
 def test_brief_shows_selected_region_monthly_trend_with_cell_citations(monkeypatch):
     rows = [
         {"region_name": "East", "sale_month": "2025-06", "margin_pct": 70,
@@ -2267,7 +2481,7 @@ def test_brief_shows_selected_region_monthly_trend_with_cell_citations(monkeypat
             value = rows[evidence_index][column]
             displayed = cell["text"].strip()
             if value is None:
-                assert displayed in ("N/A", "—", "-")
+                assert displayed == "Unavailable"
                 assert not cell["buttons"]
                 continue
             assert len(cell["buttons"]) == 1
@@ -2725,6 +2939,7 @@ def test_evidence_dialog_focuses_cited_cell(monkeypatch):
         };
         const elements = {
             'evidence-dialog': modalStub, 'close-dialog': close,
+            'download-brief': {addEventListener() {}},
             'evidence-description': {}, 'evidence-title': {},
             'evidence-sql': {}, 'evidence-params': {},
             'evidence-rows': {replaceChildren() {}},
