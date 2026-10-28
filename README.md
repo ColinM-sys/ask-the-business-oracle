@@ -92,7 +92,7 @@ python -m pytest -q test_app.py
 ```
 
 Tests include live Oracle integration; start the local database first. They also
-require Node.js installed and available as `node` on PATH. Tests do not reload or
+require Node.js 18 or newer installed and available as `node` on PATH. Tests do not reload or
 alter the business tables. The West metric ranges and displayed `13.36` asserted
 by the integration tests depend on the unmodified reference dataset; other
 business data can fail them.

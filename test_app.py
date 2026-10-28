@@ -103,7 +103,7 @@ def test_readme_requirements_include_compatible_dependencies():
 def test_readme_documents_node_test_prerequisite():
     readme = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
     test_instructions = readme.split("python -m pytest -q test_app.py", 1)[1]
-    assert "Node.js installed and available as `node` on PATH" in " ".join(test_instructions.split())
+    assert "Node.js 18 or newer installed and available as `node` on PATH" in " ".join(test_instructions.split())
 
 
 def test_readme_documents_reference_dataset_for_integration_tests():
