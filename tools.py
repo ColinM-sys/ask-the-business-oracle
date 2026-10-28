@@ -1,5 +1,6 @@
 """Constrained, read-only business SQL and Oracle vector policy retrieval."""
 import json
+from contextlib import contextmanager, nullcontext
 
 import sqlglot
 from sqlglot import exp
@@ -41,11 +42,18 @@ def validate_select(sql):
     return tree.sql(dialect="oracle", comments=False)
 
 
-def run_sql(select, params=None):
-    executable = validate_select(select)
+@contextmanager
+def read_only_transaction():
     with connect() as con:
         with con.cursor() as cur:
             cur.execute("SET TRANSACTION READ ONLY")
+        yield con
+
+
+def run_sql(select, params=None, *, connection=None):
+    executable = validate_select(select)
+    with read_only_transaction() if connection is None else nullcontext(connection) as con:
+        with con.cursor() as cur:
             cur.execute(executable, params or {})
             columns = [d[0].lower() for d in cur.description]
             rows = cur.fetchmany(1001)
