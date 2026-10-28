@@ -20,6 +20,7 @@ import pytest
 from packaging.requirements import Requirement
 
 import db
+import policies
 import tools
 from db import connect
 from agent import (DataQualityError, DiscountDataQualityError, RevenueDataQualityError,
@@ -345,6 +346,67 @@ def test_hashing_is_stable_and_normalized():
     assert abs(sum(v*v for v in first) - 1) < 0.000001
 
 
+@pytest.mark.parametrize("text", ["\u6771\u4eac", "123", "!!!", "\U0001f600", "   ", ""])
+def test_hashing_handles_unicode_numbers_and_tokenless_text(text):
+    vector = hash_embedding(text)
+    assert vector == hash_embedding(text)
+    assert sum(v * v for v in vector) == pytest.approx(1)
+
+
+def test_hashing_ranks_unicode_and_numeric_tokens():
+    japanese = hash_embedding("\u6771\u4eac")
+    numeric = hash_embedding("123")
+    both = hash_embedding("\u6771\u4eac 123")
+    dot = lambda left, right: sum(a * b for a, b in zip(left, right))
+    assert dot(japanese, both) > dot(japanese, numeric)
+    assert dot(numeric, both) > dot(japanese, numeric)
+    assert hash_embedding("!!!") != hash_embedding("???")
+
+
+def test_policy_refresh_rebuilds_previous_hash_backend(tmp_path, monkeypatch):
+    content = "\u6771\u4eac 123"
+    (tmp_path / "policy.md").write_text(content, encoding="utf-8")
+    previous_backend = "hash-v1-512"
+    version = "v" + hashlib.sha256(repr((previous_backend,)).encode()).hexdigest()[:31]
+    source_hash = hashlib.sha256(repr(("chunk-v2", [("policy.md", content)])).encode()).hexdigest()
+    rows = [{"backend": previous_backend, "fingerprint": version + source_hash[:32],
+             "chunk": content, "vector": [0.0] * 512}]
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.fetchone.return_value = ("POLICY_CHUNKS",)
+
+    def execute(sql, **params):
+        if "FROM user_mining_models" in sql:
+            cursor.fetchall.return_value = []
+        elif sql.startswith("SELECT DISTINCT backend, source_hash"):
+            cursor.fetchall.return_value = [(row["backend"], row["fingerprint"]) for row in rows]
+        elif sql.startswith("SELECT chunk, embedding FROM policy_chunks"):
+            cursor.fetchall.return_value = [(row["chunk"], row["vector"]) for row in rows]
+        elif sql.startswith("DELETE FROM policy_chunks"):
+            rows.clear()
+        elif sql.lstrip().startswith("INSERT INTO policy_chunks"):
+            rows.append(params)
+        return cursor
+
+    cursor.execute.side_effect = execute
+    monkeypatch.setattr(policies, "DOCS", tmp_path)
+    monkeypatch.setattr(policies, "connect", lambda: connection)
+    embedding = MagicMock(wraps=policies.embed)
+    monkeypatch.setattr(policies, "embed", embedding)
+
+    assert ensure_policies() == "hash-v2-512"
+    embedding.assert_called_once_with(cursor, content, "hash-v2-512")
+    assert rows[0]["vector"] == hash_embedding(content)
+    assert sum(v * v for v in rows[0]["vector"]) == pytest.approx(1)
+    connection.commit.assert_called_once()
+
+    embedding.reset_mock()
+    assert ensure_policies() == "hash-v2-512"
+    embedding.assert_not_called()
+    connection.commit.assert_called_once()
+
+
 @pytest.mark.parametrize("failure_mode", ["incompatible", "null"])
 def test_policy_probe_cache_tracks_model_versions(failure_mode, tmp_path, monkeypatch):
     (tmp_path / "policy.md").write_text("Distinct policy content", encoding="utf-8")
@@ -474,7 +536,7 @@ def test_policy_probe_selects_usable_text_model(
         return hash_embedding(text)
 
     monkeypatch.setattr("policies.embed", embedding)
-    expected = "C_GOOD" if good_model else "hash-v1-512"
+    expected = "C_GOOD" if good_model else "hash-v2-512"
     assert ensure_policies() == expected
     assert probed == (["B_NULL"] if null_model else []) + (["C_GOOD"] if good_model else []) + [expected]
     inserted = [call.kwargs for call in cursor.execute.call_args_list
@@ -524,8 +586,8 @@ def test_policy_probe_propagates_unexpected_failures(failure, tmp_path, monkeypa
 
 
 @pytest.mark.parametrize("models, expected", [
-    ([], "hash-v1-512"),
-    ([("INCOMPATIBLE_MODEL", "created", 1, "v1")], "hash-v1-512"),
+    ([], "hash-v2-512"),
+    ([("INCOMPATIBLE_MODEL", "created", 1, "v1")], "hash-v2-512"),
     ([("INCOMPATIBLE_MODEL", "created", 1, "v1"), ("GOOD_MODEL", "created", 2, "v1")], "GOOD_MODEL"),
 ])
 def test_policy_probe_fallback_is_explicit_and_sanitized(
@@ -552,7 +614,7 @@ def test_policy_probe_fallback_is_explicit_and_sanitized(
     if models:
         assert "INCOMPATIBLE_MODEL" in caplog.text
         assert "40290" in caplog.text
-    assert ("Using hash-v1-512 fallback" in caplog.text) == (expected == "hash-v1-512")
+    assert ("Using hash-v2-512 fallback" in caplog.text) == (expected == "hash-v2-512")
     assert "private-driver-details" not in caplog.text
     assert "forged log entry" not in caplog.text
 
@@ -571,7 +633,7 @@ def test_policy_probe_skips_unsupported_names(unsupported, later_model, tmp_path
     monkeypatch.setattr("policies.connect", lambda: connection)
     monkeypatch.setattr("policies._probe_cache", {})
 
-    expected = later_model or "hash-v1-512"
+    expected = later_model or "hash-v2-512"
     assert ensure_policies() == expected
     embedding_sql = [call.args[0] for call in cursor.execute.call_args_list
                      if "VECTOR_EMBEDDING" in call.args[0]]
@@ -652,7 +714,7 @@ def test_policy_refresh_replaces_legacy_chunks_once(tmp_path, monkeypatch):
 
     cursor.execute.reset_mock()
     connection.commit.reset_mock()
-    cursor.execute.return_value.fetchall.side_effect = [[], [("hash-v1-512", new_hash)]]
+    cursor.execute.return_value.fetchall.side_effect = [[], [("hash-v2-512", new_hash)]]
     ensure_policies()
     assert not any(call.args[0].lstrip().startswith(("DELETE", "INSERT"))
                    for call in cursor.execute.call_args_list)
@@ -665,7 +727,7 @@ def test_policy_refresh_rechunks_model_versioned_cache(tmp_path, monkeypatch):
     for name, content in sources:
         (tmp_path / name).write_text(content, encoding="utf-8")
 
-    backend = "hash-v1-512"
+    backend = "hash-v2-512"
     version = "v" + hashlib.sha256(repr((backend,)).encode()).hexdigest()[:31]
     old_hash = version + hashlib.sha256(repr(sources).encode()).hexdigest()[:32]
     rows = [
@@ -865,10 +927,10 @@ def test_delayed_policy_refresh_preserves_newer_content(tmp_path, monkeypatch):
             assert waiting.wait(10), "Delayed refresh did not reach the lock"
             # Commit updated content while the first refresh is waiting for the lock.
             document.write_text("Updated policy", encoding="utf-8")
-            assert ensure_policies() == "hash-v1-512"
+            assert ensure_policies() == "hash-v2-512"
         finally:
             resume.set()
-        assert delayed.result(timeout=10) == "hash-v1-512"
+        assert delayed.result(timeout=10) == "hash-v2-512"
 
     assert [row["chunk"] for row in rows] == ["Updated policy"]
     connection.commit.assert_called_once()
@@ -988,11 +1050,11 @@ def test_concurrent_policy_refreshes_do_not_overwrite_newer_content(tmp_path, mo
                 assert not new.done()
             else:
                 # Without the database lock, the new version commits first.
-                assert new.result(timeout=10) == "hash-v1-512"
+                assert new.result(timeout=10) == "hash-v2-512"
         finally:
             resume_old.set()
-        assert old.result(timeout=10) == "hash-v1-512"
-        assert new.result(timeout=10) == "hash-v1-512"
+        assert old.result(timeout=10) == "hash-v2-512"
+        assert new.result(timeout=10) == "hash-v2-512"
 
     assert [row["chunk"] for row in rows] == ["Updated policy"]
 
@@ -1017,7 +1079,7 @@ def test_policy_table_creation_race(code, tmp_path, monkeypatch):
     monkeypatch.setattr("policies.connect", lambda: connection)
 
     if code == 955:
-        assert ensure_policies() == "hash-v1-512"
+        assert ensure_policies() == "hash-v2-512"
         assert any(re.fullmatch(r"LOCK TABLE POLICY_CHUNKS IN EXCLUSIVE MODE WAIT [1-9][0-9]*",
                                 " ".join(call.args[0].upper().split()))
                    for call in cursor.execute.call_args_list)
@@ -1068,7 +1130,7 @@ def test_policy_lock_timeout_returns_temporary_failure_and_allows_retry(code, tm
     assert not any(call.args[0].lstrip().upper().startswith(("DELETE", "INSERT"))
                    for call in cursor.execute.call_args_list)
 
-    assert ensure_policies() == "hash-v1-512"
+    assert ensure_policies() == "hash-v2-512"
     assert len(lock_attempts) == 2
     connection.commit.assert_called_once()
 

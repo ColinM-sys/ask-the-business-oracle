@@ -20,7 +20,9 @@ _probe_cache = {}
 
 def hash_embedding(text, dimensions=512):
     values = [0.0] * dimensions
-    for word in re.findall(r"[a-z]+", text.lower()):
+    text = text.lower()
+    # Tokenless input still needs a nonzero vector for cosine distance.
+    for word in re.findall(r"\w+", text) or [text]:
         digest = hashlib.sha256(word.encode()).digest()
         values[int.from_bytes(digest[:4], "big") % dimensions] += 1
     norm = math.sqrt(sum(v * v for v in values)) or 1
@@ -28,7 +30,7 @@ def hash_embedding(text, dimensions=512):
 
 
 def embed(cursor, text, backend):
-    if backend == "hash-v1-512":
+    if backend == "hash-v2-512":
         return hash_embedding(text)
     if not _model_identifier.fullmatch(backend):
         raise ValueError("Invalid embedding model name")
@@ -59,7 +61,7 @@ def ensure_policies():
                 raise RuntimeError("No policy documents found")
             # Refresh cached chunks when the chunking algorithm changes.
             source_hash = hashlib.sha256(repr(("chunk-v2", sources)).encode()).hexdigest()
-            backend = "hash-v1-512"
+            backend = "hash-v2-512"
             model_version = (backend,)
             models = cur.execute(
                 """SELECT m.model_name, m.creation_date, o.object_id, o.last_ddl_time
@@ -99,7 +101,7 @@ def ensure_policies():
                     model_version = model_key
                     break
             else:
-                _logger.warning("Using hash-v1-512 fallback: no compatible embedding models available")
+                _logger.warning("Using hash-v2-512 fallback: no compatible embedding models available")
             # Tag the collection fingerprint with the model revision. The non-hex prefix
             # also invalidates legacy rows, whose model revision was not recorded.
             version = "v" + hashlib.sha256(repr(model_version).encode()).hexdigest()[:31]
