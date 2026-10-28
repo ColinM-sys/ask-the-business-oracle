@@ -3139,6 +3139,26 @@ def test_ui_validation_and_safe_error(monkeypatch):
     assert b"secret-driver-settings" not in response.data
 
 
+def test_ui_reports_monthly_evidence_row_limit(monkeypatch):
+    connection = MagicMock()
+    cursor = connection.__enter__.return_value.cursor.return_value.__enter__.return_value
+    cursor.description = [("REGION_NAME",)]
+    cursor.fetchmany.return_value = [("West",)] * 1001
+    monkeypatch.setattr("tools.connect", lambda: connection)
+    policies = MagicMock()
+    monkeypatch.setattr("agent.search_policies", policies)
+
+    response = app.test_client().post("/", data={"question": "West"})
+
+    assert response.status_code == 503
+    message = response.get_data(as_text=True).lower()
+    assert "evidence query returned more than 1,000 rows" in message
+    assert "filter the sales data or aggregate the evidence query into fewer rows" in message
+    assert "oracle connection and policy setup" not in message
+    cursor.fetchmany.assert_called_once_with(1001)
+    policies.assert_not_called()
+
+
 @pytest.mark.parametrize("column, message", [
     ("missing_cost_count", b"Missing monthly costs or duplicate cost rows"),
     ("missing_discount_count", b"Missing discount inputs"),
