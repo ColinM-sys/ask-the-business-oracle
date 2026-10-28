@@ -4,6 +4,8 @@ import json
 import runpy
 import subprocess
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
@@ -225,6 +227,61 @@ def test_empty_policy_documents_preserve_existing_rows(tmp_path, monkeypatch):
     assert not any(call.args[0].lstrip().startswith(("DELETE", "INSERT"))
                    for call in cursor.execute.call_args_list)
     connection.commit.assert_not_called()
+
+
+def test_delayed_policy_refresh_preserves_newer_content(tmp_path, monkeypatch):
+    document = tmp_path / "policy.md"
+    document.write_text("Old policy", encoding="utf-8")
+    waiting = threading.Event()
+    resume = threading.Event()
+    lock = threading.Lock()
+    main_thread = threading.current_thread()
+
+    class DelayedLock:
+        def __enter__(self):
+            if threading.current_thread() is not main_thread:
+                waiting.set()
+                assert resume.wait(10), "Delayed refresh was not released"
+            lock.acquire()
+
+        def __exit__(self, *args):
+            lock.release()
+
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.fetchone.return_value = ("POLICY_CHUNKS",)
+    rows = []
+
+    def execute(sql, **params):
+        if sql.startswith("SELECT model_name"):
+            cursor.fetchall.return_value = []
+        elif sql.startswith("SELECT DISTINCT backend, source_hash"):
+            cursor.fetchall.return_value = [(row["backend"], row["fingerprint"]) for row in rows]
+        elif sql.startswith("DELETE FROM policy_chunks"):
+            rows.clear()
+        elif sql.startswith("INSERT INTO policy_chunks"):
+            rows.append(params)
+        return cursor
+
+    cursor.execute.side_effect = execute
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+    monkeypatch.setattr("policies._lock", DelayedLock())
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        delayed = executor.submit(ensure_policies)
+        try:
+            assert waiting.wait(10), "Delayed refresh did not reach the lock"
+            # Commit updated content while the first refresh is waiting for the lock.
+            document.write_text("Updated policy", encoding="utf-8")
+            assert ensure_policies() == "hash-v1-512"
+        finally:
+            resume.set()
+        assert delayed.result(timeout=10) == "hash-v1-512"
+
+    assert [row["chunk"] for row in rows] == ["Updated policy"]
+    connection.commit.assert_called_once()
 
 
 def test_policy_search_handles_empty_table(monkeypatch):
