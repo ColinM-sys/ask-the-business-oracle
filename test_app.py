@@ -3067,6 +3067,9 @@ def test_question_validation_errors_are_associated_and_focused(monkeypatch):
         def __init__(self):
             super().__init__()
             self.question = None
+            self.hint = None
+            self.hint_text = ""
+            self.in_hint = False
             self.alert = None
             self.alert_text = ""
             self.in_alert = False
@@ -3075,21 +3078,31 @@ def test_question_validation_errors_are_associated_and_focused(monkeypatch):
             attrs = dict(attrs)
             if tag == "input" and attrs.get("id") == "question":
                 self.question = attrs
+            if tag == "p" and attrs.get("class") == "hint" and self.hint is None:
+                self.hint = attrs
+                self.in_hint = True
             if tag == "p" and attrs.get("role") == "alert":
                 self.alert = attrs
                 self.in_alert = True
 
         def handle_data(self, data):
+            if self.in_hint:
+                self.hint_text += data
             if self.in_alert:
                 self.alert_text += data
 
         def handle_endtag(self, tag):
             if tag == "p":
+                self.in_hint = False
                 self.in_alert = False
 
     def parse(response):
         parser = FormParser()
         parser.feed(response.get_data(as_text=True))
+        assert parser.hint.get("id")
+        assert parser.hint["id"] in parser.question.get("aria-describedby", "").split()
+        assert "Fixed analysis of margin, discounts and freight" in parser.hint_text
+        assert "defaults are West and July 2025" in parser.hint_text
         return parser
 
     client = app.test_client()
@@ -3103,8 +3116,8 @@ def test_question_validation_errors_are_associated_and_focused(monkeypatch):
         assert response.status_code == status
         page = parse(response)
         assert page.question.get("aria-invalid") == "true"
-        assert page.question.get("aria-describedby") == page.alert.get("id")
-        assert page.question.get("aria-describedby")
+        assert page.alert.get("id")
+        assert set(page.question["aria-describedby"].split()) == {page.hint["id"], page.alert["id"]}
         assert "autofocus" in page.question
         assert "autofocus" not in page.alert
         assert message in page.alert_text
@@ -3118,6 +3131,7 @@ def test_question_validation_errors_are_associated_and_focused(monkeypatch):
         assert response.status_code == status
         page = parse(response)
         assert "aria-invalid" not in page.question
+        assert page.question["aria-describedby"].split() == [page.hint["id"]]
         assert "autofocus" not in page.question
         if status == 503:
             assert page.alert.get("tabindex") == "-1"
