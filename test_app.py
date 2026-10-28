@@ -912,6 +912,39 @@ def test_ui_discloses_dropped_claims_and_empty_brief(monkeypatch, has_claims, dr
     assert (b"No verified claims are available for this brief." in response.data) == (not has_claims)
     assert (b"Numbers in retained claims verified against cited SQL cells." in response.data) == has_claims
     assert (b"Retained finding." in response.data) == has_claims
+    assert b"Explanation unavailable" in response.data
+    assert b"Recommendations unavailable" in response.data
+
+
+@pytest.mark.parametrize("reason_available,actions_available", [
+    (True, True), (True, False), (False, True), (False, False),
+])
+@pytest.mark.parametrize("missing_policy", ["not retrieved", "changed"])
+def test_ui_discloses_missing_policy_backed_sections(
+    policy_rows, reason_available, actions_available, missing_policy
+):
+    missing_docs = set()
+    if not reason_available:
+        missing_docs.add("west_q3_volume_push.md")
+    if not actions_available:
+        missing_docs.add("pricing_policy.md")
+    if missing_policy == "not retrieved":
+        policy_rows[:] = [row for row in policy_rows if row["doc"] not in missing_docs]
+    else:
+        for row in policy_rows:
+            if row["doc"] in missing_docs:
+                row["chunk"] = "Changed policy content."
+
+    response = app.test_client().post("/", data={"question": "West since July 2025"})
+
+    assert response.status_code == 200
+    assert (b"Explanation unavailable" in response.data) == (not reason_available)
+    assert (b"Recommendations unavailable" in response.data) == (not actions_available)
+    assert (b"The policy documents identify" in response.data) == reason_available
+    assert (b"Review discount approvals" in response.data) == actions_available
+    assert b"omitted because they failed verification" not in response.data
+
+
 @pytest.mark.parametrize("data", [None, {}, {"unrelated": "value"}, {"question": ""}])
 def test_ui_missing_question_rejected_before_querying(monkeypatch, data):
     def forbidden_query(*args, **kwargs):
