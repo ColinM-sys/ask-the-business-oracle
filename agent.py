@@ -101,6 +101,7 @@ def summary_sql():
                        f"THEN {revenue} END AS {period}_revenue")
         for name, expression in raw[period].items():
             columns.append(f"ROUND({expression},2) AS {period}_{name}")
+            columns.append(f"({expression}) AS {period}_{name}_unrounded")
     columns.extend([
         "SUM(CASE WHEN c.unit_cogs IS NULL OR c.freight_per_unit IS NULL THEN 1 ELSE 0 END) AS missing_cost_count",
         f"{MISSING_REVENUE_COUNT} AS missing_revenue_count",

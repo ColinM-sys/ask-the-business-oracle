@@ -1487,6 +1487,61 @@ def test_cutoff_error_shows_selected_region_coverage(monkeypatch, cutoff, valid)
             policies.assert_not_called()
 
 
+def test_period_evidence_exposes_unrounded_weighted_metrics(monkeypatch):
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+        """)
+        for month, freight, discounts in (
+            ("2025-06", (1.001, 1.005), (10.001, 10.005)),
+            ("2025-07", (1.003, 1.007), (10.003, 10.007)),
+        ):
+            for product, quantity in ((1, 1), (2, 3)):
+                con.execute("INSERT INTO sales VALUES (1, ?, ?, ?, ?, 100.0, ?)",
+                            (product, month, 100.0 * quantity, quantity, discounts[product - 1]))
+                con.execute("INSERT INTO costs VALUES (1, ?, ?, 60.0, ?)",
+                            (product, month, freight[product - 1]))
+
+        def run_sql(sql, params=None):
+            return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
+                con.execute(tools.validate_select(sql), params or {})]}
+
+        monkeypatch.setattr("agent.run_sql", run_sql)
+        monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
+        result = answer_question("West since July 2025")
+        response = app.test_client().post("/", data={"question": "West since July 2025"})
+
+    row = result["evidence"]["E2"]["rows"][0]
+    unrounded = {
+        "before_margin_pct_unrounded": 38.996, "after_margin_pct_unrounded": 38.994,
+        "before_discount_pct_unrounded": 10.004, "after_discount_pct_unrounded": 10.006,
+        "before_freight_per_unit_unrounded": 1.004, "after_freight_per_unit_unrounded": 1.006,
+    }
+    for column, value in unrounded.items():
+        assert row[column] == pytest.approx(value)
+
+    freight = next(claim for claim in result["claims"] if claim["kind"] == "finding"
+                   and claim["parts"][0].get("text", "").startswith("Freight per unit:"))
+    values = [part for part in freight["parts"] if "value" in part]
+    assert [(part["column"], part["value"]) for part in values] == [
+        ("before_freight_per_unit", 1), ("after_freight_per_unit", 1.01),
+        ("freight_increase_pct", 0.2),
+    ]
+    assert all(supported(part, result["evidence"]) for part in values)
+
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert 'data-evidence="E2" data-row="0" data-column="freight_increase_pct"' in html
+    browser_row = json.loads(re.search(r"const evidence = (.*?);", html).group(1))["E2"]["rows"][0]
+    for column, value in unrounded.items():
+        assert browser_row[column] == pytest.approx(value)
+
+
 @pytest.mark.parametrize("before,after,direction,below_precision,displayed,rounding_note", [
     (25.001, 25.004, "rose", True, (25, 25, 0), False),
     (25.004, 25.001, "fell", True, (25, 25, 0), False),
@@ -1798,6 +1853,7 @@ def test_undefined_metric_preserves_other_metric(unavailable_metric, unavailable
         for period in ("before", "after"):
             if metric == unavailable_metric and unavailable_period in (period, "both"):
                 assert row[f"{period}_{column}"] is None
+                assert row[f"{period}_{column}_unrounded"] is None
                 assert f"{period} unavailable" in rendered
             else:
                 assert row[f"{period}_{column}"] is not None
