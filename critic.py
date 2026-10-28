@@ -21,12 +21,14 @@ def supported(part, evidence):
 
 
 def critique(claims, evidence):
-    """Drop an entire claim if a number lacks an exact cited SQL cell.
+    """Drop an entire claim if a numeric part lacks an exact cited SQL cell.
 
     Plain text cannot carry digits (including dates); numerical segments must
     name the evidence, row, column and exact value. Policy text is evidence for
-    qualitative reasons only, never an authority for business numbers. Units
-    and magnitudes cannot be appended as plain text; use validated suffixes.
+    qualitative reasons only, never an authority for business numbers. Numeric
+    suffixes are limited to "", "%", and " percentage points", without checking
+    the cell's units. Only selected adjacent text modifiers are rejected; other
+    unit or magnitude modifiers, such as "quadrillion", may pass unchecked.
     """
     kept, dropped = [], []
     for claim in claims:
