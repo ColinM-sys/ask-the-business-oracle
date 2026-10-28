@@ -221,6 +221,25 @@ def test_guard_accepts_comments_and_harmless_string():
     tools.validate_select("SELECT 'DROP TABLE sales' AS harmless FROM regions")
 
 
+@pytest.mark.parametrize("sql, columns, rows", [
+    ("SELECT region_id, region_id + 1 AS region_id FROM regions",
+     ["REGION_ID", "REGION_ID"], [(1, 2)]),
+    ('SELECT region_id AS "ID", region_id + 1 AS "id" FROM regions',
+     ["ID", "id"], [(1, 2)]),
+    ("SELECT region_id, region_id + 1 AS region_id FROM regions WHERE 1 = 0",
+     ["REGION_ID", "REGION_ID"], []),
+])
+def test_run_sql_rejects_duplicate_evidence_columns(sql, columns, rows, monkeypatch):
+    connection = MagicMock()
+    cursor = connection.__enter__.return_value.cursor.return_value.__enter__.return_value
+    cursor.description = [(name,) for name in columns]
+    cursor.fetchmany.return_value = rows
+    monkeypatch.setattr(tools, "connect", lambda: connection)
+
+    with pytest.raises(ValueError, match="duplicate column names"):
+        tools.run_sql(sql)
+
+
 @pytest.mark.parametrize("name", ["sales", "costs", "customers", "discounts", "products", "regions"])
 def test_guard_resolves_oracle_table_names(name, monkeypatch):
     for identifier in (name, name.upper(), name.capitalize(), f'"{name.upper()}"'):
@@ -1585,6 +1604,58 @@ def test_comparison_keeps_available_margin_when_other_period_is_empty(available_
     assert result["dropped_count"] == 0
 
 
+@pytest.mark.parametrize("return_freight,after_freight,before,change", [
+    (18.0, 5.0, -8.0, None),
+    (10.0, 5.0, 0.0, None),
+    (10.004, 5.0, 0.0, None),
+    (9.996, 5.0, 0.0, 124900.0),
+    (5.0, 8.0, 5.0, 60.0),
+])
+def test_freight_change_requires_positive_unrounded_baseline(
+        return_freight, after_freight, before, change, monkeypatch):
+    # Returns can make the weighted freight baseline nonpositive.
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+            INSERT INTO sales VALUES (1, 1, '2025-06', 180.0, 2, 100.0, 10);
+            INSERT INTO sales VALUES (1, 2, '2025-06', -90.0, -1, 100.0, 10);
+            INSERT INTO sales VALUES (1, 1, '2025-07', 90.0, 1, 100.0, 10);
+            INSERT INTO costs VALUES (1, 1, '2025-06', 60.0, 5.0);
+        """)
+        con.execute("INSERT INTO costs VALUES (1, 2, '2025-06', 60.0, ?)", (return_freight,))
+        con.execute("INSERT INTO costs VALUES (1, 1, '2025-07', 60.0, ?)", (after_freight,))
+
+        def run_sql(sql, params=None):
+            return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
+                con.execute(tools.validate_select(sql), params or {})]}
+
+        monkeypatch.setattr("agent.run_sql", run_sql)
+        monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
+        result = answer_question("West since July 2025")
+
+    row = result["evidence"]["E2"]["rows"][0]
+    assert row["before_freight_per_unit"] == before
+    assert row["after_freight_per_unit"] == after_freight
+    if change is None:
+        assert row["freight_increase_pct"] is None
+    else:
+        assert row["freight_increase_pct"] == pytest.approx(change)
+    finding = next(c for c in result["claims"] if c["kind"] == "finding"
+                   and "Freight" in c["parts"][0].get("text", ""))
+    rendered = "".join(p.get("text", str(p.get("value", "")) + p.get("suffix", ""))
+                       for p in finding["parts"])
+    assert ("change: unavailable" in rendered) == (change is None)
+    cited = {p["column"] for p in finding["parts"] if "value" in p and supported(p, result["evidence"])}
+    assert {"before_freight_per_unit", "after_freight_per_unit"} <= cited
+    assert ("freight_increase_pct" in cited) == (change is not None)
+    assert result["dropped_count"] == 0
+
+
 def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
     row = {
         "region_name": "West", "first_month": "2025-01", "last_month": "2025-09",
@@ -1939,6 +2010,31 @@ def test_updated_policy_source_invalidates_unchanged_retrieved_chunk(policy_rows
     assert not any(claim["kind"] == "reason" for claim in result["claims"])
     assert not any(claim["kind"] == "action" for claim in result["claims"])
     assert result["dropped_count"] == 0
+
+
+@pytest.mark.parametrize("region,cutoff", [("West", "August 2025"), ("East", "July 2025")])
+@pytest.mark.parametrize("margin_available", [True, False])
+def test_nondefault_comparison_does_not_make_uncited_policy_claims(
+        policy_rows, tmp_path, monkeypatch, region, cutoff, margin_available):
+    import agent
+
+    summary = dict(agent.run_sql("SELECT ...")["rows"][0], region_name=region)
+    if not margin_available:
+        summary.update(after_margin_pct=None, after_revenue=0, margin_direction=None, margin_drop_pts=None)
+    monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
+        "sql": sql, "params": params or {}, "rows": [summary]})
+    for policy in policy_rows:
+        if policy["doc"] == "west_q3_volume_push.md":
+            policy["chunk"] += f"\n\nThe freight contract caused {region} margin to fall since {cutoff}."
+        (tmp_path / policy["doc"]).write_text(policy["chunk"], encoding="utf-8")
+    monkeypatch.setattr("agent.DOCS", tmp_path)
+
+    result = answer_question(f"Why did {region} margin fall since {cutoff}?")
+
+    reason = next(claim for claim in result["claims"] if claim["kind"] == "reason")
+    assert not reason["policy_ids"]
+    assert "no verified policy explanation is available" in reason["parts"][0]["text"].lower()
+    assert "do not establish a cause" not in reason["parts"][0]["text"].lower()
 
 
 @pytest.mark.parametrize("revision", ["unchanged", "superseding", "missing"])
@@ -3071,6 +3167,9 @@ def test_question_validation_errors_are_associated_and_focused(monkeypatch):
         def __init__(self):
             super().__init__()
             self.question = None
+            self.hint = None
+            self.hint_text = ""
+            self.in_hint = False
             self.alert = None
             self.alert_text = ""
             self.in_alert = False
@@ -3079,21 +3178,31 @@ def test_question_validation_errors_are_associated_and_focused(monkeypatch):
             attrs = dict(attrs)
             if tag == "input" and attrs.get("id") == "question":
                 self.question = attrs
+            if tag == "p" and attrs.get("class") == "hint" and self.hint is None:
+                self.hint = attrs
+                self.in_hint = True
             if tag == "p" and attrs.get("role") == "alert":
                 self.alert = attrs
                 self.in_alert = True
 
         def handle_data(self, data):
+            if self.in_hint:
+                self.hint_text += data
             if self.in_alert:
                 self.alert_text += data
 
         def handle_endtag(self, tag):
             if tag == "p":
+                self.in_hint = False
                 self.in_alert = False
 
     def parse(response):
         parser = FormParser()
         parser.feed(response.get_data(as_text=True))
+        assert parser.hint.get("id")
+        assert parser.hint["id"] in parser.question.get("aria-describedby", "").split()
+        assert "Fixed analysis of margin, discounts and freight" in parser.hint_text
+        assert "defaults are West and July 2025" in parser.hint_text
         return parser
 
     client = app.test_client()
@@ -3107,8 +3216,8 @@ def test_question_validation_errors_are_associated_and_focused(monkeypatch):
         assert response.status_code == status
         page = parse(response)
         assert page.question.get("aria-invalid") == "true"
-        assert page.question.get("aria-describedby") == page.alert.get("id")
-        assert page.question.get("aria-describedby")
+        assert page.alert.get("id")
+        assert set(page.question["aria-describedby"].split()) == {page.hint["id"], page.alert["id"]}
         assert "autofocus" in page.question
         assert "autofocus" not in page.alert
         assert message in page.alert_text
@@ -3122,6 +3231,7 @@ def test_question_validation_errors_are_associated_and_focused(monkeypatch):
         assert response.status_code == status
         page = parse(response)
         assert "aria-invalid" not in page.question
+        assert page.question["aria-describedby"].split() == [page.hint["id"]]
         assert "autofocus" not in page.question
         if status == 503:
             assert page.alert.get("tabindex") == "-1"
@@ -3141,6 +3251,26 @@ def test_ui_validation_and_safe_error(monkeypatch):
     response = client.post("/", data={"question": "West"})
     assert response.status_code == 503
     assert b"secret-driver-settings" not in response.data
+
+
+def test_ui_reports_monthly_evidence_row_limit(monkeypatch):
+    connection = MagicMock()
+    cursor = connection.__enter__.return_value.cursor.return_value.__enter__.return_value
+    cursor.description = [("REGION_NAME",)]
+    cursor.fetchmany.return_value = [("West",)] * 1001
+    monkeypatch.setattr("tools.connect", lambda: connection)
+    policies = MagicMock()
+    monkeypatch.setattr("agent.search_policies", policies)
+
+    response = app.test_client().post("/", data={"question": "West"})
+
+    assert response.status_code == 503
+    message = response.get_data(as_text=True).lower()
+    assert "evidence query returned more than 1,000 rows" in message
+    assert "filter the sales data or aggregate the evidence query into fewer rows" in message
+    assert "oracle connection and policy setup" not in message
+    cursor.fetchmany.assert_called_once_with(1001)
+    policies.assert_not_called()
 
 
 @pytest.mark.parametrize("column, message", [
