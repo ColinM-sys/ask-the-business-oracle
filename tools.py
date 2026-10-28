@@ -63,7 +63,10 @@ def search_policies(text, k=5):
     ensure_policies()
     with connect() as con, con.cursor() as cur:
         cur.execute("SET TRANSACTION READ ONLY")
-        backend = cur.execute("SELECT backend FROM policy_chunks FETCH FIRST 1 ROW ONLY").fetchone()[0]
+        row = cur.execute("SELECT backend FROM policy_chunks FETCH FIRST 1 ROW ONLY").fetchone()
+        if row is None:
+            raise RuntimeError("No policy chunks available")
+        backend = row[0]
         vector = embed(cur, text, backend)
         # Store the exact vector as JSON; SQL converts it back on execution/replay.
         params = {"query_vector": json.dumps(vector.tolist()), "k": k}
