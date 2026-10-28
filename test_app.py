@@ -1,9 +1,11 @@
 """Unit checks and live integration against the existing local Oracle tables."""
 import copy
+import json
 
 import pytest
 
 import tools
+from db import connect
 from agent import answer_question, parse_question
 from app import app
 from critic import critique, supported
@@ -141,6 +143,13 @@ def test_policy_vector_search_and_idempotent_setup():
     assert len(policies["rows"]) == 4
     assert policies["rows"][0]["doc"] == "freight_contract_memo.md"
     assert policies["rows"] == sorted(policies["rows"], key=lambda r: (r["distance"], r["id"]))
+    # Replay the recorded bindings after the same JSON round trip used by the UI.
+    params = json.loads(json.dumps(policies["params"]))
+    assert set(params) == {"query_vector", "k"}
+    with connect() as con, con.cursor() as cur:
+        cur.execute("SET TRANSACTION READ ONLY")
+        rows = cur.execute(policies["sql"], params).fetchall()
+    assert [dict(zip(("id", "doc", "chunk", "distance"), row)) for row in rows] == policies["rows"]
 
 
 def test_real_select_and_bind():

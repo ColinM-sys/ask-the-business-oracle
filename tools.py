@@ -1,4 +1,6 @@
 """Constrained, read-only business SQL and Oracle vector policy retrieval."""
+import json
+
 import sqlglot
 from sqlglot import exp
 
@@ -60,8 +62,10 @@ def search_policies(text, k=5):
         cur.execute("SET TRANSACTION READ ONLY")
         backend = cur.execute("SELECT backend FROM policy_chunks FETCH FIRST 1 ROW ONLY").fetchone()[0]
         vector = embed(cur, text, backend)
-        sql = """SELECT id, doc, chunk, VECTOR_DISTANCE(embedding, :query_vector, COSINE) AS distance
+        # Store the exact vector as JSON; SQL converts it back on execution/replay.
+        params = {"query_vector": json.dumps(vector.tolist()), "k": k}
+        sql = """SELECT id, doc, chunk, VECTOR_DISTANCE(embedding, TO_VECTOR(:query_vector), COSINE) AS distance
             FROM policy_chunks ORDER BY distance, id FETCH FIRST :k ROWS ONLY"""
-        rows = cur.execute(sql, query_vector=vector, k=k).fetchall()
-        return {"sql": sql, "params": {"text": text, "k": k, "backend": backend},
+        rows = cur.execute(sql, params).fetchall()
+        return {"sql": sql, "params": params,
                 "rows": [dict(zip(("id", "doc", "chunk", "distance"), row)) for row in rows]}
