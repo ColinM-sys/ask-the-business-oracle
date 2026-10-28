@@ -1,5 +1,6 @@
 """Unit checks and live integration against the existing local Oracle tables."""
 import copy
+import hashlib
 import json
 import runpy
 import subprocess
@@ -245,6 +246,63 @@ def test_policy_probe_fallback_is_explicit_and_sanitized(
     assert "forged log entry" not in caplog.text
 
 
+@pytest.mark.parametrize("content", [
+    "policy " * 142 + "freight contract applies.",
+    "  A heading\n\n" + "freight  cost\t" * 200 + "\n \nNext paragraph \n",
+    "界😀 " * 900 + "\n\nFreight policy",
+], ids=["short-paragraph", "multiple-paragraphs", "multibyte"])
+def test_policy_chunks_preserve_source_and_word_boundaries(content, tmp_path, monkeypatch):
+    (tmp_path / "policy.md").write_text(content, encoding="utf-8")
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
+    cursor.execute.return_value.fetchall.return_value = []
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+    embedding = MagicMock(side_effect=lambda cur, text, backend: hash_embedding(text))
+    monkeypatch.setattr("policies.embed", embedding)
+
+    ensure_policies()
+
+    chunks = [call.kwargs["chunk"] for call in cursor.execute.call_args_list
+              if call.args[0].lstrip().startswith("INSERT INTO policy_chunks")]
+    assert "".join(chunks) == content
+    assert all(len(chunk) <= 1800 and len(chunk.encode("utf-8")) <= 4000 for chunk in chunks)
+    assert all(left[-1].isspace() or right[0].isspace()
+               for left, right in zip(chunks, chunks[1:]))
+    assert [call.args[1] for call in embedding.call_args_list] == chunks
+
+
+def test_policy_chunking_change_refreshes_existing_rows(tmp_path, monkeypatch):
+    content = "policy " * 142 + "freight contract applies."
+    (tmp_path / "policy.md").write_text(content, encoding="utf-8")
+    old_hash = hashlib.sha256(repr([("policy.md", content)]).encode()).hexdigest()
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
+    cursor.execute.return_value.fetchall.side_effect = [[], [("hash-v1-512", old_hash)]]
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+
+    ensure_policies()
+
+    insert = next(call for call in cursor.execute.call_args_list
+                  if call.args[0].lstrip().startswith("INSERT INTO policy_chunks"))
+    assert insert.kwargs["chunk"] == content
+    assert insert.kwargs["fingerprint"] != old_hash
+    connection.commit.assert_called_once()
+
+    cursor.execute.reset_mock()
+    connection.commit.reset_mock()
+    cursor.execute.return_value.fetchall.side_effect = [[], [("hash-v1-512", insert.kwargs["fingerprint"])]]
+    ensure_policies()
+    assert not any(call.args[0].lstrip().startswith(("DELETE", "INSERT"))
+                   for call in cursor.execute.call_args_list)
+    connection.commit.assert_not_called()
+
+
 @pytest.mark.parametrize("character", ["界", "😀"])
 def test_policy_chunks_fit_byte_limit(character, tmp_path, monkeypatch):
     content = character * 1500 + "\n\n" + character * 200
@@ -263,7 +321,7 @@ def test_policy_chunks_fit_byte_limit(character, tmp_path, monkeypatch):
               if call.args[0].lstrip().startswith("INSERT INTO policy_chunks")]
     assert chunks
     assert all(chunk and len(chunk.encode("utf-8")) <= 4000 for chunk in chunks)
-    assert "".join(chunks).replace("\n", "") == content.replace("\n", "")
+    assert "".join(chunks) == content
     connection.commit.assert_called_once()
 
 

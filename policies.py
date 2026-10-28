@@ -42,7 +42,8 @@ def ensure_policies():
         sources = [(p.name, p.read_text(encoding="utf-8")) for p in sorted(DOCS.glob("*.md"))]
         if not sources:
             raise RuntimeError("No policy documents found")
-        fingerprint = hashlib.sha256(repr(sources).encode()).hexdigest()
+        # Include the chunking version so existing rows are refreshed after changes.
+        fingerprint = hashlib.sha256(repr(("chunk-v2", sources)).encode()).hexdigest()
         with connect() as con:
             cur = con.cursor()
             if not cur.execute("SELECT table_name FROM user_tables WHERE table_name='POLICY_CHUNKS'").fetchone():
@@ -71,20 +72,20 @@ def ensure_policies():
                 return backend
             chunks = []
             for name, content in sources:
-                # Keep headings with their paragraphs; these short documents fit in one chunk.
-                paragraphs = re.split(r"\n\s*\n", content.strip())
-                chunk = ""
-                for paragraph in paragraphs:
-                    # At most four UTF-8 bytes per character; each part fits VARCHAR2(4000 BYTE).
-                    for offset in range(0, len(paragraph), 1000):
-                        part = paragraph[offset:offset + 1000]
-                        if chunk and (len(chunk) + len(part) + 2 > 1800
-                                      or len((chunk + "\n\n" + part).encode("utf-8")) > 4000):
-                            chunks.append((name, chunk))
-                            chunk = ""
-                        chunk = (chunk + "\n\n" + part).strip()
-                if chunk:
-                    chunks.append((name, chunk))
+                if not content.strip():
+                    continue
+                offset = 0
+                while offset < len(content):
+                    # Respect both the character target and VARCHAR2(4000 BYTE).
+                    part = content[offset:offset + 1800].encode("utf-8")[:4000].decode("utf-8", "ignore")
+                    if (offset + len(part) < len(content) and not part[-1].isspace()
+                            and not content[offset + len(part)].isspace()):
+                        # Prefer a whitespace boundary; an oversized word must be split.
+                        boundary = re.search(r"(\s+)\S*$", part)
+                        if boundary:
+                            part = part[:boundary.end(1)]
+                    chunks.append((name, part))
+                    offset += len(part)
             if not chunks:
                 raise RuntimeError("No policy content found")
             vectors = [embed(cur, chunk, backend) for _, chunk in chunks]
