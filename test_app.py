@@ -1,11 +1,13 @@
 """Unit checks and live integration against the existing local Oracle tables."""
 import copy
+import hashlib
 import json
 import re
 import runpy
 import subprocess
 import sqlite3
 from contextlib import nullcontext
+from decimal import Decimal
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
@@ -15,11 +17,13 @@ from unittest.mock import MagicMock
 
 import oracledb
 import pytest
+from packaging.requirements import Requirement
 
 import db
 import tools
 from db import connect
-from agent import answer_question, parse_question, summary_sql
+from agent import (DataQualityError, DiscountDataQualityError, RevenueDataQualityError,
+                   answer_question, parse_question, summary_sql)
 from app import app
 from critic import critique, supported
 from policies import ensure_policies, hash_embedding
@@ -73,6 +77,29 @@ def test_pooled_connection_cleans_up_transaction(monkeypatch, fail):
     finally:
         if db._pool is not None:
             db._pool.close(force=True)
+
+
+def test_readme_install_requirements_are_available():
+    readme = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
+    assert "python -m pip install -r requirements.txt" in readme
+    requirements = Path(__file__).with_name("requirements.txt").read_text(encoding="utf-8")
+    packages = {re.split(r"[<>=!~\[;\s]", line.strip(), maxsplit=1)[0].lower()
+                for line in requirements.splitlines()}
+    assert {"flask", "oracledb", "sqlglot", "pytest"} <= packages
+def test_readme_requirements_include_compatible_dependencies():
+    root = Path(__file__).parent
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    assert "python -m pip install -r requirements.txt" in readme
+    requirements = [Requirement(line) for line in
+                    (root / "requirements.txt").read_text(encoding="utf-8").splitlines()
+                    if line.strip() and not line.lstrip().startswith("#")]
+    by_name = {requirement.name.lower(): requirement for requirement in requirements}
+    assert {"flask", "oracledb", "sqlglot", "pytest"} <= by_name.keys()
+    # VECTOR column support for generally available Oracle 23ai starts at 2.2.
+    assert "2.1" not in by_name["oracledb"].specifier
+    assert "2.2" in by_name["oracledb"].specifier
+
+
 def test_readme_documents_node_test_prerequisite():
     readme = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
     test_instructions = readme.split("python -m pytest -q test_app.py", 1)[1]
@@ -92,6 +119,39 @@ def test_readme_documents_reference_dataset_for_integration_tests():
     assert "depend on the unmodified reference dataset" in test_instructions
 
 
+def test_readme_documents_policy_fingerprint_maintenance():
+    readme = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
+    text = " ".join(readme.split())
+    assert "review the fixed claims in `agent.py`" in text
+    assert "update both `POLICY_SHA256` (SHA-256 of the stripped full document)" in text
+    assert "`REVIEWED_POLICY_HASHES` (SHA-256 of its complete chunk with whitespace collapsed)" in text
+    assert "The revised document must still fit in one chunk" in text
+    assert "affected explanations and recommendations remain unavailable even after refresh and retrieval" in text
+
+
+def test_readme_documents_runtime_policy_refresh():
+    readme = " ".join(Path(__file__).with_name("README.md").read_text(encoding="utf-8").split())
+    assert "`search_policies()` calls `ensure_policies()` on every policy search" in readme
+    assert "including normal POST requests" in readme
+    assert "`CREATE TABLE`" in readme and "tablespace quota" in readme
+    assert "`SELECT`, `DELETE`, and `INSERT` access to `policy_chunks`" in readme
+    assert "source documents or selected embedding backend change" in readme
+    assert "deletes and replaces all rows and commits" in readme
+    assert "shared by requests and other app instances using the same schema" in readme
+    assert "Policy setup is the separate write path" not in readme
+def test_readme_explains_independent_rounding():
+    readme = " ".join(Path(__file__).with_name("README.md").read_text(encoding="utf-8").split())
+    assert "Changes and margin direction use unrounded aggregates." in readme
+    assert "SQL rounds period metrics and changes independently to two decimal places" in readme
+    assert "subtracting displayed endpoints may give a different result" in readme
+def test_readme_documents_request_time_policy_writes():
+    readme = " ".join(Path(__file__).with_name("README.md").read_text(encoding="utf-8").split())
+    assert "`search_policies()` calls `ensure_policies()` on every policy search" in readme
+    assert "creates `policy_chunks` if absent" in readme
+    assert "source documents or selected embedding backend change" in readme
+    assert "`CREATE TABLE`" in readme and "tablespace quota" in readme
+    assert "`SELECT`, `DELETE`, and `INSERT` access to `policy_chunks`" in readme
+    assert "Running `python policies.py` once does not make SELECT-only runtime permissions sufficient." in readme
 def test_readme_documents_required_oracle_configuration():
     root = Path(__file__).parent
     readme = (root / "README.md").read_text(encoding="utf-8")
@@ -108,6 +168,27 @@ def test_readme_documents_required_oracle_configuration():
         assert is_empty, f"{name} must be blank in .env.example"
 
 
+def test_setup_files_are_present():
+    root = Path(__file__).parent
+    for name in (
+        "requirements.txt", ".env.example", "data/oracle_load.sql",
+        "docs/freight_contract_memo.md", "docs/pricing_policy.md",
+        "docs/regional_playbook.md", "docs/west_q3_volume_push.md",
+    ):
+        path = root / name
+        assert path.is_file(), f"Missing setup file: {name}"
+        assert path.read_text(encoding="utf-8").strip(), f"Empty setup file: {name}"
+
+
+def test_readme_includes_initial_business_data_load():
+    readme = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
+    setup = readme.split("```powershell", 1)[1].split("```", 1)[0]
+    assert setup.index("docker start oracle-free") < setup.index("python load.py")
+    assert setup.index("python load.py") < setup.index("python policies.py")
+    assert "only once" in readme.lower()
+    assert "skip" in readme.lower()
+
+
 @pytest.mark.parametrize("sql", [
     "DELETE FROM sales", "DROP TABLE sales", "UPDATE sales SET quantity=0",
     "INSERT INTO sales (sale_id) VALUES (0)", "ALTER TABLE sales ADD x NUMBER",
@@ -120,6 +201,7 @@ def test_readme_documents_required_oracle_configuration():
     "SELECT UTL_HTTP.REQUEST('https://example.com') FROM sales",
     "SELECT * FROM sales UNION ALL SELECT * FROM sales",
     "SELECT * FROM sales FOR UPDATE SKIP LOCKED", "SELECT * FROM sales; COMMIT",
+    "SELECT * FROM \u017fales", "SELECT * FROM d\u0131scounts",
     "SELECT 'unterminated FROM sales",
 ])
 def test_guard_refuses_before_connect(sql, monkeypatch):
@@ -133,6 +215,20 @@ def test_guard_refuses_before_connect(sql, monkeypatch):
 def test_guard_accepts_comments_and_harmless_string():
     tools.validate_select("/* report */ SELECT COUNT(*) FROM sales WHERE sale_month=:month;")
     tools.validate_select("SELECT 'DROP TABLE sales' AS harmless FROM regions")
+
+
+@pytest.mark.parametrize("name", ["sales", "costs", "customers", "discounts", "products", "regions"])
+def test_guard_resolves_oracle_table_names(name, monkeypatch):
+    for identifier in (name, name.upper(), name.capitalize(), f'"{name.upper()}"'):
+        tools.validate_select(f"SELECT * FROM {identifier}")
+
+    def forbidden_connection():
+        pytest.fail("Rejected SQL must never connect")
+
+    monkeypatch.setattr(tools, "connect", forbidden_connection)
+    for identifier in (f'"{name}"', f'"{name.capitalize()}"'):
+        with pytest.raises(ValueError, match="Only governed business tables"):
+            tools.run_sql(f"SELECT * FROM sales JOIN {identifier} ON 1=1")
 
 
 @pytest.fixture
@@ -151,6 +247,17 @@ def test_critic_drops_unsupported_numbers_and_preserves_valid(sample_evidence):
     kept, dropped = critique([valid, invented, uncited, bad_policy], sample_evidence)
     assert kept == [valid]
     assert len(dropped) == 3
+
+
+def test_readme_documents_unchecked_spelled_out_numbers():
+    claim = {"parts": [{"text": "Sales were five million."}]}
+    assert critique([claim], {}) == ([claim], [])
+
+    readme = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
+    documentation = " ".join(readme.lower().split())
+    assert "numbers written as words" in documentation
+    assert "five million" in documentation
+    assert "can pass without a citation" in documentation
 
 
 @pytest.mark.parametrize("change", [
@@ -177,6 +284,9 @@ def test_critic_preserves_cited_negative_value(sample_evidence):
     sample_evidence["E1"]["rows"][0]["margin"] = -25.53
     claim = {"parts": [{"text": "Margin: "},
         {"value": -25.53, "suffix": "%", "evidence": "E1", "row": 0, "column": "margin"}]}
+    assert critique([claim], sample_evidence) == ([claim], [])
+
+
 @pytest.mark.parametrize("suffix", [" million", " billion", "k", "M", "e6", "0", " percent", None])
 def test_critic_rejects_unsupported_suffixes(sample_evidence, suffix):
     claim = {"parts": [{"value": 25.53, "suffix": suffix,
@@ -206,6 +316,13 @@ def test_critic_rejects_units_and_magnitudes_in_adjacent_text(sample_evidence, m
     assert critique([claim], sample_evidence) == ([], [claim])
 
 
+def test_critic_documents_limit_of_adjacent_modifier_check(sample_evidence):
+    claim = {"parts": [
+        {"value": 25.53, "evidence": "E1", "row": 0, "column": "margin"},
+        {"text": " (in millions)"}]}
+    assert critique([claim], sample_evidence) == ([claim], [])
+    doc = " ".join(critique.__doc__.split())
+    assert "does not catch other wording such as ' (in millions)'" in doc
 def test_critic_documents_unchecked_text_modifiers(sample_evidence):
     claim = {"parts": [
         {"value": 25.53, "evidence": "E1", "row": 0, "column": "margin"},
@@ -235,7 +352,7 @@ def test_policy_probe_propagates_unexpected_failures(failure, tmp_path, monkeypa
     connection.__enter__.return_value = connection
     cursor = connection.cursor.return_value
     cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
-    cursor.execute.return_value.fetchall.side_effect = [[("BROKEN_MODEL",)], []]
+    cursor.execute.return_value.fetchall.side_effect = [[("BROKEN_MODEL", "created", 1)], []]
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
 
@@ -266,7 +383,8 @@ def test_policy_probe_fallback_is_explicit_and_sanitized(
     connection.__enter__.return_value = connection
     cursor = connection.cursor.return_value
     cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
-    cursor.execute.return_value.fetchall.side_effect = [models, []]
+    cursor.execute.return_value.fetchall.side_effect = [
+        [(name, "created", i) for i, (name,) in enumerate(models)], []]
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
 
@@ -296,7 +414,8 @@ def test_policy_probe_skips_unsupported_names(unsupported, later_model, tmp_path
     cursor = connection.cursor.return_value
     cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
     models = [(unsupported,)] + ([(later_model,)] if later_model else [])
-    cursor.execute.return_value.fetchall.side_effect = [models, []]
+    cursor.execute.return_value.fetchall.side_effect = [
+        [(name, "created", i) for i, (name,) in enumerate(models)], []]
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
 
@@ -334,6 +453,117 @@ def test_policy_chunks_fit_byte_limit(character, tmp_path, monkeypatch):
     connection.commit.assert_called_once()
 
 
+@pytest.mark.parametrize("paragraph", [
+    "a" * 999 + "bc" + "d" * 299,
+    "a" * 999 + " " + "b" * 300,
+    "a" * 999 + " " + "b" * 1300,
+], ids=["split-word", "boundary-space", "space-across-chunks"])
+def test_long_policy_paragraph_preserves_text_and_embedding(paragraph, tmp_path, monkeypatch):
+    content = paragraph + "\n\nNext paragraph."
+    (tmp_path / "policy.md").write_text(content, encoding="utf-8")
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
+    cursor.execute.return_value.fetchall.return_value = []
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+
+    ensure_policies()
+
+    inserted = [call.kwargs for call in cursor.execute.call_args_list
+                if call.args[0].lstrip().startswith("INSERT INTO policy_chunks")]
+    assert "".join(row["chunk"] for row in inserted) == content
+    assert all(row["vector"] == hash_embedding(row["chunk"]) for row in inserted)
+
+
+def test_policy_refresh_replaces_legacy_chunks_once(tmp_path, monkeypatch):
+    content = "a" * 1300
+    (tmp_path / "policy.md").write_text(content, encoding="utf-8")
+    legacy_hash = hashlib.sha256(repr([("policy.md", content)]).encode()).hexdigest()
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
+    cursor.execute.return_value.fetchall.side_effect = [[], [("hash-v1-512", legacy_hash)]]
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+
+    ensure_policies()
+
+    inserted = [call.kwargs for call in cursor.execute.call_args_list
+                if call.args[0].lstrip().startswith("INSERT INTO policy_chunks")]
+    assert inserted and inserted[0]["chunk"] == content
+    new_hash = inserted[0]["fingerprint"]
+    assert new_hash != legacy_hash
+    connection.commit.assert_called_once()
+
+    cursor.execute.reset_mock()
+    connection.commit.reset_mock()
+    cursor.execute.return_value.fetchall.side_effect = [[], [("hash-v1-512", new_hash)]]
+    ensure_policies()
+    assert not any(call.args[0].lstrip().startswith(("DELETE", "INSERT"))
+                   for call in cursor.execute.call_args_list)
+    connection.commit.assert_not_called()
+
+
+def test_policy_refresh_rechunks_model_versioned_cache(tmp_path, monkeypatch):
+    paragraph = "a" * 999 + "bc" + "d" * 299
+    sources = [("a.md", paragraph), ("b.md", "Shared policy")]
+    for name, content in sources:
+        (tmp_path / name).write_text(content, encoding="utf-8")
+
+    backend = "hash-v1-512"
+    version = "v" + hashlib.sha256(repr((backend,)).encode()).hexdigest()[:31]
+    old_hash = version + hashlib.sha256(repr(sources).encode()).hexdigest()[:32]
+    rows = [
+        {"backend": backend, "fingerprint": old_hash,
+         "chunk": paragraph[:1000] + "\n\n" + paragraph[1000:], "vector": "old long vector"},
+        {"backend": backend, "fingerprint": old_hash,
+         "chunk": "Shared policy", "vector": "shared vector"},
+    ]
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.fetchone.return_value = ("POLICY_CHUNKS",)
+
+    def execute(sql, **params):
+        if sql.startswith("SELECT model_name"):
+            cursor.fetchall.return_value = []
+        elif sql.startswith("SELECT DISTINCT backend, source_hash"):
+            cursor.fetchall.return_value = list({(row["backend"], row["fingerprint"]) for row in rows})
+        elif sql.startswith("SELECT chunk, embedding FROM policy_chunks"):
+            cursor.fetchall.return_value = [(row["chunk"], row["vector"]) for row in rows
+                                           if row["backend"] == params["backend"]
+                                           and row["fingerprint"].startswith(params["version"])]
+        elif sql.startswith("DELETE FROM policy_chunks"):
+            rows.clear()
+        elif sql.startswith("INSERT INTO policy_chunks"):
+            rows.append(params)
+        return cursor
+
+    cursor.execute.side_effect = execute
+    embed = MagicMock(side_effect=lambda cur, text, model: "new vector for " + text)
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+    monkeypatch.setattr("policies.embed", embed)
+
+    assert ensure_policies() == backend
+    embed.assert_called_once_with(cursor, paragraph, backend)
+    assert [(row["doc"], row["chunk"], row["vector"]) for row in rows] == [
+        ("a.md", paragraph, "new vector for " + paragraph),
+        ("b.md", "Shared policy", "shared vector"),
+    ]
+    assert all(row["fingerprint"].startswith(version) and row["fingerprint"] != old_hash
+               for row in rows)
+    connection.commit.assert_called_once()
+
+    embed.reset_mock()
+    assert ensure_policies() == backend
+    embed.assert_not_called()
+    connection.commit.assert_called_once()
+
+
 def test_empty_policy_documents_preserve_existing_rows(tmp_path, monkeypatch):
     (tmp_path / "empty.md").write_text(" \n\t\n ", encoding="utf-8")
     connection = MagicMock()
@@ -350,6 +580,91 @@ def test_empty_policy_documents_preserve_existing_rows(tmp_path, monkeypatch):
     assert not any(call.args[0].lstrip().startswith(("DELETE", "INSERT"))
                    for call in cursor.execute.call_args_list)
     connection.commit.assert_not_called()
+
+
+def test_policy_refresh_reuses_chunk_embeddings_by_model(tmp_path, monkeypatch):
+    documents = [tmp_path / name for name in ("a.md", "b.md", "c.md")]
+    for document, content in zip(documents, ("Old policy", "Shared policy", "Shared policy")):
+        document.write_text(content, encoding="utf-8")
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.fetchone.return_value = ("POLICY_CHUNKS",)
+    # Legacy rows have no recorded model revision and must be refreshed once.
+    rows = [{"backend": "MODEL_V1", "fingerprint": "0" * 64,
+             "chunk": "Shared policy", "vector": "legacy vector"}]
+    model = ["MODEL_V1", "created", 100]
+    embedding_calls = []
+
+    def execute(sql, **params):
+        if sql.startswith("SELECT model_name"):
+            cursor.fetchall.return_value = [tuple(model)]
+        elif sql.startswith("SELECT DISTINCT backend, source_hash"):
+            cursor.fetchall.return_value = list({(row["backend"], row["fingerprint"]) for row in rows})
+        elif sql.startswith("SELECT chunk, embedding FROM policy_chunks"):
+            cursor.fetchall.return_value = [(row["chunk"], row["vector"]) for row in rows
+                                           if row["backend"] == params["backend"]
+                                           and row["fingerprint"].startswith(params["version"])]
+        elif sql.startswith("DELETE FROM policy_chunks"):
+            rows.clear()
+        elif sql.startswith("INSERT INTO policy_chunks"):
+            rows.append(params)
+        return cursor
+
+    def embedding(cur, text, backend):
+        if text == "Business policy":  # The model compatibility probe is not a chunk.
+            return "probe"
+        embedding_calls.append((backend, text))
+        if text == "Rejected policy":
+            raise RuntimeError("embedding failed")
+        return f"{backend}:{model[2]}:{text}"
+
+    cursor.execute.side_effect = execute
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+    monkeypatch.setattr("policies.embed", embedding)
+
+    assert ensure_policies() == "MODEL_V1"
+    initial_calls = embedding_calls[:]
+    original_shared_vector = rows[1]["vector"]
+    original_fingerprint = rows[0]["fingerprint"]
+    embedding_calls.clear()
+    commits = connection.commit.call_count
+    assert ensure_policies() == "MODEL_V1"
+    assert not embedding_calls
+    assert connection.commit.call_count == commits
+    documents[0].write_text("Updated policy", encoding="utf-8")
+
+    assert ensure_policies() == "MODEL_V1"
+    assert embedding_calls == [("MODEL_V1", "Updated policy")]
+    assert initial_calls == [("MODEL_V1", "Old policy"), ("MODEL_V1", "Shared policy")]
+    assert [(row["id"], row["doc"], row["chunk"], row["vector"]) for row in rows] == [
+        (1, "a.md", "Updated policy", "MODEL_V1:100:Updated policy"),
+        (2, "b.md", "Shared policy", original_shared_vector),
+        (3, "c.md", "Shared policy", original_shared_vector),
+    ]
+    assert len({row["fingerprint"] for row in rows}) == 1
+    assert rows[0]["fingerprint"] != original_fingerprint
+
+    model[2] = 101  # Replacing a model can keep its name but changes its object ID.
+    embedding_calls.clear()
+    assert ensure_policies() == "MODEL_V1"
+    assert embedding_calls == [("MODEL_V1", "Updated policy"), ("MODEL_V1", "Shared policy")]
+    assert all(row["vector"] == f'MODEL_V1:101:{row["chunk"]}' for row in rows)
+
+    model[0] = "MODEL_V2"
+    embedding_calls.clear()
+    assert ensure_policies() == "MODEL_V2"
+    assert embedding_calls == [("MODEL_V2", "Updated policy"), ("MODEL_V2", "Shared policy")]
+    assert all(row["vector"] == f'MODEL_V2:101:{row["chunk"]}' for row in rows)
+
+    previous_rows = copy.deepcopy(rows)
+    commits = connection.commit.call_count
+    documents[0].write_text("Rejected policy", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="embedding failed"):
+        ensure_policies()
+    assert rows == previous_rows
+    assert connection.commit.call_count == commits
 
 
 def test_delayed_policy_refresh_preserves_newer_content(tmp_path, monkeypatch):
@@ -407,6 +722,163 @@ def test_delayed_policy_refresh_preserves_newer_content(tmp_path, monkeypatch):
     connection.commit.assert_called_once()
 
 
+def test_concurrent_policy_refreshes_do_not_overwrite_newer_content(tmp_path, monkeypatch):
+    document = tmp_path / "policy.md"
+    document.write_text("Old policy", encoding="utf-8")
+    old_embedding = threading.Event()
+    resume_old = threading.Event()
+    second_progress = threading.Event()
+    second_waiting = threading.Event()
+    second_read = threading.Event()
+    worker = threading.local()
+    database_lock = threading.Lock()
+    rows_lock = threading.Lock()
+    rows = []
+
+    class Sources:
+        def glob(self, pattern):
+            if worker.name == "new":
+                second_read.set()
+                second_progress.set()
+            return [document]
+
+    class Connection:
+        def __init__(self):
+            self.locked = False
+            self.pending = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.release()
+
+        def release(self):
+            if self.locked:
+                self.locked = False
+                database_lock.release()
+
+        def cursor(self):
+            return Cursor(self)
+
+        def commit(self):
+            if self.pending is not None:
+                with rows_lock:
+                    rows[:] = self.pending
+            self.release()
+
+    class Cursor:
+        def __init__(self, connection):
+            self.connection = connection
+            self.result = []
+
+        def execute(self, sql, **params):
+            sql = " ".join(sql.upper().split())
+            if sql.startswith("SELECT TABLE_NAME FROM USER_TABLES"):
+                self.result = [("POLICY_CHUNKS",)]
+            elif sql == "LOCK TABLE POLICY_CHUNKS IN EXCLUSIVE MODE":
+                if worker.name == "new" and database_lock.locked():
+                    second_waiting.set()
+                    second_progress.set()
+                assert database_lock.acquire(timeout=10), "Database lock was not released"
+                self.connection.locked = True
+            elif sql.startswith("SELECT MODEL_NAME, CREATION_DATE,"):
+                self.result = []
+            elif sql.startswith("SELECT DISTINCT BACKEND, SOURCE_HASH FROM POLICY_CHUNKS"):
+                with rows_lock:
+                    self.result = [(row["backend"], row["fingerprint"]) for row in rows]
+            elif sql.startswith("SELECT CHUNK, EMBEDDING FROM POLICY_CHUNKS"):
+                with rows_lock:
+                    self.result = [
+                        (row["chunk"], row["vector"]) for row in rows
+                        if row["backend"] == params["backend"]
+                        and row["fingerprint"].startswith(params["version"])
+                    ]
+            elif sql.startswith("DELETE FROM POLICY_CHUNKS"):
+                self.connection.pending = []
+            elif sql.startswith("INSERT INTO POLICY_CHUNKS"):
+                self.connection.pending.append(params)
+            else:
+                pytest.fail(f"Unexpected SQL: {sql}")
+            return self
+
+        def fetchone(self):
+            return self.result[0] if self.result else None
+
+        def fetchall(self):
+            return self.result
+
+    def embedding(cursor, text, backend):
+        if text == "Old policy":
+            old_embedding.set()
+            assert resume_old.wait(10), "Old refresh was not released"
+        return hash_embedding(text)
+
+    def refresh(name):
+        worker.name = name
+        return ensure_policies()
+
+    monkeypatch.setattr("policies.DOCS", Sources())
+    monkeypatch.setattr("policies.connect", Connection)
+    monkeypatch.setattr("policies.embed", embedding)
+    # Each process has its own threading lock; database sessions must coordinate.
+    monkeypatch.setattr("policies._lock", nullcontext())
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        old = executor.submit(refresh, "old")
+        try:
+            assert old_embedding.wait(10), "Old refresh did not start embedding"
+            document.write_text("Updated policy", encoding="utf-8")
+            new = executor.submit(refresh, "new")
+            assert second_progress.wait(10), "New refresh did not make progress"
+            if second_waiting.is_set():
+                assert not second_read.is_set()
+                assert not new.done()
+            else:
+                # Without the database lock, the new version commits first.
+                assert new.result(timeout=10) == "hash-v1-512"
+        finally:
+            resume_old.set()
+        assert old.result(timeout=10) == "hash-v1-512"
+        assert new.result(timeout=10) == "hash-v1-512"
+
+    assert [row["chunk"] for row in rows] == ["Updated policy"]
+
+
+@pytest.mark.parametrize("code", [955, 1031])
+def test_policy_table_creation_race(code, tmp_path, monkeypatch):
+    (tmp_path / "policy.md").write_text("Policy", encoding="utf-8")
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.fetchone.return_value = None
+    cursor.fetchall.return_value = []
+    failure = oracledb.DatabaseError(SimpleNamespace(code=code))
+
+    def execute(sql, **params):
+        if sql.lstrip().startswith("CREATE TABLE"):
+            raise failure
+        return cursor
+
+    cursor.execute.side_effect = execute
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+
+    if code == 955:
+        assert ensure_policies() == "hash-v1-512"
+        assert any(" ".join(call.args[0].upper().split()) ==
+                   "LOCK TABLE POLICY_CHUNKS IN EXCLUSIVE MODE"
+                   for call in cursor.execute.call_args_list)
+        connection.commit.assert_called_once()
+    else:
+        with pytest.raises(oracledb.DatabaseError) as caught:
+            ensure_policies()
+        assert caught.value is failure
+        assert not any(call.args[0].upper().startswith("LOCK TABLE")
+                       for call in cursor.execute.call_args_list)
+        connection.commit.assert_not_called()
+
+
 def test_policy_search_handles_empty_table(monkeypatch):
     connection = MagicMock()
     connection.__enter__.return_value = connection
@@ -430,11 +902,106 @@ def test_question_scope():
         parse_question("West and East")
 
 
-@pytest.mark.parametrize("column", ["discount_pct", "quantity", "unit_price"])
+@pytest.mark.parametrize("name, expected", [
+    ("Eastern", "East"), ("eAsTeRn", "East"),
+    ("Western", "West"), ("Southern", "South"), ("Central", "Central"),
+])
+def test_question_recognizes_region_adjectives(name, expected):
+    assert parse_question(f"Why did the {name} region's margin fall since July 2025?") == (expected, "2025-07")
+
+
+def test_question_counts_region_adjectives_as_the_same_region():
+    assert parse_question("East and Eastern since July 2025") == ("East", "2025-07")
+
+
+@pytest.mark.parametrize("regions", ["West and Eastern", "Western and East", "Southern and East"])
+def test_question_rejects_multiple_regions_with_adjectives(regions):
+    with pytest.raises(ValueError, match="one region"):
+        parse_question(f"{regions} since July 2025")
 @pytest.mark.parametrize("region_id", [1, 2])
 @pytest.mark.parametrize("month", ["2025-06", "2025-07"])
 @pytest.mark.parametrize("incomplete_when", ["both", "monthly", "summary"])
-def test_missing_discount_inputs_reject_analysis(column, region_id, month, incomplete_when, monkeypatch):
+def test_missing_net_revenue_rejects_analysis(region_id, month, incomplete_when, monkeypatch):
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West'), (2, 'East');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+        """)
+        for current_region in (1, 2):
+            for current_month in ("2025-06", "2025-07"):
+                con.execute("INSERT INTO sales VALUES (?, 1, ?, 90.0, 1, 100.0, 10)",
+                            (current_region, current_month))
+                con.execute("INSERT INTO costs VALUES (?, 1, ?, 60.0, 5.0)",
+                            (current_region, current_month))
+        sale_id = con.execute("INSERT INTO sales VALUES (?, 1, ?, 0, 1, 100.0, 0)",
+                              (region_id, month)).lastrowid
+
+        def set_revenue(value):
+            con.execute("UPDATE sales SET net_revenue=? WHERE rowid=?", (value, sale_id))
+
+        def execute(sql, params=None):
+            return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
+                con.execute(tools.validate_select(sql), params or {})]}
+
+        policies = MagicMock(return_value={"rows": []})
+        monkeypatch.setattr("agent.run_sql", execute)
+        monkeypatch.setattr("agent.search_policies", policies)
+        answer_question("West since July 2025")  # Zero revenue is present, not missing.
+        policies.reset_mock()
+
+        if incomplete_when != "summary":
+            set_revenue(None)
+        snapshots = []
+
+        def run_sql(sql, params=None):
+            result = execute(sql, params)
+            snapshots.append(result)
+            if len(snapshots) == 1:
+                if incomplete_when == "monthly":
+                    set_revenue(0)
+                elif incomplete_when == "summary":
+                    set_revenue(None)
+            return result
+
+        monkeypatch.setattr("agent.run_sql", run_sql)
+        with pytest.raises(RevenueDataQualityError, match="Missing net revenue"):
+            answer_question("West since July 2025")
+        policies.assert_not_called()
+        region = "West" if region_id == 1 else "East"
+        for index, snapshot in enumerate(snapshots):
+            row = next(row for row in snapshot["rows"] if row["region_name"] == region
+                       and (index == 1 or row["sale_month"] == month))
+            missing = incomplete_when == "both" or (index == 0) == (incomplete_when == "monthly")
+            assert row["missing_revenue_count"] == int(missing)
+            if missing and index == 0:
+                assert row["margin_pct"] is None
+            elif missing:
+                assert row["before_margin_pct"] is row["after_margin_pct"] is None
+        monthly = next(row for row in snapshots[0]["rows"]
+                       if row["region_name"] == region and row["sale_month"] == month)
+        summary = next(row for row in snapshots[1]["rows"] if row["region_name"] == region)
+        assert monthly["missing_revenue_count"] == (incomplete_when != "summary")
+        assert summary["missing_revenue_count"] == (incomplete_when != "monthly")
+
+        # Zero revenue is a real value; its costs still contribute to the margin.
+        set_revenue(0)
+        monkeypatch.setattr("agent.run_sql", execute)
+        result = answer_question("West since July 2025")
+        monthly = next(row for row in result["evidence"]["E1"]["rows"]
+                       if row["region_name"] == region and row["sale_month"] == month)
+        assert (monthly["revenue"], monthly["units"], monthly["margin_pct"]) == (90, 2, -44.44)
+        assert result["dropped_count"] == 0
+
+
+@pytest.mark.parametrize("column", ["discount_pct", "quantity", "unit_price", "net_revenue"])
+@pytest.mark.parametrize("region_id", [1, 2])
+@pytest.mark.parametrize("month", ["2025-06", "2025-07"])
+@pytest.mark.parametrize("incomplete_when", ["both", "monthly", "summary"])
+def test_missing_sales_inputs_reject_analysis(column, region_id, month, incomplete_when, monkeypatch):
     with sqlite3.connect(":memory:") as con:
         con.row_factory = sqlite3.Row
         con.executescript("""
@@ -452,6 +1019,8 @@ def test_missing_discount_inputs_reject_analysis(column, region_id, month, incom
                             (current_region, current_month))
         sale_id = con.execute("INSERT INTO sales VALUES (?, 1, ?, 100.0, 1, 100.0, 0)",
                               (region_id, month)).lastrowid
+        if column == "net_revenue":
+            con.execute("UPDATE sales SET net_revenue=0 WHERE rowid=?", (sale_id,))
 
         def execute(sql, params=None):
             return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
@@ -473,7 +1042,7 @@ def test_missing_discount_inputs_reject_analysis(column, region_id, month, incom
         def set_input(value):
             con.execute(f"UPDATE sales SET {column}=? WHERE rowid=?", (value, sale_id))
 
-        valid_value = {"discount_pct": 0, "quantity": 1, "unit_price": 100.0}[column]
+        valid_value = {"discount_pct": 0, "quantity": 1, "unit_price": 100.0, "net_revenue": 0}[column]
         if incomplete_when != "summary":
             set_input(None)
         snapshots = []
@@ -489,16 +1058,34 @@ def test_missing_discount_inputs_reject_analysis(column, region_id, month, incom
             return result
 
         monkeypatch.setattr("agent.run_sql", run_sql)
-        with pytest.raises(ValueError, match="Missing discount inputs"):
+        error = RevenueDataQualityError if column == "net_revenue" else DiscountDataQualityError
+        message = "Missing net revenue" if column == "net_revenue" else "Missing discount inputs"
+        with pytest.raises(error, match=message):
             answer_question("West since July 2025")
         policies.assert_not_called()
-        for snapshot in snapshots:
+        assert len(snapshots) == 2
+        for index, snapshot in enumerate(snapshots):
             for row in snapshot["rows"]:
-                if row["missing_discount_count"]:
+                if column == "net_revenue":
+                    incomplete = incomplete_when == "both" or incomplete_when == (
+                        "monthly" if index == 0 else "summary")
+                    affected = row["region_name"] == region and (
+                        "sale_month" not in row or row["sale_month"] == month)
+                    assert row["missing_revenue_count"] == int(incomplete and affected)
+                elif row["missing_discount_count"]:
                     if "sale_month" in row:
                         assert row["discount_pct"] is None
                     else:
                         assert row[f"{period}_discount_pct"] is None
+
+        set_input(None)
+        monkeypatch.setattr("agent.run_sql", execute)
+        response = app.test_client().post("/", data={"question": "West since July 2025"})
+        assert response.status_code == 503
+        message = (b"Correct missing net revenue for sales, then retry." if column == "net_revenue"
+                   else b"Correct missing discount, quantity, or unit price inputs, then retry.")
+        assert message in response.data
+        policies.assert_not_called()
 
 
 @pytest.mark.parametrize("region_id", [1, 2])
@@ -537,12 +1124,13 @@ def test_missing_monthly_costs_reject_incomplete_analysis(region_id, month, prod
         policies = MagicMock(return_value={"rows": []})
         monkeypatch.setattr("agent.run_sql", run_sql)
         monkeypatch.setattr("agent.search_policies", policies)
-        with pytest.raises(ValueError, match="Missing monthly costs"):
+        with pytest.raises(DataQualityError, match="Missing monthly costs"):
             answer_question("West since July 2025")
         policies.assert_not_called()
         response = app.test_client().post("/", data={"question": "West since July 2025"})
         assert response.status_code == 503
-        assert b"Missing monthly costs" not in response.data
+        assert b"Missing monthly costs or duplicate cost rows" in response.data
+        assert b"Correct missing, incomplete, or duplicate monthly cost records, then retry." in response.data
 
         if cost is None:
             con.execute("INSERT INTO costs VALUES (?, ?, ?, 60.0, 5.0)",
@@ -589,7 +1177,7 @@ def test_monthly_evidence_rejects_null_costs_repaired_before_summary(
         policies = MagicMock(return_value={"rows": []})
         monkeypatch.setattr("agent.run_sql", run_sql)
         monkeypatch.setattr("agent.search_policies", policies)
-        with pytest.raises(ValueError, match="Missing monthly costs"):
+        with pytest.raises(DataQualityError, match="Missing monthly costs"):
             answer_question("West since July 2025")
         assert calls == 2
         policies.assert_not_called()
@@ -651,9 +1239,15 @@ def test_duplicate_monthly_costs_reject_analysis(region_id, unit_cogs, duplicate
             return rows
 
         monkeypatch.setattr("agent.run_sql", run_sql)
-        with pytest.raises(ValueError, match="duplicate"):
+        with pytest.raises(DataQualityError, match="duplicate"):
             answer_question("West since July 2025")
         policies.assert_not_called()
+        if duplicate_when == "monthly":
+            insert_duplicate()
+        monkeypatch.setattr("agent.run_sql", execute)
+        response = app.test_client().post("/", data={"question": "West since July 2025"})
+        assert response.status_code == 503
+        assert b"Correct missing, incomplete, or duplicate monthly cost records, then retry." in response.data
 
 
 @pytest.mark.parametrize("rows", [[], [{"region_name": "East"}]])
@@ -665,6 +1259,42 @@ def test_missing_region_has_descriptive_validation_error(monkeypatch, rows):
     response = app.test_client().post("/", data={"question": "West"})
     assert response.status_code == 400
     assert b"No sales/cost data found for West" in response.data
+
+
+@pytest.mark.parametrize("cutoff,valid", [
+    ("2025-02", False), ("2025-03", False), ("2025-08", True), ("2025-09", False),
+])
+def test_cutoff_error_shows_selected_region_coverage(monkeypatch, cutoff, valid):
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'East'), (2, 'West');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+        """)
+        for region_id, months in ((1, ("2025-01", "2025-12")), (2, ("2025-03", "2025-08"))):
+            for month in months:
+                con.execute("INSERT INTO sales VALUES (?, 1, ?, 100.0, 1, 100.0, 0)", (region_id, month))
+                con.execute("INSERT INTO costs VALUES (?, 1, ?, 60.0, 5.0)", (region_id, month))
+
+        def run_sql(sql, params=None):
+            return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
+                con.execute(tools.validate_select(sql), params or {})]}
+
+        policies = MagicMock(return_value={"rows": []})
+        monkeypatch.setattr("agent.run_sql", run_sql)
+        monkeypatch.setattr("agent.search_policies", policies)
+        response = app.test_client().post("/", data={"question": f"West since {cutoff}"})
+
+        assert response.status_code == (200 if valid else 400)
+        if not valid:
+            assert b"West sales are available from 2025-03 through 2025-08" in response.data
+            assert b"cutoff must be after the first month and no later than the last month" in response.data
+            policies.assert_not_called()
+
+
 @pytest.mark.parametrize("before,after,direction,below_precision", [
     (25.001, 25.004, "rose", True),
     (25.004, 25.001, "fell", True),
@@ -711,6 +1341,49 @@ def test_margin_direction_uses_unrounded_sql(before, after, direction, below_pre
     assert result["dropped_count"] == 0
 
 
+@pytest.mark.parametrize("available_period,margin", [
+    ("before", 35), ("after", 35), ("before", 0), ("after", 0),
+])
+def test_comparison_keeps_available_margin_when_other_period_is_empty(available_period, margin, monkeypatch):
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West'), (2, 'East');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+        """)
+        for region_id, month, value in (
+            (1, "2025-06", 40), (1, "2025-07", 25),
+            (2, "2025-06" if available_period == "before" else "2025-07", margin),
+        ):
+            con.execute("INSERT INTO sales VALUES (?, 1, ?, 100.0, 1, 100.0, 0)", (region_id, month))
+            con.execute("INSERT INTO costs VALUES (?, 1, ?, ?, 5)", (region_id, month, 95 - value))
+
+        def run_sql(sql, params=None):
+            return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
+                con.execute(tools.validate_select(sql), params or {})]}
+
+        monkeypatch.setattr("agent.run_sql", run_sql)
+        monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
+        result = answer_question("West since July 2025")
+
+    comparison = next(claim for claim in result["claims"] if claim["kind"] == "comparison")
+    rendered = "".join(part.get("text", str(part.get("value", "")) + part.get("suffix", ""))
+                       for part in comparison["parts"])
+    missing_period = "after" if available_period == "before" else "before"
+    assert f"{margin}.0% {available_period}" in rendered
+    assert f"unavailable {missing_period}" in rendered
+    parts = [part for part in comparison["parts"] if "value" in part]
+    assert len(parts) == 1
+    assert parts[0]["column"] == f"{available_period}_margin_pct"
+    assert parts[0]["evidence"] == "E2"
+    assert result["evidence"]["E2"]["rows"][parts[0]["row"]]["region_name"] == "East"
+    assert supported(parts[0], result["evidence"])
+    assert result["dropped_count"] == 0
+
+
 def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
     row = {
         "region_name": "West", "first_month": "2025-01", "last_month": "2025-09",
@@ -720,7 +1393,7 @@ def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
         "before_discount_pct": 3, "after_discount_pct": 18,
         "before_freight_per_unit": 0, "after_freight_per_unit": 5,
         "freight_increase_pct": None,
-        "missing_cost_count": 0, "missing_discount_count": 0,
+        "missing_cost_count": 0, "missing_discount_count": 0, "missing_revenue_count": 0,
     }
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
         "sql": sql, "params": params or {}, "rows": [row]})
@@ -741,6 +1414,141 @@ def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
         for part in finding["parts"]:
             if "value" in part:
                 assert supported(part, result["evidence"])
+
+
+@pytest.mark.parametrize("zero_period", ["before", "after", "both"])
+def test_zero_revenue_preserves_available_metrics(zero_period, monkeypatch):
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West'), (2, 'East');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+        """)
+        for region_id in (1, 2):
+            for period, month, freight in (("before", "2025-06", 5), ("after", "2025-07", 8)):
+                zero = (region_id == 1 and zero_period in (period, "both")) or (region_id == 2 and period == "after")
+                con.execute("INSERT INTO sales VALUES (?, 1, ?, ?, 1, 100, ?)",
+                            (region_id, month, 0 if zero else 90, 100 if zero else 10))
+                con.execute("INSERT INTO costs VALUES (?, 1, ?, 60, ?)", (region_id, month, freight))
+
+        def run_sql(sql, params=None):
+            return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
+                con.execute(tools.validate_select(sql), params or {})]}
+
+        monkeypatch.setattr("agent.run_sql", run_sql)
+        policies = [{"id": i, "doc": path.name, "chunk": path.read_text(encoding="utf-8").strip()}
+                    for i, path in enumerate(sorted(Path(__file__).with_name("docs").glob("*.md")), 1)]
+        monkeypatch.setattr("agent.search_policies", lambda _: {
+            "sql": "SELECT policy evidence", "params": {}, "rows": policies})
+        question = "West since July 2025"
+        result = answer_question(question)
+        response = app.test_client().post("/", data={"question": question})
+        assert response.status_code == 200
+
+        rows = {row["region_name"]: row for row in result["evidence"]["E2"]["rows"]}
+        findings = [claim for claim in result["claims"] if claim["kind"] == "finding"]
+        render = lambda claim: "".join(p.get("text", str(p.get("value", "")) + p.get("suffix", ""))
+                                       for p in claim["parts"]).lower()
+        margin = next(claim for claim in findings if "margin" in render(claim))
+        assert "unavailable" in render(margin) and "revenue" in render(margin)
+        assert "missing" not in render(margin)
+        assert "unchanged" not in render(margin)
+        cited = {part["column"] for part in margin["parts"] if "value" in part}
+        for period in ("before", "after"):
+            if zero_period in (period, "both"):
+                assert rows["West"][f"{period}_margin_pct"] is None
+                assert any(part.get("column") == f"{period}_revenue" and part.get("value") == 0
+                           and supported(part, result["evidence"]) for part in margin["parts"])
+            else:
+                assert f"{period}_margin_pct" in cited
+        for metric, values in (("discount", (100 if zero_period in ("before", "both") else 10,
+                                              100 if zero_period in ("after", "both") else 10)),
+                               ("freight", (5, 8))):
+            finding = next(claim for claim in findings if metric in render(claim))
+            columns = ("discount_pct" if metric == "discount" else "freight_per_unit")
+            for period, value in zip(("before", "after"), values):
+                assert rows["West"][f"{period}_{columns}"] == value
+                assert any(part.get("column") == f"{period}_{columns}" and supported(part, result["evidence"])
+                           for part in finding["parts"])
+        comparison = next(claim for claim in result["claims"] if claim["kind"] == "comparison")
+        assert "unavailable" in render(comparison)
+        assert any(part.get("column") == "before_margin_pct" and supported(part, result["evidence"])
+                   for part in comparison["parts"])
+        reason = next(claim for claim in result["claims"] if claim["kind"] == "reason")
+        assert reason["policy_ids"]
+        assert not any(direction in render(reason) for direction in ("unchanged", "decline", "fell", "rose"))
+        assert result["dropped_count"] == 0
+
+        # A genuinely absent period must still be rejected, even when the other has zero revenue.
+        for missing_month in ("2025-06", "2025-07"):
+            con.execute("SAVEPOINT missing_period")
+            con.execute("DELETE FROM sales WHERE region_id=1 AND sale_month=?", (missing_month,))
+            response = app.test_client().post("/", data={"question": question})
+            assert response.status_code == 400
+            assert b"sales both before and after" in response.data
+            con.execute("ROLLBACK TO missing_period")
+            con.execute("RELEASE missing_period")
+
+
+@pytest.mark.parametrize("missing_period", ["before", "after"])
+def test_missing_revenue_is_not_reported_as_zero(missing_period, monkeypatch):
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+        """)
+        for period, month, freight in (("before", "2025-06", 5), ("after", "2025-07", 8)):
+            if period == missing_period:
+                # The partial sum is zero, but a missing value means total revenue is unknown.
+                con.executemany("INSERT INTO sales VALUES (1, 1, ?, ?, 1, 100, ?)",
+                                [(month, None, 10), (month, 0, 100)])
+            else:
+                con.execute("INSERT INTO sales VALUES (1, 1, ?, 90, 1, 100, 10)", (month,))
+            con.execute("INSERT INTO costs VALUES (1, 1, ?, 60, ?)", (month, freight))
+
+        snapshots = []
+
+        def run_sql(sql, params=None):
+            result = {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
+                con.execute(tools.validate_select(sql), params or {})]}
+            snapshots.append(result)
+            return result
+
+        policies = MagicMock(return_value={"rows": []})
+        monkeypatch.setattr("agent.run_sql", run_sql)
+        monkeypatch.setattr("agent.search_policies", policies)
+        with pytest.raises(RevenueDataQualityError, match="Missing net revenue"):
+            answer_question("West since July 2025")
+        policies.assert_not_called()
+
+        month = "2025-06" if missing_period == "before" else "2025-07"
+        monthly = next(row for row in snapshots[0]["rows"] if row["sale_month"] == month)
+        row = snapshots[1]["rows"][0]
+        assert monthly["revenue"] == 0 and monthly["missing_revenue_count"] == 1
+        assert monthly["margin_pct"] is None
+        assert row["missing_revenue_count"] == 1
+        assert row[f"{missing_period}_revenue"] is None
+        assert row[f"{missing_period}_margin_pct"] is None
+        assert row[f"{missing_period}_discount_pct"] == 55
+        assert row[f"{missing_period}_freight_per_unit"] == (5 if missing_period == "before" else 8)
+
+        # Replacing the missing value with an actual zero permits the analysis.
+        con.execute("UPDATE sales SET net_revenue=0 WHERE net_revenue IS NULL")
+        result = answer_question("West since July 2025")
+        row = result["evidence"]["E2"]["rows"][0]
+        assert row[f"{missing_period}_revenue"] == 0
+        margin = next(c for c in result["claims"] if c["kind"] == "finding"
+                      and "margin" in c["parts"][0].get("text", "").lower())
+        assert any(part.get("column") == f"{missing_period}_revenue" and part.get("value") == 0
+                   and supported(part, result["evidence"]) for part in margin["parts"])
+        assert result["dropped_count"] == 0
 
 
 @pytest.mark.parametrize("unavailable_metric", ["discount", "freight"])
@@ -799,6 +1607,64 @@ def test_undefined_metric_preserves_other_metric(unavailable_metric, unavailable
     assert result["dropped_count"] == 0
 
 
+@pytest.mark.parametrize("missing_metric", ["discount", "freight"])
+@pytest.mark.parametrize("missing_period", ["before", "after"])
+def test_undefined_metric_does_not_hide_other_movement(missing_metric, missing_period, monkeypatch):
+    # Returns can make gross sales or units sum to zero while revenue remains nonzero.
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+        """)
+        for period, month, freight in (("before", "2025-06", 5.0), ("after", "2025-07", 8.0)):
+            sales = [(2, 10, 18, 10)]
+            if period == missing_period:
+                sales.append((-1, 20, -10, 50) if missing_metric == "discount"
+                             else (-2, 5, -9, 10))
+            for quantity, price, revenue, discount in sales:
+                con.execute("INSERT INTO sales VALUES (1, 1, ?, ?, ?, ?, ?)",
+                            (month, revenue, quantity, price, discount))
+            con.execute("INSERT INTO costs VALUES (1, 1, ?, 1, ?)", (month, freight))
+
+        def run_sql(sql, params=None):
+            return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
+                con.execute(tools.validate_select(sql), params or {})]}
+
+        monkeypatch.setattr("agent.run_sql", run_sql)
+        monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
+        result = answer_question("West since July 2025")
+
+    row = result["evidence"]["E2"]["rows"][0]
+    missing_column = "discount_pct" if missing_metric == "discount" else "freight_per_unit"
+    assert row[f"{missing_period}_{missing_column}"] is None
+    findings = [claim for claim in result["claims"] if claim["kind"] == "finding"]
+    missing = next(claim for claim in findings if missing_metric in claim["parts"][0]["text"].lower())
+    available_metric = "freight" if missing_metric == "discount" else "discount"
+    available = next(claim for claim in findings if available_metric in claim["parts"][0]["text"].lower())
+
+    def render(claim):
+        return "".join(part.get("text", str(part.get("value", "")) + part.get("suffix", ""))
+                       for part in claim["parts"])
+
+    assert f"{missing_period} unavailable" in render(missing).lower()
+    available_period = "after" if missing_period == "before" else "before"
+    available_column = f"{available_period}_{missing_column}"
+    assert any(part.get("column") == available_column and supported(part, result["evidence"])
+               for part in missing["parts"] if "value" in part)
+    if missing_metric == "freight":
+        assert "change: unavailable" in render(missing).lower()
+        assert render(available) == "Average discount: before 10.0%; after 10.0%."
+    else:
+        assert render(available) == "Freight per unit: before $5.0; after $8.0; change: 60.0%."
+    assert all(supported(part, result["evidence"]) for claim in (missing, available)
+               for part in claim["parts"] if "value" in part)
+    assert result["dropped_count"] == 0
+
+
 @pytest.fixture
 def policy_rows(monkeypatch):
     row = {
@@ -808,7 +1674,7 @@ def policy_rows(monkeypatch):
         "margin_direction": "fell", "before_discount_pct": 3, "after_discount_pct": 18,
         "before_freight_per_unit": 5, "after_freight_per_unit": 8,
         "freight_increase_pct": 60,
-        "missing_cost_count": 0, "missing_discount_count": 0,
+        "missing_cost_count": 0, "missing_discount_count": 0, "missing_revenue_count": 0,
     }
     policies = [{"id": i, "doc": path.name, "chunk": path.read_text(encoding="utf-8").strip()}
                 for i, path in enumerate(sorted(Path(__file__).with_name("docs").glob("*.md")), 1)]
@@ -868,7 +1734,31 @@ def test_updated_policy_source_invalidates_unchanged_retrieved_chunk(policy_rows
     result = answer_question("West since July 2025")
 
     assert not any(claim["kind"] == "reason" for claim in result["claims"])
-    assert len([claim for claim in result["claims"] if claim["kind"] == "action"]) == 3
+    assert not any(claim["kind"] == "action" for claim in result["claims"])
+    assert result["dropped_count"] == 0
+
+
+@pytest.mark.parametrize("revision", ["unchanged", "superseding", "missing"])
+def test_fixed_policy_claims_require_reviewed_complete_corpus(policy_rows, tmp_path, monkeypatch, revision):
+    for policy in policy_rows:
+        (tmp_path / policy["doc"]).write_text(policy["chunk"], encoding="utf-8")
+    if revision == "superseding":
+        (tmp_path / "superseding.md").write_text(
+            "The West discount push is revoked; do not follow the earlier freight recommendations.",
+            encoding="utf-8")
+    elif revision == "missing":
+        (tmp_path / "regional_playbook.md").unlink()
+    monkeypatch.setattr("agent.DOCS", tmp_path)
+
+    # The search results still contain only the original, unchanged chunks.
+    result = answer_question("West since July 2025")
+
+    policy_claims = [claim for claim in result["claims"] if claim["kind"] in {"reason", "action"}]
+    if revision == "unchanged":
+        assert [claim["kind"] for claim in policy_claims] == ["reason", "action", "action", "action"]
+    else:
+        assert policy_claims == []
+    assert len([claim for claim in result["claims"] if claim["kind"] == "finding"]) == 3
     assert result["dropped_count"] == 0
 
 
@@ -888,7 +1778,8 @@ def test_question_rejects_unsupported_explicit_dates(date):
 
 def test_question_defaults_only_without_date():
     assert parse_question("Why did West margin fall?") == ("West", "2025-07")
-@pytest.mark.parametrize("region", ["North", "north", "Northeast", "Northwest", "Southeast", "Southwest", "West and North"])
+@pytest.mark.parametrize("region", ["North", "north", "Northeast", "Northwest", "Southeast", "Southwest", "West and North",
+                                    "Northern", "Northeastern", "Northwestern", "Southeastern", "Southwestern", "West and Northern"])
 def test_unsupported_region_is_rejected_before_querying(monkeypatch, region):
     def forbidden_query(*args, **kwargs):
         pytest.fail("Unsupported regions must be rejected before querying")
@@ -912,7 +1803,7 @@ def retrieved_policy_rows(monkeypatch):
         "margin_direction": "fell", "before_discount_pct": 3, "after_discount_pct": 18,
         "before_freight_per_unit": 5, "after_freight_per_unit": 8,
         "freight_increase_pct": 60,
-        "missing_cost_count": 0, "missing_discount_count": 0,
+        "missing_cost_count": 0, "missing_discount_count": 0, "missing_revenue_count": 0,
     }
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
         "sql": sql, "params": params or {}, "rows": [summary]})
@@ -1037,10 +1928,95 @@ def test_real_select_and_bind(ending):
     assert result["sql"] == sql
 
 
+def test_fractional_oracle_numbers_remain_exact_in_evidence(monkeypatch):
+    sql = ("SELECT 9007199254740993.25 AS amount, -9007199254740993.25 AS negative_amount, "
+           "0.0000000000000000000000000001 AS tiny, 42 AS whole, NULL AS missing "
+           "FROM regions WHERE region_name=:name")
+    result = tools.run_sql(sql, {"name": "West"})
+    row = result["rows"][0]
+    assert row == {"amount": Decimal("9007199254740993.25"),
+                   "negative_amount": Decimal("-9007199254740993.25"),
+                   "tiny": Decimal("0.0000000000000000000000000001"),
+                   "whole": Decimal("42"), "missing": None}
+    assert all(isinstance(row[column], Decimal)
+               for column in ("amount", "negative_amount", "tiny", "whole"))
+
+    evidence = {"E1": {"kind": "sql", **result}}
+    part = {"value": row["amount"], "evidence": "E1", "row": 0, "column": "amount"}
+    assert supported(part, evidence)
+    assert not supported({**part, "value": "9007199254740994"}, evidence)
+    monkeypatch.setattr("app.answer_question", lambda _: {
+        "region": "West", "claims": [{"kind": "finding", "parts": [part], "policy_ids": []}],
+        "evidence": evidence,
+    })
+    response = app.test_client().post("/", data={"question": "West"})
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert ">9007199254740993.25</button>" in html
+    serialized = json.loads(re.search(r"const evidence = (.*?);", html).group(1))
+    assert serialized["E1"]["rows"][0] == {
+        "amount": "9007199254740993.25", "negative_amount": "-9007199254740993.25",
+        "tiny": "1E-28", "whole": "42", "missing": None,
+    }
+def test_sql_decimal_amount_is_exact_in_critic_and_browser(monkeypatch):
+    source = {"kind": "sql", **tools.run_sql(
+        "SELECT SUM(100000000000000.01) AS total FROM regions WHERE region_name=:name",
+        {"name": "West"})}
+    evidence = {"E1": source}
+    amount = source["rows"][0]["total"]
+    assert isinstance(amount, Decimal)
+    assert amount == Decimal("100000000000000.01")
+
+    part = {"value": "100000000000000.01", "evidence": "E1", "row": 0, "column": "total"}
+    assert supported(part, evidence)
+    assert not supported({**part, "value": "100000000000000.02"}, evidence)
+
+    monkeypatch.setattr("app.answer_question", lambda _: {
+        "region": "West", "claims": [{"kind": "finding", "parts": [part]}], "evidence": evidence})
+    response = app.test_client().post("/", data={"question": "West"})
+    assert response.status_code == 200
+    serialized = response.get_data(as_text=True).split("const evidence = ", 1)[1].split(";", 1)[0]
+    assert json.loads(serialized)["E1"]["rows"][0]["total"] == "100000000000000.01"
+    assert source["rows"][0]["total"] == amount
+
+
 def test_select_preserves_semicolon_in_string():
     result = tools.run_sql("SELECT 'West; -- report' AS label FROM regions WHERE region_name=:name; -- report",
                            {"name": "West"})
     assert result["rows"] == [{"label": "West; -- report"}]
+
+
+@pytest.mark.parametrize("host", [
+    "rebind.example:5055", "localhost.rebind.example:5055",
+    "evil.localhost:5055", "127.0.0.1.rebind.example:5055",
+    "localhost@rebind.example:5055",
+])
+@pytest.mark.parametrize("method", ["get", "post"])
+def test_ui_rejects_untrusted_hosts_before_analysis(monkeypatch, host, method):
+    analysis = MagicMock()
+    monkeypatch.setattr("app.answer_question", analysis)
+
+    response = getattr(app.test_client(), method)(
+        "/", headers={"Host": host}, data={"question": "West"},
+    )
+
+    assert response.status_code == 400
+    analysis.assert_not_called()
+
+
+@pytest.mark.parametrize("host", ["localhost", "localhost:5055", "127.0.0.1", "127.0.0.1:5055"])
+def test_ui_accepts_local_hosts(monkeypatch, host):
+    monkeypatch.setattr("app.answer_question", lambda _: {
+        "region": "West", "claims": [], "dropped_count": 0,
+        "evidence": {"E1": {"kind": "sql", "sql": "SELECT revenue FROM sales",
+                            "params": {}, "rows": [{"revenue": 12345}]}},
+    })
+    client = app.test_client()
+
+    assert client.get("/", headers={"Host": host}).status_code == 200
+    response = client.post("/", headers={"Host": host}, data={"question": "West"})
+    assert response.status_code == 200
+    assert b"SELECT revenue FROM sales" in response.data
 
 
 def test_flask_live_brief_and_evidence():
@@ -1053,6 +2029,106 @@ def test_flask_live_brief_and_evidence():
     assert b"VECTOR_DISTANCE" in response.data
     assert b"west_q3_volume_push.md" in response.data
     assert b"evidence-dialog" in response.data
+
+
+@pytest.mark.parametrize("missing_reason,missing_actions", [
+    (False, False), (True, False), (False, True), (True, True),
+])
+def test_ui_discloses_missing_explanation_and_actions(policy_rows, missing_reason, missing_actions):
+    for policy in policy_rows:
+        if ((missing_reason and policy["doc"] == "west_q3_volume_push.md") or
+                (missing_actions and policy["doc"] == "pricing_policy.md")):
+            policy["chunk"] = ""
+
+    response = app.test_client().post("/", data={"question": "West since July 2025"})
+
+    assert response.status_code == 200
+    assert b"West gross margin" in response.data
+    assert (b"No verified explanation is available for this brief." in response.data) == missing_reason
+    assert (b"No verified actions are available for this brief." in response.data) == missing_actions
+    assert (b"The policy documents identify a regional volume discount push" in response.data) == (not missing_reason)
+    assert (b"Review discount approvals with Sales and Finance" in response.data) == (not missing_actions)
+def test_brief_shows_selected_region_monthly_trend_with_cell_citations(monkeypatch):
+    rows = [
+        {"region_name": "East", "sale_month": "2025-06", "margin_pct": 70,
+         "discount_pct": 1, "freight_per_unit": 2},
+        {"region_name": "West", "sale_month": "2025-06", "margin_pct": 38.9,
+         "discount_pct": 0, "freight_per_unit": 5.4},
+        {"region_name": "East", "sale_month": "2025-07", "margin_pct": 71,
+         "discount_pct": 2, "freight_per_unit": 3},
+        {"region_name": "West", "sale_month": "2025-07", "margin_pct": None,
+         "discount_pct": 18.25, "freight_per_unit": 8.6},
+    ]
+    result = {"region": "West", "claims": [], "dropped_count": 0,
+              "evidence": {"E1": {"kind": "sql", "sql": "SELECT ...", "params": {}, "rows": rows}}}
+    monkeypatch.setattr("app.answer_question", lambda _: result)
+
+    class BriefTableParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.in_article = False
+            self.in_table = False
+            self.tables = []
+            self.current_row = None
+            self.cell = None
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "article":
+                self.in_article = True
+            elif self.in_article and tag == "table":
+                self.in_table = True
+                self.tables.append([])
+            elif self.in_table and tag == "tr":
+                self.current_row = []
+                self.tables[-1].append(self.current_row)
+            elif self.in_table and tag in ("th", "td"):
+                self.cell = {"text": "", "buttons": []}
+                self.current_row.append(self.cell)
+            elif self.cell is not None and tag == "button":
+                self.cell["buttons"].append(dict(attrs))
+
+        def handle_data(self, data):
+            if self.cell is not None:
+                self.cell["text"] += data
+
+        def handle_endtag(self, tag):
+            if tag in ("th", "td"):
+                self.cell = None
+            elif tag == "table":
+                self.in_table = False
+            elif tag == "article":
+                self.in_article = False
+
+    response = app.test_client().post("/", data={"question": "West"})
+    assert response.status_code == 200
+    parser = BriefTableParser()
+    parser.feed(response.get_data(as_text=True))
+    assert len(parser.tables) == 1
+    header, *body = parser.tables[0]
+    labels = [cell["text"].strip().lower() for cell in header]
+    assert len(labels) == 4
+    assert all(term in label for term, label in zip(("month", "margin", "discount", "freight"), labels))
+    assert len(body) == 2
+    for table_row, evidence_index in zip(body, (1, 3)):
+        assert len(table_row) == 4
+        for cell, column, label in zip(table_row, ("sale_month", "margin_pct", "discount_pct", "freight_per_unit"), labels):
+            value = rows[evidence_index][column]
+            displayed = cell["text"].strip()
+            if value is None:
+                assert displayed in ("N/A", "—", "-")
+                assert not cell["buttons"]
+                continue
+            assert len(cell["buttons"]) == 1
+            button = cell["buttons"][0]
+            assert button["data-evidence"] == "E1"
+            assert button["data-row"] == str(evidence_index)
+            assert button["data-column"] == column
+            if column == "sale_month":
+                assert displayed == value
+            else:
+                unit = "%" if column.endswith("_pct") else "$"
+                assert unit in displayed or unit in label
+                assert float(displayed.replace("%", "").replace("$", "").strip()) == value
 
 
 @pytest.mark.parametrize("has_claims,dropped_count", [(True, 0), (True, 2), (False, 2), (False, 0)])
@@ -1072,6 +2148,8 @@ def test_ui_discloses_dropped_claims_and_empty_brief(monkeypatch, has_claims, dr
     assert (b"No verified claims are available for this brief." in response.data) == (not has_claims)
     assert (b"Numbers in retained claims verified against cited SQL cells." in response.data) == has_claims
     assert (b"Retained finding." in response.data) == has_claims
+    assert b"No verified explanation is available for this brief." in response.data
+    assert b"No verified actions are available for this brief." in response.data
     assert b"Policy-backed explanation is unavailable for this brief." in response.data
     assert b"Policy-backed recommendations are unavailable for this brief." in response.data
     assert b"Explanation unavailable" in response.data
@@ -1146,7 +2224,7 @@ def test_ui_missing_question_rejected_before_querying(monkeypatch, data):
     assert response.status_code == 400
 
 
-def test_focus_indicator_contrasts_with_page_and_cards():
+def test_ui_boundaries_contrast_with_adjacent_backgrounds():
     html = app.test_client().get("/").get_data(as_text=True)
 
     def declaration(selector, name):
@@ -1164,36 +2242,80 @@ def test_focus_indicator_contrasts_with_page_and_cards():
                   for c in channels]
         return sum(weight * channel for weight, channel in zip((0.2126, 0.7152, 0.0722), linear))
 
-    outline = declaration(":focus-visible", "outline").split()[-1]
-    for surface in (declaration(":root", "background"), declaration(".card", "background")):
-        dark, light = sorted((luminance(outline), luminance(surface)))
-        contrast = (light + 0.05) / (dark + 0.05)
-        assert contrast >= 3, f"Focus outline {outline} has {contrast:.2f}:1 contrast against {surface}"
+    page = declaration(":root", "background")
+    for boundary, surfaces in (
+        (declaration(":focus-visible", "outline").split()[-1],
+         (page, declaration(".card", "background"))),
+        (declaration("input", "border").split()[-1],
+         (page, declaration("input", "background"))),
+    ):
+        for surface in surfaces:
+            dark, light = sorted((luminance(boundary), luminance(surface)))
+            contrast = (light + 0.05) / (dark + 0.05)
+            assert contrast >= 3, f"Boundary {boundary} has {contrast:.2f}:1 contrast against {surface}"
 
 
-def test_ui_restores_submit_button_on_pageshow():
-    html = app.test_client().get("/").get_data(as_text=True)
-    script = html.rsplit("<script>", 1)[1].split("</script>", 1)[0]
-    subprocess.run(["node", "-e", """
+@pytest.mark.parametrize("has_result", [False, True])
+def test_ui_allows_retry_after_stopped_submission(monkeypatch, has_result):
+    monkeypatch.setattr("app.answer_question", lambda _: {
+        "region": "West", "claims": [], "dropped_count": 0, "evidence": {},
+    })
+    client = app.test_client()
+    response = client.post("/", data={"question": "West"}) if has_result else client.get("/")
+    html = response.get_data(as_text=True)
+
+    class SubmitButtonParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.button = None
+            self.label = ""
+            self.in_button = False
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == "button" and attrs.get("class") == "submit":
+                self.button = attrs
+                self.in_button = True
+
+        def handle_data(self, data):
+            if self.in_button:
+                self.label += data
+
+        def handle_endtag(self, tag):
+            if tag == "button":
+                self.in_button = False
+
+    parser = SubmitButtonParser()
+    parser.feed(html)
+    assert parser.button is not None
+    assert parser.button.get("type") == "submit"
+    assert "disabled" not in parser.button
+    assert parser.label == "Analyze question"
+
+    scripts = "\n".join(re.findall(r"<script>(.*?)</script>", html, re.DOTALL))
+    check = subprocess.run(["node", "-e", """
         const assert = require('node:assert/strict');
         const handlers = {};
         const button = {disabled: false, textContent: 'Analyze question'};
-        const form = {addEventListener: (event, handler) => handlers[event] = handler};
+        const form = {addEventListener: (event, handler) => (handlers[event] ??= []).push(handler)};
+        const other = {addEventListener() {}};
         global.document = {
-            getElementById: () => form,
+            getElementById: id => id === 'question-form' ? form : other,
             querySelector: () => button,
+            querySelectorAll: () => [],
         };
-        global.window = {addEventListener: (event, handler) => handlers[event] = handler};
-    """ + script + """
-        for (let visit = 0; visit < 2; visit++) {
-            handlers.submit();
-            assert.equal(button.disabled, true);
-            assert.equal(button.textContent, 'Analyzing\u2026');
-            handlers.pageshow({persisted: true});
+        global.window = {addEventListener() {}};
+    """ + scripts + """
+        // A stopped navigation produces no pageshow; the same form must be retryable.
+        for (let attempt = 0; attempt < 2; attempt++) {
+            for (const handler of handlers.submit || []) handler({preventDefault() {}});
             assert.equal(button.disabled, false);
             assert.equal(button.textContent, 'Analyze question');
         }
-    """], check=True, capture_output=True, text=True)
+    """], capture_output=True, text=True)
+    assert check.returncode == 0, check.stderr
+
+
 def test_evidence_dialog_preserves_exact_integers(monkeypatch):
     values = [9007199254740993, -9007199254740993, 10**37 + 1,
               9007199254740991, 0, 42, 1.25, None, True, False, "text"]
@@ -1249,6 +2371,95 @@ def test_evidence_dialog_preserves_exact_integers(monkeypatch):
     assert check.returncode == 0, check.stderr
 
 
+def test_evidence_dialog_explains_empty_rows(monkeypatch):
+    result = {
+        "region": "West", "claims": [], "evidence": {
+            "E1": {"kind": "sql", "sql": "SELECT ...", "params": {}, "rows": []},
+            "E2": {"kind": "sql", "sql": "SELECT ...", "params": {},
+                   "rows": [{"region": "West"}]},
+        },
+    }
+    monkeypatch.setattr("app.answer_question", lambda _: result)
+    response = app.test_client().post("/", data={"question": "West"})
+    assert response.status_code == 200
+    script = response.get_data(as_text=True).split("<script>", 1)[1].split("</script>", 1)[0]
+    check = subprocess.run(["node", "-e", """
+        const assert = require('node:assert/strict');
+        class Element {
+            constructor() { this.children = []; this.value = ''; }
+            set textContent(value) { this.value = String(value); this.children = []; }
+            get textContent() { return this.value + this.children.map(child => typeof child === 'string' ? child : child.textContent).join(''); }
+            append(...children) { this.children.push(...children); }
+            replaceChildren(...children) { this.value = ''; this.children = children; }
+            addEventListener() {}
+            showModal() {}
+            querySelector() { return null; }
+            createTHead() { const child = new Element(); this.append(child); return child; }
+            createTBody() { const child = new Element(); this.append(child); return child; }
+            insertRow() { const child = new Element(); this.append(child); return child; }
+            insertCell() { const child = new Element(); this.append(child); return child; }
+        }
+        const elements = {};
+        const buttons = ['E1', 'E2'].map(id => ({
+            dataset: {evidence: id},
+            addEventListener: (_, handler) => { buttonsById[id] = handler; },
+        }));
+        const buttonsById = {};
+        global.document = {
+            getElementById: id => elements[id] ||= new Element(),
+            querySelectorAll: () => buttons,
+            createElement: () => new Element(),
+        };
+    """ + script + """
+        buttonsById.E2();
+        const rows = elements['evidence-rows'];
+        assert.match(rows.textContent, /West/);
+        buttonsById.E1();
+        assert.equal(rows.textContent.trim(), 'No rows returned');
+        buttonsById.E2();
+        assert.match(rows.textContent, /West/);
+        assert.doesNotMatch(rows.textContent, /No rows returned/);
+    """], capture_output=True, text=True)
+    assert check.returncode == 0, check.stderr
+def test_evidence_rows_region_is_keyboard_focusable_and_named(monkeypatch):
+    monkeypatch.setattr("app.answer_question", lambda _: {
+        "region": "West", "claims": [], "evidence": {},
+    })
+
+    class EvidenceParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.region = None
+            self.heading_id = None
+            self.rows_heading_id = None
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if attrs.get("id") == "evidence-rows":
+                self.region = (tag, attrs)
+            if tag == "h3":
+                self.heading_id = attrs.get("id")
+
+        def handle_data(self, data):
+            if data.strip() == "Returned rows":
+                self.rows_heading_id = self.heading_id
+
+        def handle_endtag(self, tag):
+            if tag == "h3":
+                self.heading_id = None
+
+    response = app.test_client().post("/", data={"question": "West"})
+    assert response.status_code == 200
+    parser = EvidenceParser()
+    parser.feed(response.get_data(as_text=True))
+    tag, attrs = parser.region
+    assert tag == "div"
+    assert "table-wrap" in attrs["class"].split()
+    assert attrs.get("tabindex") == "0"
+    assert attrs.get("role") == "region"
+    assert parser.rows_heading_id and attrs.get("aria-labelledby") == parser.rows_heading_id
+
+
 def test_evidence_dialog_identifies_cited_cell(monkeypatch):
     monkeypatch.setattr("app.answer_question", lambda _: {
         "region": "West", "claims": [], "evidence": {},
@@ -1262,6 +2473,150 @@ def test_evidence_dialog_identifies_cited_cell(monkeypatch):
     assert "td.append(' (Cited cell)');" in html
     assert "td.setAttribute('aria-describedby', 'evidence-description');" in html
     assert html.index("description.textContent = `Cited cell:") < html.index("dialog.showModal()")
+
+
+def test_numeric_buttons_describe_cited_metric_period_and_units(monkeypatch):
+    rows = [
+        {"region_name": "East", "first_month": "2025-02", "before_last_month": "2025-05",
+         "after_first_month": "2025-08", "last_month": "2025-10", "before_margin_pct": 5},
+        {"region_name": 'West & "Co"', "first_month": "2025-01",
+         "before_last_month": "2025-06", "after_first_month": "2025-07",
+         "last_month": "2025-09", "before_margin_pct": 5,
+         "after_margin_pct": 5, "before_discount_pct": 5,
+         "after_discount_pct": 5, "before_freight_per_unit": 5,
+         "after_freight_per_unit": 5, "margin_drop_pts": 0,
+         "freight_increase_pct": 0},
+    ]
+    citations = [
+        (0, "before_margin_pct", "%", ("before", "margin", "%")),
+        (1, "before_margin_pct", "%", ("before", "margin", "%")),
+        (1, "after_margin_pct", "%", ("after", "margin", "%")),
+        (1, "before_discount_pct", "%", ("before", "discount", "%")),
+        (1, "after_discount_pct", "%", ("after", "discount", "%")),
+        (1, "before_freight_per_unit", "", ("before", "freight", "per unit")),
+        (1, "after_freight_per_unit", "", ("after", "freight", "per unit")),
+        (1, "margin_drop_pts", " percentage points", ("margin", "drop", "percentage points")),
+        (1, "freight_increase_pct", "%", ("freight", "%")),
+        (1, "first_month", "", ("before", "month")),
+        (1, "before_last_month", "", ("before", "month")),
+        (1, "after_first_month", "", ("after", "month")),
+        (1, "last_month", "", ("after", "month")),
+    ]
+    result = {
+        "region": rows[1]["region_name"],
+        "claims": [{"kind": "finding", "parts": [
+            {"value": rows[row][column], "suffix": suffix,
+             "evidence": "E2", "row": row, "column": column}
+            for row, column, suffix, _ in citations]}],
+        "evidence": {"E2": {"kind": "sql", "sql": "SELECT ...", "params": {}, "rows": rows}},
+    }
+    monkeypatch.setattr("app.answer_question", lambda _: result)
+
+    class ButtonParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.buttons = []
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == "button" and attrs.get("class") == "number":
+                self.buttons.append(attrs)
+
+    response = app.test_client().post("/", data={"question": "West"})
+    assert response.status_code == 200
+    parser = ButtonParser()
+    parser.feed(response.get_data(as_text=True))
+    assert len(parser.buttons) == len(citations)
+    for button, (row, column, suffix, descriptors) in zip(parser.buttons, citations):
+        label = button.get("aria-label", "").lower()
+        assert rows[row]["region_name"].lower() in label
+        assert str(rows[row][column]).lower() in label
+        for descriptor in descriptors:
+            assert descriptor in label
+        if "freight_per_unit" in column:
+            assert "$" in label or "dollar" in label
+        if column in ("before_margin_pct", "before_discount_pct", "before_freight_per_unit"):
+            assert rows[row]["first_month"] in label and rows[row]["before_last_month"] in label
+        elif column in ("after_margin_pct", "after_discount_pct", "after_freight_per_unit"):
+            assert rows[row]["after_first_month"] in label and rows[row]["last_month"] in label
+        elif column in ("margin_drop_pts", "freight_increase_pct"):
+            for endpoint in ("first_month", "before_last_month", "after_first_month", "last_month"):
+                assert rows[row][endpoint] in label
+        elif column in ("first_month", "after_first_month"):
+            assert "first" in label or "start" in label
+        else:
+            assert "last" in label or "end" in label
+    assert parser.buttons[1]["aria-label"] != parser.buttons[2]["aria-label"]
+    assert parser.buttons[5]["aria-label"] != parser.buttons[6]["aria-label"]
+def test_evidence_dialog_focuses_cited_cell(monkeypatch):
+    result = {
+        "region": "West", "claims": [],
+        "evidence": {"E1": {"kind": "sql", "sql": "SELECT ...", "params": {},
+                            "rows": [{"margin": 38}, {"margin": 25}]}},
+    }
+    monkeypatch.setattr("app.answer_question", lambda _: result)
+    html = app.test_client().post("/", data={"question": "West"}).get_data(as_text=True)
+    script = html.split("<script>", 1)[1].split("</script>", 1)[0]
+    check = subprocess.run(["node", "-e", """
+        const assert = require('node:assert/strict');
+        const close = {addEventListener() {}};
+        const buttons = [
+            {dataset: {evidence: 'E1', row: '1', column: 'margin'}},
+            {dataset: {evidence: 'E1'}},
+        ];
+        buttons.forEach(button => button.addEventListener = (_, handler) => button.click = handler);
+        let cells = [];
+        let visibleCell = null;
+        const modalStub = {
+            showModal() { document.activeElement = close; visibleCell = null; },
+            querySelector: () => cells.find(cell => cell.className === 'selected'),
+        };
+        const elements = {
+            'evidence-dialog': modalStub, 'close-dialog': close,
+            'evidence-description': {}, 'evidence-title': {},
+            'evidence-sql': {}, 'evidence-params': {},
+            'evidence-rows': {replaceChildren() {}},
+        };
+        global.document = {
+            getElementById: id => elements[id],
+            querySelectorAll: () => buttons,
+            createElement(tag) {
+                if (tag !== 'table') return {};
+                cells = [];
+                return {
+                    createTHead: () => ({insertRow: () => ({append() {}})}),
+                    createTBody: () => ({insertRow: () => ({insertCell() {
+                        const cell = {
+                            attributes: {}, append() {},
+                            setAttribute(name, value) { this.attributes[name] = value; },
+                            scrollIntoView() { visibleCell = this; },
+                            focus(options = {}) {
+                                if (this.attributes.tabindex === '-1') {
+                                    document.activeElement = this;
+                                    if (!options.preventScroll) visibleCell = this;
+                                }
+                            },
+                        };
+                        cells.push(cell);
+                        return cell;
+                    }})}),
+                };
+            },
+        };
+    """ + script + """
+        buttons[0].click();
+        assert.equal(document.activeElement, cells[1]);
+        assert.equal(visibleCell, cells[1]);
+        assert.equal(cells[1].attributes.tabindex, '-1');
+        assert.equal(cells[0].attributes.tabindex, undefined);
+
+        buttons[1].click();
+        assert.equal(document.activeElement, close);
+        assert.equal(visibleCell, null);
+    """], capture_output=True, text=True)
+    assert check.returncode == 0, check.stderr
+
+
 def test_policy_citations_have_descriptive_accessible_names(monkeypatch):
     documents = {"P1": "west_q3_volume_push.md", "P2": 'Freight & "carrier" memo.md'}
     result = {
@@ -1339,16 +2694,25 @@ def test_question_validation_errors_are_associated_and_focused(monkeypatch):
         assert page.question.get("aria-describedby") == page.alert.get("id")
         assert page.question.get("aria-describedby")
         assert "autofocus" in page.question
+        assert "autofocus" not in page.alert
         assert message in page.alert_text
 
     def failure(_):
         raise RuntimeError("unavailable")
 
     monkeypatch.setattr("app.answer_question", failure)
-    for response in [client.get("/"), client.post("/", data={"question": "West"})]:
+    for response, status in [(client.get("/"), 200),
+                             (client.post("/", data={"question": "West"}), 503)]:
+        assert response.status_code == status
         page = parse(response)
         assert "aria-invalid" not in page.question
         assert "autofocus" not in page.question
+        if status == 503:
+            assert page.alert.get("tabindex") == "-1"
+            assert "autofocus" in page.alert
+            assert "Analysis unavailable" in page.alert_text
+        else:
+            assert page.alert is None
 
 
 def test_ui_validation_and_safe_error(monkeypatch):
@@ -1363,10 +2727,107 @@ def test_ui_validation_and_safe_error(monkeypatch):
     assert b"secret-driver-settings" not in response.data
 
 
+@pytest.mark.parametrize("column, message", [
+    ("missing_cost_count", b"Missing monthly costs or duplicate cost rows"),
+    ("missing_discount_count", b"Missing discount inputs"),
+])
+@pytest.mark.parametrize("incomplete_when", ["monthly", "summary"])
+def test_ui_reports_data_quality_errors(column, message, incomplete_when, monkeypatch):
+    def run_sql(sql, params=None):
+        row = {"region_name": "West", "missing_cost_count": 0, "missing_discount_count": 0,
+               "missing_revenue_count": 0}
+        if (params is None) == (incomplete_when == "monthly"):
+            row[column] = 1
+        return {"sql": sql, "params": params or {}, "rows": [row]}
+
+    policies = MagicMock()
+    monkeypatch.setattr("agent.run_sql", run_sql)
+    monkeypatch.setattr("agent.search_policies", policies)
+
+    response = app.test_client().post("/", data={"question": "West"})
+
+    assert response.status_code == 503
+    assert message in response.data
+    assert b"Oracle connection and policy setup" not in response.data
+    policies.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", [
+    RuntimeError("secret-driver-settings\nforged log entry"),
+    ValueError("Missing discount inputs: secret-driver-settings\nforged log entry"),
+    oracledb.DatabaseError(SimpleNamespace(code=3113, message="secret-driver-settings\nforged log entry")),
+])
+def test_ui_logs_sanitized_unexpected_failures(failure, monkeypatch, caplog):
+    def fail(_):
+        raise failure
+
+    monkeypatch.setattr("app.answer_question", fail)
+    with caplog.at_level("ERROR", logger=app.logger.name):
+        response = app.test_client().post("/", data={"question": "West private-question"})
+
+    assert response.status_code == 503
+    assert b"Analysis unavailable." in response.data
+    assert b"secret-driver-settings" not in response.data
+    records = [record for record in caplog.records if record.name == app.logger.name]
+    assert records
+    assert any(type(failure).__name__ in record.getMessage() for record in records)
+    assert all(record.exc_info is None for record in records)
+    assert "secret-driver-settings" not in caplog.text
+    assert "forged log entry" not in caplog.text
+    assert "private-question" not in caplog.text
+
+
+@pytest.mark.parametrize("error_type", ["MissingCostsError", "MissingDiscountInputsError"])
+def test_ui_data_quality_message_does_not_expose_exception_details(error_type, monkeypatch):
+    import agent
+
+    def fail(_):
+        raise getattr(agent, error_type)("secret-driver-settings")
+
+    monkeypatch.setattr("app.answer_question", fail)
+    response = app.test_client().post("/", data={"question": "West"})
+
+    assert response.status_code == 503
+    assert b"Check" in response.data
+    assert b"secret-driver-settings" not in response.data
+
+
+def test_ui_logs_oracle_code_and_owned_failure_location(monkeypatch, caplog):
+    def fail(*args, **kwargs):
+        raise oracledb.DatabaseError(SimpleNamespace(code=3113, message="secret-driver-settings"))
+
+    monkeypatch.setattr("agent.run_sql", fail)
+    with caplog.at_level("ERROR", logger=app.logger.name):
+        response = app.test_client().post("/", data={"question": "West"})
+
+    assert response.status_code == 503
+    assert "DatabaseError" in caplog.text
+    assert "ORA-03113" in caplog.text
+    assert "agent.py:" in caplog.text
+    assert "secret-driver-settings" not in caplog.text
+
+
+def test_ui_does_not_log_untrusted_exception_class_name(monkeypatch, caplog):
+    failure = type("secret_driver_settings", (Exception,), {})()
+
+    def fail(_):
+        raise failure
+
+    monkeypatch.setattr("app.answer_question", fail)
+    with caplog.at_level("ERROR", logger=app.logger.name):
+        response = app.test_client().post("/", data={"question": "West"})
+
+    assert response.status_code == 503
+    assert "Analysis failed" in caplog.text
+    assert "secret_driver_settings" not in caplog.text
+
+
 def test_ui_sanitizes_invalid_policy_encoding(tmp_path, monkeypatch):
     (tmp_path / "policy.md").write_bytes(b"\xff")
     monkeypatch.setattr("policies.DOCS", tmp_path)
     row = {"region_name": "West", "missing_cost_count": 0, "missing_discount_count": 0,
+           "missing_revenue_count": 0,
+           "before_last_month": "2025-06", "after_first_month": "2025-07",
            "before_margin_pct": 40, "after_margin_pct": 25}
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
         "sql": sql, "params": params or {}, "rows": [row]})
@@ -1376,6 +2837,45 @@ def test_ui_sanitizes_invalid_policy_encoding(tmp_path, monkeypatch):
     assert response.status_code == 503
     assert b"Analysis unavailable. Check the local Oracle connection and policy setup, then retry." in response.data
     assert b"codec" not in response.data
+
+
+def test_ui_sanitizes_data_quality_error(monkeypatch):
+    def failure(_):
+        raise DataQualityError("private-data-quality-details")
+
+    monkeypatch.setattr("app.answer_question", failure)
+    response = app.test_client().post("/", data={"question": "West"})
+
+    assert response.status_code == 503
+    assert b"Correct missing, incomplete, or duplicate monthly cost records, then retry." in response.data
+    assert b"private-data-quality-details" not in response.data
+    assert b"Oracle connection" not in response.data
+
+
+def test_ui_sanitizes_discount_data_quality_error(monkeypatch):
+    def failure(_):
+        raise DiscountDataQualityError("private-data-quality-details")
+
+    monkeypatch.setattr("app.answer_question", failure)
+    response = app.test_client().post("/", data={"question": "West"})
+
+    assert response.status_code == 503
+    assert b"Correct missing discount, quantity, or unit price inputs, then retry." in response.data
+    assert b"private-data-quality-details" not in response.data
+    assert b"Oracle connection" not in response.data
+
+
+def test_ui_sanitizes_revenue_data_quality_error(monkeypatch):
+    def failure(_):
+        raise RevenueDataQualityError("private-data-quality-details")
+
+    monkeypatch.setattr("app.answer_question", failure)
+    response = app.test_client().post("/", data={"question": "West"})
+
+    assert response.status_code == 503
+    assert b"Correct missing net revenue for sales, then retry." in response.data
+    assert b"private-data-quality-details" not in response.data
+    assert b"monthly cost records" not in response.data
 
 
 def test_ui_sanitizes_downstream_value_error(monkeypatch):
