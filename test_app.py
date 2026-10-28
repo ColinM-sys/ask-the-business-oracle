@@ -709,6 +709,163 @@ def test_delayed_policy_refresh_preserves_newer_content(tmp_path, monkeypatch):
     connection.commit.assert_called_once()
 
 
+def test_concurrent_policy_refreshes_do_not_overwrite_newer_content(tmp_path, monkeypatch):
+    document = tmp_path / "policy.md"
+    document.write_text("Old policy", encoding="utf-8")
+    old_embedding = threading.Event()
+    resume_old = threading.Event()
+    second_progress = threading.Event()
+    second_waiting = threading.Event()
+    second_read = threading.Event()
+    worker = threading.local()
+    database_lock = threading.Lock()
+    rows_lock = threading.Lock()
+    rows = []
+
+    class Sources:
+        def glob(self, pattern):
+            if worker.name == "new":
+                second_read.set()
+                second_progress.set()
+            return [document]
+
+    class Connection:
+        def __init__(self):
+            self.locked = False
+            self.pending = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.release()
+
+        def release(self):
+            if self.locked:
+                self.locked = False
+                database_lock.release()
+
+        def cursor(self):
+            return Cursor(self)
+
+        def commit(self):
+            if self.pending is not None:
+                with rows_lock:
+                    rows[:] = self.pending
+            self.release()
+
+    class Cursor:
+        def __init__(self, connection):
+            self.connection = connection
+            self.result = []
+
+        def execute(self, sql, **params):
+            sql = " ".join(sql.upper().split())
+            if sql.startswith("SELECT TABLE_NAME FROM USER_TABLES"):
+                self.result = [("POLICY_CHUNKS",)]
+            elif sql == "LOCK TABLE POLICY_CHUNKS IN EXCLUSIVE MODE":
+                if worker.name == "new" and database_lock.locked():
+                    second_waiting.set()
+                    second_progress.set()
+                assert database_lock.acquire(timeout=10), "Database lock was not released"
+                self.connection.locked = True
+            elif sql.startswith("SELECT MODEL_NAME, CREATION_DATE,"):
+                self.result = []
+            elif sql.startswith("SELECT DISTINCT BACKEND, SOURCE_HASH FROM POLICY_CHUNKS"):
+                with rows_lock:
+                    self.result = [(row["backend"], row["fingerprint"]) for row in rows]
+            elif sql.startswith("SELECT CHUNK, EMBEDDING FROM POLICY_CHUNKS"):
+                with rows_lock:
+                    self.result = [
+                        (row["chunk"], row["vector"]) for row in rows
+                        if row["backend"] == params["backend"]
+                        and row["fingerprint"].startswith(params["version"])
+                    ]
+            elif sql.startswith("DELETE FROM POLICY_CHUNKS"):
+                self.connection.pending = []
+            elif sql.startswith("INSERT INTO POLICY_CHUNKS"):
+                self.connection.pending.append(params)
+            else:
+                pytest.fail(f"Unexpected SQL: {sql}")
+            return self
+
+        def fetchone(self):
+            return self.result[0] if self.result else None
+
+        def fetchall(self):
+            return self.result
+
+    def embedding(cursor, text, backend):
+        if text == "Old policy":
+            old_embedding.set()
+            assert resume_old.wait(10), "Old refresh was not released"
+        return hash_embedding(text)
+
+    def refresh(name):
+        worker.name = name
+        return ensure_policies()
+
+    monkeypatch.setattr("policies.DOCS", Sources())
+    monkeypatch.setattr("policies.connect", Connection)
+    monkeypatch.setattr("policies.embed", embedding)
+    # Each process has its own threading lock; database sessions must coordinate.
+    monkeypatch.setattr("policies._lock", nullcontext())
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        old = executor.submit(refresh, "old")
+        try:
+            assert old_embedding.wait(10), "Old refresh did not start embedding"
+            document.write_text("Updated policy", encoding="utf-8")
+            new = executor.submit(refresh, "new")
+            assert second_progress.wait(10), "New refresh did not make progress"
+            if second_waiting.is_set():
+                assert not second_read.is_set()
+                assert not new.done()
+            else:
+                # Without the database lock, the new version commits first.
+                assert new.result(timeout=10) == "hash-v1-512"
+        finally:
+            resume_old.set()
+        assert old.result(timeout=10) == "hash-v1-512"
+        assert new.result(timeout=10) == "hash-v1-512"
+
+    assert [row["chunk"] for row in rows] == ["Updated policy"]
+
+
+@pytest.mark.parametrize("code", [955, 1031])
+def test_policy_table_creation_race(code, tmp_path, monkeypatch):
+    (tmp_path / "policy.md").write_text("Policy", encoding="utf-8")
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.fetchone.return_value = None
+    cursor.fetchall.return_value = []
+    failure = oracledb.DatabaseError(SimpleNamespace(code=code))
+
+    def execute(sql, **params):
+        if sql.lstrip().startswith("CREATE TABLE"):
+            raise failure
+        return cursor
+
+    cursor.execute.side_effect = execute
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+
+    if code == 955:
+        assert ensure_policies() == "hash-v1-512"
+        assert any(" ".join(call.args[0].upper().split()) ==
+                   "LOCK TABLE POLICY_CHUNKS IN EXCLUSIVE MODE"
+                   for call in cursor.execute.call_args_list)
+        connection.commit.assert_called_once()
+    else:
+        with pytest.raises(oracledb.DatabaseError) as caught:
+            ensure_policies()
+        assert caught.value is failure
+        assert not any(call.args[0].upper().startswith("LOCK TABLE")
+                       for call in cursor.execute.call_args_list)
+        connection.commit.assert_not_called()
+
+
 def test_policy_search_handles_empty_table(monkeypatch):
     connection = MagicMock()
     connection.__enter__.return_value = connection
@@ -2085,29 +2242,67 @@ def test_ui_boundaries_contrast_with_adjacent_backgrounds():
             assert contrast >= 3, f"Boundary {boundary} has {contrast:.2f}:1 contrast against {surface}"
 
 
-def test_ui_restores_submit_button_on_pageshow():
-    html = app.test_client().get("/").get_data(as_text=True)
-    script = html.rsplit("<script>", 1)[1].split("</script>", 1)[0]
-    subprocess.run(["node", "-e", """
+@pytest.mark.parametrize("has_result", [False, True])
+def test_ui_allows_retry_after_stopped_submission(monkeypatch, has_result):
+    monkeypatch.setattr("app.answer_question", lambda _: {
+        "region": "West", "claims": [], "dropped_count": 0, "evidence": {},
+    })
+    client = app.test_client()
+    response = client.post("/", data={"question": "West"}) if has_result else client.get("/")
+    html = response.get_data(as_text=True)
+
+    class SubmitButtonParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.button = None
+            self.label = ""
+            self.in_button = False
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == "button" and attrs.get("class") == "submit":
+                self.button = attrs
+                self.in_button = True
+
+        def handle_data(self, data):
+            if self.in_button:
+                self.label += data
+
+        def handle_endtag(self, tag):
+            if tag == "button":
+                self.in_button = False
+
+    parser = SubmitButtonParser()
+    parser.feed(html)
+    assert parser.button is not None
+    assert parser.button.get("type") == "submit"
+    assert "disabled" not in parser.button
+    assert parser.label == "Analyze question"
+
+    scripts = "\n".join(re.findall(r"<script>(.*?)</script>", html, re.DOTALL))
+    check = subprocess.run(["node", "-e", """
         const assert = require('node:assert/strict');
         const handlers = {};
         const button = {disabled: false, textContent: 'Analyze question'};
-        const form = {addEventListener: (event, handler) => handlers[event] = handler};
+        const form = {addEventListener: (event, handler) => (handlers[event] ??= []).push(handler)};
+        const other = {addEventListener() {}};
         global.document = {
-            getElementById: () => form,
+            getElementById: id => id === 'question-form' ? form : other,
             querySelector: () => button,
+            querySelectorAll: () => [],
         };
-        global.window = {addEventListener: (event, handler) => handlers[event] = handler};
-    """ + script + """
-        for (let visit = 0; visit < 2; visit++) {
-            handlers.submit();
-            assert.equal(button.disabled, true);
-            assert.equal(button.textContent, 'Analyzing\u2026');
-            handlers.pageshow({persisted: true});
+        global.window = {addEventListener() {}};
+    """ + scripts + """
+        // A stopped navigation produces no pageshow; the same form must be retryable.
+        for (let attempt = 0; attempt < 2; attempt++) {
+            for (const handler of handlers.submit || []) handler({preventDefault() {}});
             assert.equal(button.disabled, false);
             assert.equal(button.textContent, 'Analyze question');
         }
-    """], check=True, capture_output=True, text=True)
+    """], capture_output=True, text=True)
+    assert check.returncode == 0, check.stderr
+
+
 def test_evidence_dialog_preserves_exact_integers(monkeypatch):
     values = [9007199254740993, -9007199254740993, 10**37 + 1,
               9007199254740991, 0, 42, 1.25, None, True, False, "text"]
@@ -2267,6 +2462,79 @@ def test_evidence_dialog_identifies_cited_cell(monkeypatch):
     assert html.index("description.textContent = `Cited cell:") < html.index("dialog.showModal()")
 
 
+def test_numeric_buttons_describe_cited_metric_period_and_units(monkeypatch):
+    rows = [
+        {"region_name": "East", "first_month": "2025-02", "before_last_month": "2025-05",
+         "after_first_month": "2025-08", "last_month": "2025-10", "before_margin_pct": 5},
+        {"region_name": 'West & "Co"', "first_month": "2025-01",
+         "before_last_month": "2025-06", "after_first_month": "2025-07",
+         "last_month": "2025-09", "before_margin_pct": 5,
+         "after_margin_pct": 5, "before_discount_pct": 5,
+         "after_discount_pct": 5, "before_freight_per_unit": 5,
+         "after_freight_per_unit": 5, "margin_drop_pts": 0,
+         "freight_increase_pct": 0},
+    ]
+    citations = [
+        (0, "before_margin_pct", "%", ("before", "margin", "%")),
+        (1, "before_margin_pct", "%", ("before", "margin", "%")),
+        (1, "after_margin_pct", "%", ("after", "margin", "%")),
+        (1, "before_discount_pct", "%", ("before", "discount", "%")),
+        (1, "after_discount_pct", "%", ("after", "discount", "%")),
+        (1, "before_freight_per_unit", "", ("before", "freight", "per unit")),
+        (1, "after_freight_per_unit", "", ("after", "freight", "per unit")),
+        (1, "margin_drop_pts", " percentage points", ("margin", "drop", "percentage points")),
+        (1, "freight_increase_pct", "%", ("freight", "%")),
+        (1, "first_month", "", ("before", "month")),
+        (1, "before_last_month", "", ("before", "month")),
+        (1, "after_first_month", "", ("after", "month")),
+        (1, "last_month", "", ("after", "month")),
+    ]
+    result = {
+        "region": rows[1]["region_name"],
+        "claims": [{"kind": "finding", "parts": [
+            {"value": rows[row][column], "suffix": suffix,
+             "evidence": "E2", "row": row, "column": column}
+            for row, column, suffix, _ in citations]}],
+        "evidence": {"E2": {"kind": "sql", "sql": "SELECT ...", "params": {}, "rows": rows}},
+    }
+    monkeypatch.setattr("app.answer_question", lambda _: result)
+
+    class ButtonParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.buttons = []
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == "button" and attrs.get("class") == "number":
+                self.buttons.append(attrs)
+
+    response = app.test_client().post("/", data={"question": "West"})
+    assert response.status_code == 200
+    parser = ButtonParser()
+    parser.feed(response.get_data(as_text=True))
+    assert len(parser.buttons) == len(citations)
+    for button, (row, column, suffix, descriptors) in zip(parser.buttons, citations):
+        label = button.get("aria-label", "").lower()
+        assert rows[row]["region_name"].lower() in label
+        assert str(rows[row][column]).lower() in label
+        for descriptor in descriptors:
+            assert descriptor in label
+        if "freight_per_unit" in column:
+            assert "$" in label or "dollar" in label
+        if column in ("before_margin_pct", "before_discount_pct", "before_freight_per_unit"):
+            assert rows[row]["first_month"] in label and rows[row]["before_last_month"] in label
+        elif column in ("after_margin_pct", "after_discount_pct", "after_freight_per_unit"):
+            assert rows[row]["after_first_month"] in label and rows[row]["last_month"] in label
+        elif column in ("margin_drop_pts", "freight_increase_pct"):
+            for endpoint in ("first_month", "before_last_month", "after_first_month", "last_month"):
+                assert rows[row][endpoint] in label
+        elif column in ("first_month", "after_first_month"):
+            assert "first" in label or "start" in label
+        else:
+            assert "last" in label or "end" in label
+    assert parser.buttons[1]["aria-label"] != parser.buttons[2]["aria-label"]
+    assert parser.buttons[5]["aria-label"] != parser.buttons[6]["aria-label"]
 def test_evidence_dialog_focuses_cited_cell(monkeypatch):
     result = {
         "region": "West", "claims": [],
