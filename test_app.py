@@ -84,6 +84,19 @@ def test_critic_preserves_cited_negative_value(sample_evidence):
     sample_evidence["E1"]["rows"][0]["margin"] = -25.53
     claim = {"parts": [{"text": "Margin: "},
         {"value": -25.53, "suffix": "%", "evidence": "E1", "row": 0, "column": "margin"}]}
+@pytest.mark.parametrize("suffix", [" million", " billion", "k", "M", "e6", "0", " percent", None])
+def test_critic_rejects_unsupported_suffixes(sample_evidence, suffix):
+    claim = {"parts": [{"value": 25.53, "suffix": suffix,
+                        "evidence": "E1", "row": 0, "column": "margin"}]}
+    assert critique([claim], sample_evidence) == ([], [claim])
+
+
+@pytest.mark.parametrize("suffix", [None, "", "%", " percentage points"])
+def test_critic_preserves_supported_suffixes(sample_evidence, suffix):
+    part = {"value": 25.53, "evidence": "E1", "row": 0, "column": "margin"}
+    if suffix is not None:
+        part["suffix"] = suffix
+    claim = {"parts": [part]}
     assert critique([claim], sample_evidence) == ([claim], [])
 
 
