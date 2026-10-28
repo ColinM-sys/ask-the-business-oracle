@@ -1,9 +1,12 @@
 """Unit checks and live integration against the existing local Oracle tables."""
 import copy
 import json
+import os
 import runpy
 import subprocess
 import sqlite3
+import sys
+import time
 from contextlib import nullcontext
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -338,6 +341,128 @@ def test_delayed_policy_refresh_preserves_newer_content(tmp_path, monkeypatch):
 
     assert [row["chunk"] for row in rows] == ["Updated policy"]
     connection.commit.assert_called_once()
+
+
+def test_policy_refreshes_are_coordinated_between_processes(tmp_path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    document = docs / "policy.md"
+    document.write_text("Old policy", encoding="utf-8")
+
+    # Both independent interpreters share committed rows without touching Oracle.
+    worker = r'''
+import json
+from pathlib import Path
+import sys
+import time
+
+import policies
+
+root = Path(sys.argv[1])
+role = sys.argv[2]
+policies.DOCS = root / "docs"
+document = policies.DOCS / "policy.md"
+state = root / "rows.json"
+original_read = Path.read_text
+
+def tracked_read(path, *args, **kwargs):
+    if role == "second" and path == document:
+        (root / "second-read").touch()
+    return original_read(path, *args, **kwargs)
+
+Path.read_text = tracked_read
+
+class Cursor:
+    def __init__(self, connection):
+        self.connection = connection
+        self.rows = []
+
+    def execute(self, sql, **params):
+        if sql.startswith("SELECT table_name"):
+            self.rows = [("POLICY_CHUNKS",)]
+        elif sql.startswith("SELECT model_name"):
+            self.rows = []
+        elif sql.startswith("SELECT DISTINCT backend, source_hash"):
+            rows = json.loads(original_read(state, encoding="utf-8")) if state.exists() else []
+            self.rows = [(row["backend"], row["fingerprint"]) for row in rows]
+        elif sql.startswith("DELETE FROM policy_chunks"):
+            self.connection.pending = []
+        elif sql.startswith("INSERT INTO policy_chunks"):
+            self.connection.pending.append({key: params[key] for key in ("chunk", "backend", "fingerprint")})
+        else:
+            raise AssertionError(sql)
+        return self
+
+    def fetchone(self):
+        return self.rows[0] if self.rows else None
+
+    def fetchall(self):
+        return self.rows
+
+class Connection:
+    def __enter__(self):
+        if role == "first":
+            (root / "first-read").touch()
+            deadline = time.monotonic() + 15
+            while not (root / "release-first").exists():
+                if time.monotonic() > deadline:
+                    raise TimeoutError("First refresh was not released")
+                time.sleep(0.01)
+        return self
+
+    def __exit__(self, *args):
+        pass
+
+    def cursor(self):
+        return Cursor(self)
+
+    def commit(self):
+        state.write_text(json.dumps(self.pending), encoding="utf-8")
+
+policies.connect = Connection
+(root / (role + "-started")).touch()
+policies.ensure_policies()
+(root / (role + "-done")).touch()
+'''
+
+    def start(role):
+        process_tmp = tmp_path / (role + "-tmp")
+        process_tmp.mkdir()
+        env = os.environ.copy()
+        env.update({name: str(process_tmp) for name in ("TMPDIR", "TEMP", "TMP")})
+        return subprocess.Popen([sys.executable, "-c", worker, str(tmp_path), role],
+                                env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def wait_for(path, process, timeout=10):
+        deadline = time.monotonic() + timeout
+        while not path.exists() and time.monotonic() < deadline:
+            if process.poll() is not None:
+                return path.exists()
+            time.sleep(0.01)
+        return path.exists()
+
+    first = start("first")
+    second = None
+    try:
+        assert wait_for(tmp_path / "first-read", first)
+        document.write_text("Updated policy", encoding="utf-8")
+        second = start("second")
+        assert wait_for(tmp_path / "second-started", second)
+        # An unlocked refresh can commit the update while the first is paused.
+        wait_for(tmp_path / "second-done", second, timeout=2)
+        read_before_release = (tmp_path / "second-read").exists()
+        (tmp_path / "release-first").touch()
+        assert first.wait(timeout=10) == 0
+        assert second.wait(timeout=10) == 0
+        rows = json.loads((tmp_path / "rows.json").read_text(encoding="utf-8"))
+        assert [row["chunk"] for row in rows] == ["Updated policy"]
+        assert not read_before_release
+    finally:
+        (tmp_path / "release-first").touch()
+        for process in (first, second):
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.wait()
 
 
 def test_policy_search_handles_empty_table(monkeypatch):

@@ -1,4 +1,5 @@
 .env
+/.policy-refresh.lock
 __pycache__/
 wallet/
 .pytest_cache/

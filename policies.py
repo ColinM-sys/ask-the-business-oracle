@@ -1,11 +1,15 @@
 """Idempotent policy ingestion; local hashing fallback needs no API key."""
 from array import array
+from contextlib import contextmanager
+import errno
 import hashlib
 import logging
 import math
+import os
 from pathlib import Path
 import re
 import threading
+import time
 
 import oracledb
 
@@ -14,6 +18,36 @@ from db import connect
 DOCS = Path(__file__).parent / "docs"
 _lock = threading.Lock()
 _logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _process_lock():
+    # Keep this file so waiters always lock the same inode, even after a crash.
+    lock_path = Path(__file__).resolve().parent / ".policy-refresh.lock"
+    with lock_path.open("a+b") as lock_file:
+        lock_file.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            while True:
+                try:
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError as exc:
+                    if exc.errno != errno.EACCES:
+                        raise
+                    time.sleep(0.1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def hash_embedding(text, dimensions=512):
@@ -38,7 +72,7 @@ def embed(cursor, text, backend):
 
 def ensure_policies():
     """Refresh only on source/model changes; never modify the business tables."""
-    with _lock:
+    with _lock, _process_lock():
         sources = [(p.name, p.read_text(encoding="utf-8")) for p in sorted(DOCS.glob("*.md"))]
         if not sources:
             raise RuntimeError("No policy documents found")
