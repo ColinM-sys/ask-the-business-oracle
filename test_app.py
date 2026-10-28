@@ -177,6 +177,18 @@ def test_critic_rejects_units_and_magnitudes_in_adjacent_text(sample_evidence, m
     assert critique([claim], sample_evidence) == ([], [claim])
 
 
+def test_critic_documents_unchecked_text_modifiers(sample_evidence):
+    claim = {"parts": [
+        {"value": 25.53, "evidence": "E1", "row": 0, "column": "margin"},
+        {"text": " quadrillion"}]}
+    assert critique([claim], sample_evidence) == ([claim], [])
+
+    documentation = " ".join(critique.__doc__.lower().split())
+    assert "other unit or magnitude modifiers" in documentation
+    assert "quadrillion" in documentation
+    assert "may pass unchecked" in documentation
+
+
 def test_hashing_is_stable_and_normalized():
     first = hash_embedding("West freight contract")
     assert first == hash_embedding("West freight contract")
@@ -244,6 +256,31 @@ def test_policy_probe_fallback_is_explicit_and_sanitized(
     assert ("Using hash-v1-512 fallback" in caplog.text) == (expected == "hash-v1-512")
     assert "private-driver-details" not in caplog.text
     assert "forged log entry" not in caplog.text
+
+
+@pytest.mark.parametrize("unsupported", ["my_model", 'EVIL") FROM dual; DELETE FROM sales--\nFORGED'])
+@pytest.mark.parametrize("later_model", [None, "GOOD_MODEL"])
+def test_policy_probe_skips_unsupported_names(unsupported, later_model, tmp_path, monkeypatch):
+    (tmp_path / "policy.md").write_text("Business policy", encoding="utf-8")
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
+    models = [(unsupported,)] + ([(later_model,)] if later_model else [])
+    cursor.execute.return_value.fetchall.side_effect = [models, []]
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+
+    expected = later_model or "hash-v1-512"
+    assert ensure_policies() == expected
+    embedding_sql = [call.args[0] for call in cursor.execute.call_args_list
+                     if "VECTOR_EMBEDDING" in call.args[0]]
+    assert embedding_sql == (["SELECT VECTOR_EMBEDDING(GOOD_MODEL USING :text AS DATA) FROM dual"] * 2
+                             if later_model else [])
+    inserted = [call.kwargs for call in cursor.execute.call_args_list
+                if call.args[0].lstrip().startswith("INSERT INTO policy_chunks")]
+    assert inserted and all(row["backend"] == expected for row in inserted)
+    connection.commit.assert_called_once()
 
 
 @pytest.mark.parametrize("character", ["界", "😀"])
