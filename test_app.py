@@ -176,6 +176,18 @@ def test_critic_rejects_units_and_magnitudes_in_adjacent_text(sample_evidence, m
     assert critique([claim], sample_evidence) == ([], [claim])
 
 
+def test_critic_documents_unchecked_text_modifiers(sample_evidence):
+    claim = {"parts": [
+        {"value": 25.53, "evidence": "E1", "row": 0, "column": "margin"},
+        {"text": " quadrillion"}]}
+    assert critique([claim], sample_evidence) == ([claim], [])
+
+    documentation = " ".join(critique.__doc__.lower().split())
+    assert "other unit or magnitude modifiers" in documentation
+    assert "quadrillion" in documentation
+    assert "may pass unchecked" in documentation
+
+
 def test_hashing_is_stable_and_normalized():
     first = hash_embedding("West freight contract")
     assert first == hash_embedding("West freight contract")
