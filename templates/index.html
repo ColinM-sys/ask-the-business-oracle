@@ -78,10 +78,10 @@
     <p>No verified claims are available for this brief.</p>
     {% endfor %}
     {% if not policy_reasons %}
-    <p class="hint">{% if not reasons %}Explanation unavailable: {% endif %}Policy-backed explanation is unavailable for this brief.</p>
+    <p class="hint">{% if not reasons %}Explanation unavailable: No verified explanation is available for this brief. {% endif %}Policy-backed explanation is unavailable for this brief.</p>
     {% endif %}
     {% if not policy_actions %}
-    <p class="hint">{% if not actions %}Recommendations unavailable: {% endif %}Policy-backed recommendations are unavailable for this brief.</p>
+    <p class="hint">{% if not actions %}Recommendations unavailable: No verified actions are available for this brief. {% endif %}Policy-backed recommendations are unavailable for this brief.</p>
     {% endif %}
     {% if result.claims %}
     <p class="hint">Numbers in retained claims verified against cited SQL cells.{% if policy_reasons %} Policy citations support the qualitative explanation.{% endif %}</p>
