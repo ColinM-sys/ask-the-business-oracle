@@ -55,7 +55,7 @@
     <input id="question" name="question" maxlength="1000" value="{{ question }}" required{% if question_error %} aria-invalid="true" aria-describedby="question-error" autofocus{% endif %}>
     <button class="submit" type="submit">Analyze question</button>
   </form>
-  <p class="hint">Fixed analysis of margin, discounts and freight. Name a region and comparison month; defaults are West and July 2025. Uses all available sales on each side of that month.</p>
+  <p class="hint">Fixed analysis of margin, discounts, COGS and freight. Name a region and comparison month; defaults are West and July 2025. Uses all available sales on each side of that month.</p>
   {% if error %}<p class="error" role="alert" id="question-error"{% if not question_error %} tabindex="-1" autofocus{% endif %}>{{ error }}</p>{% endif %}
   {% if result %}
   <article class="card" aria-live="polite">
@@ -71,6 +71,7 @@
       'after_first_month': 'first month, after period', 'last_month': 'last month, after period',
       'before_margin_pct': 'gross margin', 'after_margin_pct': 'gross margin',
       'before_discount_pct': 'average discount', 'after_discount_pct': 'average discount',
+      'before_cogs_per_unit': 'COGS', 'after_cogs_per_unit': 'COGS',
       'before_freight_per_unit': 'freight', 'after_freight_per_unit': 'freight',
       'margin_drop_pts': 'signed gross margin drop', 'freight_increase_pct': 'freight change'
     } %}
@@ -87,7 +88,7 @@
             {%- if part.column.startswith('before_') and part.column != 'before_last_month' -%}, before ({{ row.first_month }} through {{ row.before_last_month }})
             {%- elif part.column.startswith('after_') and part.column != 'after_first_month' -%}, after ({{ row.after_first_month }} through {{ row.last_month }})
             {%- elif part.column in ('margin_drop_pts', 'freight_increase_pct') -%}, before ({{ row.first_month }} through {{ row.before_last_month }}) {{ 'minus' if part.column == 'margin_drop_pts' else 'to' }} after ({{ row.after_first_month }} through {{ row.last_month }})
-            {%- endif -%}: {% if part.column in ('before_freight_per_unit', 'after_freight_per_unit') %}${% endif %}{{ part.value }}{{ part.suffix }}{% if part.column in ('before_freight_per_unit', 'after_freight_per_unit') %} per unit{% endif %}">{{ part.value }}{{ part.suffix }}</button>{%- endif -%}
+            {%- endif -%}: {% if part.column in ('before_freight_per_unit', 'after_freight_per_unit', 'before_cogs_per_unit', 'after_cogs_per_unit') %}${% endif %}{{ part.value }}{{ part.suffix }}{% if part.column in ('before_freight_per_unit', 'after_freight_per_unit', 'before_cogs_per_unit', 'after_cogs_per_unit') %} per unit{% endif %}">{{ part.value }}{{ part.suffix }}</button>{%- endif -%}
       {%- endfor -%}
       {% for id in claim.policy_ids %}<button type="button" class="citation" data-evidence="{{ id }}" aria-label="{{ id }}: {{ result.evidence[id].rows[0].doc }}">{{ id }}</button>{% endfor %}
       </p>

@@ -94,6 +94,7 @@ def summary_sql():
         raw[period] = {
             "margin_pct": f"CASE WHEN {MISSING_REVENUE_COUNT}=0 THEN 100*{total('s.net_revenue-s.quantity*(c.unit_cogs+c.freight_per_unit)')}/NULLIF({revenue},0) END",
             "discount_pct": f"CASE WHEN {MISSING_DISCOUNT_COUNT}=0 THEN {total('s.quantity*s.unit_price*s.discount_pct')}/NULLIF({total('s.quantity*s.unit_price')},0) END",
+            "cogs_per_unit": f"{total('s.quantity*c.unit_cogs')}/NULLIF({units},0)",
             "freight_per_unit": f"{total('s.quantity*c.freight_per_unit')}/NULLIF({units},0)",
         }
         # Do not present a partial sum as zero revenue when inputs are missing.
@@ -222,7 +223,7 @@ def answer_question(question):
 
     claim("scope", [text(f"{region}: compare "), number("first_month"), text(" through "),
         number("before_last_month"), text(" with "), number("after_first_month"), text(" through "),
-        number("last_month"), text(". Margin includes COGS and freight; percentages are revenue-weighted. Discounts are weighted by gross sales; freight is weighted by units.")])
+        number("last_month"), text(". Margin includes COGS and freight; percentages are revenue-weighted. Discounts are weighted by gross sales; COGS and freight are weighted by units.")])
     direction = row["margin_direction"]
     margin_available = row["before_margin_pct"] is not None and row["after_margin_pct"] is not None
     if margin_available:
@@ -247,6 +248,9 @@ def answer_question(question):
         claim("finding", parts + [text(".")])
     claim("finding", [text("Average discount: before ")] + metric("before_discount_pct", suffix="%")
         + [text("; after ")] + metric("after_discount_pct", suffix="%") + [text(".")])
+    claim("finding", [text("COGS per unit: before ")] + metric("before_cogs_per_unit", prefix="$")
+        + [text("; after ")] + metric("after_cogs_per_unit", prefix="$")
+        + [text(". Changes can reflect product mix as well as product costs.")])
     claim("finding", [text("Freight per unit: before ")] + metric("before_freight_per_unit", prefix="$")
         + [text("; after ")] + metric("after_freight_per_unit", prefix="$")
         + [text("; change: ")] + metric("freight_increase_pct", suffix="%") + [text(".")])
@@ -264,8 +268,8 @@ def answer_question(question):
             claim("reason", [text("The policy documents identify a regional volume discount push and a replacement freight contract. The discount program bypassed senior sales approval and Finance review. "
                 f"{impact}; this comparison does not isolate their individual causal effects.")], push + freight)
     else:
-        claim("reason", [text(("Use the discount and freight movements to investigate the margin change. "
-            if margin_available else "Review the discount and freight movements alongside margin when available. ")
+        claim("reason", [text(("Use the discount, COGS and freight movements to investigate the margin change. "
+            if margin_available else "Review the discount, COGS and freight movements alongside margin when available. ")
             + "The retrieved West-specific documents do not establish a cause for this region and comparison period.")])
     pricing = policy_ids("pricing_policy.md")
     playbook = policy_ids("regional_playbook.md")
@@ -276,7 +280,7 @@ def answer_question(question):
     kept, dropped = critique(claims, evidence)
     return {"question": question, "region": region, "cutoff": cutoff, "claims": kept,
             "evidence": evidence, "dropped_count": len(dropped),
-            "plan": ["Compare region and month margin", "Compare discount and freight", "Retrieve policy reasons", "Verify every numerical claim"]}
+            "plan": ["Compare region and month margin", "Compare discount, COGS and freight", "Retrieve policy reasons", "Verify every numerical claim"]}
 
 
 if __name__ == "__main__":

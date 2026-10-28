@@ -1592,6 +1592,7 @@ def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
         "before_margin_pct": 40, "after_margin_pct": 25, "margin_drop_pts": 15,
         "margin_direction": "fell",
         "before_discount_pct": 3, "after_discount_pct": 18,
+        "before_cogs_per_unit": 60, "after_cogs_per_unit": 65,
         "before_freight_per_unit": 0, "after_freight_per_unit": 5,
         "freight_increase_pct": None,
         "missing_cost_count": 0, "missing_discount_count": 0, "missing_revenue_count": 0,
@@ -1615,6 +1616,67 @@ def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
         for part in finding["parts"]:
             if "value" in part:
                 assert supported(part, result["evidence"])
+
+
+@pytest.mark.parametrize("zero_period", [None, "before", "after", "both"])
+@pytest.mark.parametrize("after_costs,after_cogs", [((40, 60), 45), ((20, 40), 25)])
+def test_cogs_per_unit_is_cited_and_reflects_product_mix(zero_period, after_costs,
+                                                        after_cogs, monkeypatch):
+    # The mix shifts toward the cheaper product; costs may also rise independently.
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+        """)
+        for period, month, quantities, costs in (
+            ("before", "2025-06", (1, 3), (20, 40)),
+            ("after", "2025-07", (3, 1), after_costs),
+        ):
+            zero = zero_period in (period, "both")
+            if zero:
+                # A sale and return leave zero net units but nonzero revenue.
+                quantities = (1, -1)
+            for product, (quantity, cost) in enumerate(zip(quantities, costs), 1):
+                price = 200 if zero and product == 1 else 100
+                con.execute("INSERT INTO sales VALUES (1, ?, ?, ?, ?, ?, 10)",
+                            (product, month, quantity * price * .9, quantity, price))
+                con.execute("INSERT INTO costs VALUES (1, ?, ?, ?, 5)", (product, month, cost))
+
+        def run_sql(sql, params=None):
+            return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
+                con.execute(tools.validate_select(sql), params or {})]}
+
+        monkeypatch.setattr("agent.run_sql", run_sql)
+        monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
+        result = answer_question("West since July 2025")
+
+    row = result["evidence"]["E2"]["rows"][0]
+    finding = next(claim for claim in result["claims"]
+                   if claim["kind"] == "finding" and "cogs per unit" in claim["parts"][0]["text"].lower())
+    rendered = "".join(part.get("text", str(part.get("value", "")) + part.get("suffix", ""))
+                       for part in finding["parts"]).lower()
+    assert "product mix" in rendered and ("can" in rendered or "may" in rendered)
+    for period, expected in (("before", 35), ("after", after_cogs)):
+        column = f"{period}_cogs_per_unit"
+        parts = [part for part in finding["parts"] if part.get("column") == column]
+        if zero_period in (period, "both"):
+            assert row[column] is None
+            assert f"{period} unavailable" in rendered
+            assert not parts
+        else:
+            assert row[column] == expected
+            assert len(parts) == 1 and parts[0]["value"] == expected
+            assert parts[0]["evidence"] == "E2" and parts[0]["row"] == 0
+            assert supported(parts[0], result["evidence"])
+            assert f"{period} ${expected}" in rendered
+            assert row[f"{period}_freight_per_unit"] == 5
+        assert row[f"{period}_discount_pct"] == 10
+    assert all(supported(part, result["evidence"]) for part in finding["parts"] if "value" in part)
+    assert result["dropped_count"] == 0
 
 
 @pytest.mark.parametrize("zero_period", ["before", "after", "both"])
@@ -1875,6 +1937,7 @@ def policy_rows(monkeypatch):
         "before_last_month": "2025-06", "after_first_month": "2025-07",
         "before_margin_pct": 40, "after_margin_pct": 25, "margin_drop_pts": 15,
         "margin_direction": "fell", "before_discount_pct": 3, "after_discount_pct": 18,
+        "before_cogs_per_unit": 60, "after_cogs_per_unit": 65,
         "before_freight_per_unit": 5, "after_freight_per_unit": 8,
         "freight_increase_pct": 60,
         "missing_cost_count": 0, "missing_discount_count": 0, "missing_revenue_count": 0,
@@ -1922,7 +1985,7 @@ def test_policy_filenames_do_not_prove_claims(policy_rows, filename, contradicti
         assert not any(claim["kind"] == "reason" for claim in result["claims"])
     else:
         assert not any(claim["kind"] == "action" for claim in result["claims"])
-    assert len([claim for claim in result["claims"] if claim["kind"] == "finding"]) == 3
+    assert len([claim for claim in result["claims"] if claim["kind"] == "finding"]) == 4
     assert result["dropped_count"] == 0
 
 
@@ -1961,7 +2024,7 @@ def test_fixed_policy_claims_require_reviewed_complete_corpus(policy_rows, tmp_p
         assert [claim["kind"] for claim in policy_claims] == ["reason", "action", "action", "action"]
     else:
         assert policy_claims == []
-    assert len([claim for claim in result["claims"] if claim["kind"] == "finding"]) == 3
+    assert len([claim for claim in result["claims"] if claim["kind"] == "finding"]) == 4
     assert result["dropped_count"] == 0
 
 
@@ -2004,6 +2067,7 @@ def retrieved_policy_rows(monkeypatch):
         "before_last_month": "2025-06", "after_first_month": "2025-07",
         "before_margin_pct": 40, "after_margin_pct": 25, "margin_drop_pts": 15,
         "margin_direction": "fell", "before_discount_pct": 3, "after_discount_pct": 18,
+        "before_cogs_per_unit": 60, "after_cogs_per_unit": 65,
         "before_freight_per_unit": 5, "after_freight_per_unit": 8,
         "freight_increase_pct": 60,
         "missing_cost_count": 0, "missing_discount_count": 0, "missing_revenue_count": 0,
@@ -2895,7 +2959,8 @@ def test_numeric_buttons_describe_cited_metric_period_and_units(monkeypatch):
          "last_month": "2025-09", "before_margin_pct": 5,
          "after_margin_pct": 5, "before_discount_pct": 5,
          "after_discount_pct": 5, "before_freight_per_unit": 5,
-         "after_freight_per_unit": 5, "margin_drop_pts": 0,
+         "after_freight_per_unit": 5, "before_cogs_per_unit": 10,
+         "after_cogs_per_unit": 12, "margin_drop_pts": 0,
          "freight_increase_pct": 0},
     ]
     citations = [
@@ -2906,6 +2971,8 @@ def test_numeric_buttons_describe_cited_metric_period_and_units(monkeypatch):
         (1, "after_discount_pct", "%", ("after", "discount", "%")),
         (1, "before_freight_per_unit", "", ("before", "freight", "per unit")),
         (1, "after_freight_per_unit", "", ("after", "freight", "per unit")),
+        (1, "before_cogs_per_unit", "", ("before", "cogs", "per unit")),
+        (1, "after_cogs_per_unit", "", ("after", "cogs", "per unit")),
         (1, "margin_drop_pts", " percentage points", ("margin", "drop", "percentage points")),
         (1, "freight_increase_pct", "%", ("freight", "%")),
         (1, "first_month", "", ("before", "month")),
@@ -2944,11 +3011,11 @@ def test_numeric_buttons_describe_cited_metric_period_and_units(monkeypatch):
         assert str(rows[row][column]).lower() in label
         for descriptor in descriptors:
             assert descriptor in label
-        if "freight_per_unit" in column:
+        if column.endswith("_per_unit"):
             assert "$" in label or "dollar" in label
-        if column in ("before_margin_pct", "before_discount_pct", "before_freight_per_unit"):
+        if column in ("before_margin_pct", "before_discount_pct", "before_freight_per_unit", "before_cogs_per_unit"):
             assert rows[row]["first_month"] in label and rows[row]["before_last_month"] in label
-        elif column in ("after_margin_pct", "after_discount_pct", "after_freight_per_unit"):
+        elif column in ("after_margin_pct", "after_discount_pct", "after_freight_per_unit", "after_cogs_per_unit"):
             assert rows[row]["after_first_month"] in label and rows[row]["last_month"] in label
         elif column in ("margin_drop_pts", "freight_increase_pct"):
             for endpoint in ("first_month", "before_last_month", "after_first_month", "last_month"):
