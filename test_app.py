@@ -23,10 +23,35 @@ import db
 import tools
 from db import connect
 from agent import (DataQualityError, DiscountDataQualityError, RevenueDataQualityError,
-                   answer_question, parse_question, summary_sql)
+                   QuestionValidationError, answer_question, parse_question, summary_sql)
 from app import app
 from critic import critique, supported
 from policies import ensure_policies, hash_embedding
+
+
+def csrf_token(response):
+    class TokenParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.tokens = []
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == "input" and attrs.get("name") == "csrf_token":
+                assert attrs.get("type") == "hidden"
+                self.tokens.append(attrs.get("value"))
+
+    parser = TokenParser()
+    parser.feed(response.get_data(as_text=True))
+    assert len(parser.tokens) == 1 and parser.tokens[0]
+    return parser.tokens[0]
+
+
+def post_form(client, path, *, data=None, headers=None):
+    headers = dict(headers or {})
+    token = csrf_token(client.get(path, headers=headers))
+    headers["Origin"] = f"http://{headers.get('Host', 'localhost')}"
+    return client.post(path, data={**(data or {}), "csrf_token": token}, headers=headers)
 
 
 @pytest.mark.parametrize("wallet", [None, "test-wallet"])
@@ -1055,7 +1080,7 @@ def test_policy_lock_timeout_returns_temporary_failure_and_allows_retry(code, tm
     monkeypatch.setattr("policies.connect", lambda: connection)
     monkeypatch.setattr("app.answer_question", lambda _: tools.search_policies("Policy"))
 
-    response = app.test_client().post("/", data={"question": "West"})
+    response = post_form(app.test_client(), "/", data={"question": "West"})
 
     assert response.status_code == 503
     assert b"retry" in response.data
@@ -1274,7 +1299,7 @@ def test_missing_sales_inputs_reject_analysis(column, region_id, month, incomple
 
         set_input(None)
         monkeypatch.setattr("agent.run_sql", execute)
-        response = app.test_client().post("/", data={"question": "West since July 2025"})
+        response = post_form(app.test_client(), "/", data={"question": "West since July 2025"})
         assert response.status_code == 503
         message = (b"Correct missing net revenue for sales, then retry." if column == "net_revenue"
                    else b"Correct missing discount, quantity, or unit price inputs, then retry.")
@@ -1321,7 +1346,7 @@ def test_missing_monthly_costs_reject_incomplete_analysis(region_id, month, prod
         with pytest.raises(DataQualityError, match="Missing monthly costs"):
             answer_question("West since July 2025")
         policies.assert_not_called()
-        response = app.test_client().post("/", data={"question": "West since July 2025"})
+        response = post_form(app.test_client(), "/", data={"question": "West since July 2025"})
         assert response.status_code == 503
         assert b"Missing monthly costs or duplicate cost rows" in response.data
         assert b"Correct missing, incomplete, or duplicate monthly cost records, then retry." in response.data
@@ -1439,7 +1464,7 @@ def test_duplicate_monthly_costs_reject_analysis(region_id, unit_cogs, duplicate
         if duplicate_when == "monthly":
             insert_duplicate()
         monkeypatch.setattr("agent.run_sql", execute)
-        response = app.test_client().post("/", data={"question": "West since July 2025"})
+        response = post_form(app.test_client(), "/", data={"question": "West since July 2025"})
         assert response.status_code == 503
         assert b"Correct missing, incomplete, or duplicate monthly cost records, then retry." in response.data
 
@@ -1450,7 +1475,7 @@ def test_missing_region_has_descriptive_validation_error(monkeypatch, rows):
         "sql": sql, "params": params or {}, "rows": rows})
     with pytest.raises(ValueError, match="No sales/cost data found for West"):
         answer_question("Why did West margin fall since July 2025?")
-    response = app.test_client().post("/", data={"question": "West"})
+    response = post_form(app.test_client(), "/", data={"question": "West"})
     assert response.status_code == 400
     assert b"No sales/cost data found for West" in response.data
 @pytest.mark.parametrize("cutoff,valid", [
@@ -1478,7 +1503,7 @@ def test_cutoff_error_shows_selected_region_coverage(monkeypatch, cutoff, valid)
         policies = MagicMock(return_value={"rows": []})
         monkeypatch.setattr("agent.run_sql", run_sql)
         monkeypatch.setattr("agent.search_policies", policies)
-        response = app.test_client().post("/", data={"question": f"West since {cutoff}"})
+        response = post_form(app.test_client(), "/", data={"question": f"West since {cutoff}"})
 
         assert response.status_code == (200 if valid else 400)
         if not valid:
@@ -1646,7 +1671,7 @@ def test_zero_revenue_preserves_available_metrics(zero_period, monkeypatch):
             "sql": "SELECT policy evidence", "params": {}, "rows": policies})
         question = "West since July 2025"
         result = answer_question(question)
-        response = app.test_client().post("/", data={"question": question})
+        response = post_form(app.test_client(), "/", data={"question": question})
         assert response.status_code == 200
 
         rows = {row["region_name"]: row for row in result["evidence"]["E2"]["rows"]}
@@ -1689,7 +1714,7 @@ def test_zero_revenue_preserves_available_metrics(zero_period, monkeypatch):
         for missing_month in ("2025-06", "2025-07"):
             con.execute("SAVEPOINT missing_period")
             con.execute("DELETE FROM sales WHERE region_id=1 AND sale_month=?", (missing_month,))
-            response = app.test_client().post("/", data={"question": question})
+            response = post_form(app.test_client(), "/", data={"question": question})
             assert response.status_code == 400
             assert b"sales both before and after" in response.data
             con.execute("ROLLBACK TO missing_period")
@@ -2152,7 +2177,7 @@ def test_fractional_oracle_numbers_remain_exact_in_evidence(monkeypatch):
         "region": "West", "claims": [{"kind": "finding", "parts": [part], "policy_ids": []}],
         "evidence": evidence,
     })
-    response = app.test_client().post("/", data={"question": "West"})
+    response = post_form(app.test_client(), "/", data={"question": "West"})
     assert response.status_code == 200
     html = response.get_data(as_text=True)
     assert ">9007199254740993.25</button>" in html
@@ -2176,7 +2201,7 @@ def test_sql_decimal_amount_is_exact_in_critic_and_browser(monkeypatch):
 
     monkeypatch.setattr("app.answer_question", lambda _: {
         "region": "West", "claims": [{"kind": "finding", "parts": [part]}], "evidence": evidence})
-    response = app.test_client().post("/", data={"question": "West"})
+    response = post_form(app.test_client(), "/", data={"question": "West"})
     assert response.status_code == 200
     serialized = response.get_data(as_text=True).split("const evidence = ", 1)[1].split(";", 1)[0]
     assert json.loads(serialized)["E1"]["rows"][0]["total"] == "100000000000000.01"
@@ -2207,6 +2232,89 @@ def test_ui_rejects_untrusted_hosts_before_analysis(monkeypatch, host, method):
     analysis.assert_not_called()
 
 
+def test_ui_rejects_cross_site_post_without_session(monkeypatch):
+    analysis = MagicMock(return_value=None)
+    monkeypatch.setattr("app.answer_question", analysis)
+
+    response = app.test_client().post(
+        "/", headers={"Origin": "http://evil.example"}, data={"question": "West"},
+    )
+
+    assert response.status_code == 403
+    analysis.assert_not_called()
+
+
+@pytest.mark.parametrize("origin", [
+    None, "null", "http://evil.example", "http://localhost:5055",
+    "https://localhost", "http://127.0.0.1", "http://localhost.evil.example",
+    "http://localhost/path",
+])
+def test_ui_rejects_cross_origin_requests_before_analysis(monkeypatch, origin):
+    analysis = MagicMock()
+    monkeypatch.setattr("app.answer_question", analysis)
+    client = app.test_client()
+    token = csrf_token(client.get("/"))
+    headers = {} if origin is None else {"Origin": origin}
+
+    response = client.post("/", headers=headers, data={"question": "West", "csrf_token": token})
+
+    assert response.status_code == 403
+    analysis.assert_not_called()
+
+
+@pytest.mark.parametrize("token", [None, "wrong", "\u00e9"])
+def test_ui_rejects_missing_or_invalid_csrf_token_before_analysis(monkeypatch, token):
+    analysis = MagicMock()
+    monkeypatch.setattr("app.answer_question", analysis)
+    client = app.test_client()
+    csrf_token(client.get("/"))
+    data = {"question": "West"}
+    if token is not None:
+        data["csrf_token"] = token
+
+    response = client.post("/", headers={"Origin": "http://localhost"}, data=data)
+
+    assert response.status_code == 403
+    analysis.assert_not_called()
+
+
+def test_ui_rejects_another_clients_csrf_token(monkeypatch):
+    analysis = MagicMock()
+    monkeypatch.setattr("app.answer_question", analysis)
+    client = app.test_client()
+    first_token = csrf_token(client.get("/"))
+    other_token = csrf_token(app.test_client().get("/"))
+    assert first_token != other_token
+
+    response = client.post("/", headers={"Origin": "http://localhost"},
+                           data={"question": "West", "csrf_token": other_token})
+
+    assert response.status_code == 403
+    analysis.assert_not_called()
+
+
+def test_ui_accepts_same_origin_and_token_and_preserves_token_after_errors(monkeypatch):
+    def analyze(question):
+        if question == "invalid":
+            raise QuestionValidationError("Invalid question")
+        if question == "fail":
+            raise RuntimeError("failure")
+        return {"region": "West", "claims": [], "dropped_count": 0, "evidence": {}}
+
+    analysis = MagicMock(side_effect=analyze)
+    monkeypatch.setattr("app.answer_question", analysis)
+    client = app.test_client()
+    token = csrf_token(client.get("/"))
+    for question, status in [("invalid", 400), ("fail", 503),
+                             ("x" * (app.config["MAX_CONTENT_LENGTH"] + 1), 413),
+                             ("West", 200)]:
+        response = client.post("/", headers={"Origin": "http://localhost"},
+                               data={"question": question, "csrf_token": token})
+        assert response.status_code == status
+        token = csrf_token(response)
+    assert [call.args[0] for call in analysis.call_args_list] == ["invalid", "fail", "West"]
+
+
 @pytest.mark.parametrize("host", ["localhost", "localhost:5055", "127.0.0.1", "127.0.0.1:5055"])
 def test_ui_accepts_local_hosts(monkeypatch, host):
     monkeypatch.setattr("app.answer_question", lambda _: {
@@ -2217,7 +2325,7 @@ def test_ui_accepts_local_hosts(monkeypatch, host):
     client = app.test_client()
 
     assert client.get("/", headers={"Host": host}).status_code == 200
-    response = client.post("/", headers={"Host": host}, data={"question": "West"})
+    response = post_form(client, "/", headers={"Host": host}, data={"question": "West"})
     assert response.status_code == 200
     assert b"SELECT revenue FROM sales" in response.data
 
@@ -2225,7 +2333,7 @@ def test_ui_accepts_local_hosts(monkeypatch, host):
 def test_flask_live_brief_and_evidence():
     client = app.test_client()
     assert client.get("/").status_code == 200
-    response = client.post("/", data={"question": "Why did West margin fall since July 2025?"})
+    response = post_form(client, "/", data={"question": "Why did West margin fall since July 2025?"})
     assert response.status_code == 200
     assert b"13.36" in response.data
     assert b'data-evidence="E2"' in response.data
@@ -2264,7 +2372,7 @@ def test_download_brief_contains_cited_evidence_and_verification(monkeypatch):
     monkeypatch.setattr("app.answer_question", lambda _: result)
     client = app.test_client()
     assert b'id="download-brief"' not in client.get("/").data
-    response = client.post("/", data={"question": question})
+    response = post_form(client, "/", data={"question": question})
     html = response.get_data(as_text=True)
     assert response.status_code == 200
     assert 'id="download-brief"' in html and "Download brief" in html
@@ -2411,7 +2519,7 @@ def test_monthly_trend_links_selected_region_to_original_evidence_rows(monkeypat
             elif tag == "table":
                 self.in_table = False
 
-    response = app.test_client().post("/", data={"question": region})
+    response = post_form(app.test_client(), "/", data={"question": region})
     assert response.status_code == 200
     parser = TrendParser()
     parser.feed(response.get_data(as_text=True))
@@ -2449,7 +2557,7 @@ def test_ui_discloses_missing_explanation_and_actions(policy_rows, missing_reaso
                 (missing_actions and policy["doc"] == "pricing_policy.md")):
             policy["chunk"] = ""
 
-    response = app.test_client().post("/", data={"question": "West since July 2025"})
+    response = post_form(app.test_client(), "/", data={"question": "West since July 2025"})
 
     assert response.status_code == 200
     assert b"West gross margin" in response.data
@@ -2510,7 +2618,7 @@ def test_brief_shows_selected_region_monthly_trend_with_cell_citations(monkeypat
             elif tag == "article":
                 self.in_article = False
 
-    response = app.test_client().post("/", data={"question": "West"})
+    response = post_form(app.test_client(), "/", data={"question": "West"})
     assert response.status_code == 200
     parser = BriefTableParser()
     parser.feed(response.get_data(as_text=True))
@@ -2552,7 +2660,7 @@ def test_ui_discloses_dropped_claims_and_empty_brief(monkeypatch, has_claims, dr
     }
     monkeypatch.setattr("app.answer_question", lambda _: result)
 
-    response = app.test_client().post("/", data={"question": "West"})
+    response = post_form(app.test_client(), "/", data={"question": "West"})
 
     assert response.status_code == 200
     assert (b"2 claims were omitted because they failed verification." in response.data) == bool(dropped_count)
@@ -2584,7 +2692,7 @@ def test_ui_reports_unavailable_policy_claims(
             if policy["doc"] in unavailable:
                 policy["chunk"] = "This policy has changed."
 
-    response = app.test_client().post("/", data={"question": question})
+    response = post_form(app.test_client(), "/", data={"question": question})
 
     assert response.status_code == 200
     assert b'data-evidence="E2"' in response.data
@@ -2615,7 +2723,7 @@ def test_ui_discloses_missing_policy_backed_sections(
             if row["doc"] in missing_docs:
                 row["chunk"] = "Changed policy content."
 
-    response = app.test_client().post("/", data={"question": "West since July 2025"})
+    response = post_form(app.test_client(), "/", data={"question": "West since July 2025"})
 
     assert response.status_code == 200
     assert (b"Explanation unavailable" in response.data) == (not reason_available)
@@ -2631,7 +2739,7 @@ def test_ui_missing_question_rejected_before_querying(monkeypatch, data):
         pytest.fail("Missing questions must be rejected before querying")
 
     monkeypatch.setattr("agent.run_sql", forbidden_query)
-    response = app.test_client().post("/", data=data)
+    response = post_form(app.test_client(), "/", data=data)
     assert response.status_code == 400
 
 
@@ -2672,7 +2780,7 @@ def test_ui_allows_retry_after_stopped_submission(monkeypatch, has_result):
         "region": "West", "claims": [], "dropped_count": 0, "evidence": {},
     })
     client = app.test_client()
-    response = client.post("/", data={"question": "West"}) if has_result else client.get("/")
+    response = post_form(client, "/", data={"question": "West"}) if has_result else client.get("/")
     html = response.get_data(as_text=True)
 
     class SubmitButtonParser(HTMLParser):
@@ -2737,7 +2845,7 @@ def test_evidence_dialog_preserves_exact_integers(monkeypatch):
     }
     original = copy.deepcopy(result)
     monkeypatch.setattr("app.answer_question", lambda _: result)
-    response = app.test_client().post("/", data={"question": "West"})
+    response = post_form(app.test_client(), "/", data={"question": "West"})
     assert response.status_code == 200
     assert result == original  # Rendering must not change the critic's evidence.
     script = response.get_data(as_text=True).split("<script>", 1)[1].split("</script>", 1)[0]
@@ -2791,7 +2899,7 @@ def test_evidence_dialog_explains_empty_rows(monkeypatch):
         },
     }
     monkeypatch.setattr("app.answer_question", lambda _: result)
-    response = app.test_client().post("/", data={"question": "West"})
+    response = post_form(app.test_client(), "/", data={"question": "West"})
     assert response.status_code == 200
     script = response.get_data(as_text=True).split("<script>", 1)[1].split("</script>", 1)[0]
     check = subprocess.run(["node", "-e", """
@@ -2859,7 +2967,7 @@ def test_evidence_rows_region_is_keyboard_focusable_and_named(monkeypatch):
             if tag == "h3":
                 self.heading_id = None
 
-    response = app.test_client().post("/", data={"question": "West"})
+    response = post_form(app.test_client(), "/", data={"question": "West"})
     assert response.status_code == 200
     parser = EvidenceParser()
     parser.feed(response.get_data(as_text=True))
@@ -2875,7 +2983,7 @@ def test_evidence_dialog_identifies_cited_cell(monkeypatch):
     monkeypatch.setattr("app.answer_question", lambda _: {
         "region": "West", "claims": [], "evidence": {},
     })
-    html = app.test_client().post("/", data={"question": "West"}).get_data(as_text=True)
+    html = post_form(app.test_client(), "/", data={"question": "West"}).get_data(as_text=True)
 
     assert 'aria-describedby="evidence-description"' in html
     assert '<p id="evidence-description"></p>' in html
@@ -2933,7 +3041,7 @@ def test_numeric_buttons_describe_cited_metric_period_and_units(monkeypatch):
             if tag == "button" and attrs.get("class") == "number":
                 self.buttons.append(attrs)
 
-    response = app.test_client().post("/", data={"question": "West"})
+    response = post_form(app.test_client(), "/", data={"question": "West"})
     assert response.status_code == 200
     parser = ButtonParser()
     parser.feed(response.get_data(as_text=True))
@@ -2966,7 +3074,7 @@ def test_evidence_dialog_focuses_cited_cell(monkeypatch):
                             "rows": [{"margin": 38}, {"margin": 25}]}},
     }
     monkeypatch.setattr("app.answer_question", lambda _: result)
-    html = app.test_client().post("/", data={"question": "West"}).get_data(as_text=True)
+    html = post_form(app.test_client(), "/", data={"question": "West"}).get_data(as_text=True)
     script = html.split("<script>", 1)[1].split("</script>", 1)[0]
     check = subprocess.run(["node", "-e", """
         const assert = require('node:assert/strict');
@@ -3050,7 +3158,7 @@ def test_policy_citations_have_descriptive_accessible_names(monkeypatch):
             if tag == "button" and attrs.get("class") == "citation":
                 self.buttons.append(attrs)
 
-    response = app.test_client().post("/", data={"question": "West"})
+    response = post_form(app.test_client(), "/", data={"question": "West"})
     assert response.status_code == 200
     parser = CitationParser()
     parser.feed(response.get_data(as_text=True))
@@ -3099,7 +3207,7 @@ def test_question_validation_errors_are_associated_and_focused(monkeypatch):
         ({"question": "x" * (app.config["MAX_CONTENT_LENGTH"] + 1)}, 413,
          "Submission too large"),
     ]:
-        response = client.post("/", data=data)
+        response = post_form(client, "/", data=data)
         assert response.status_code == status
         page = parse(response)
         assert page.question.get("aria-invalid") == "true"
@@ -3114,7 +3222,7 @@ def test_question_validation_errors_are_associated_and_focused(monkeypatch):
 
     monkeypatch.setattr("app.answer_question", failure)
     for response, status in [(client.get("/"), 200),
-                             (client.post("/", data={"question": "West"}), 503)]:
+                             (post_form(client, "/", data={"question": "West"}), 503)]:
         assert response.status_code == status
         page = parse(response)
         assert "aria-invalid" not in page.question
@@ -3129,12 +3237,12 @@ def test_question_validation_errors_are_associated_and_focused(monkeypatch):
 
 def test_ui_validation_and_safe_error(monkeypatch):
     client = app.test_client()
-    assert client.post("/", data={"question": ""}).status_code == 400
-    assert client.post("/", data={"question": "West since July 2030"}).status_code == 400
+    assert post_form(client, "/", data={"question": ""}).status_code == 400
+    assert post_form(client, "/", data={"question": "West since July 2030"}).status_code == 400
     def failure(_):
         raise RuntimeError("secret-driver-settings")
     monkeypatch.setattr("app.answer_question", failure)
-    response = client.post("/", data={"question": "West"})
+    response = post_form(client, "/", data={"question": "West"})
     assert response.status_code == 503
     assert b"secret-driver-settings" not in response.data
 
@@ -3156,7 +3264,7 @@ def test_ui_reports_data_quality_errors(column, message, incomplete_when, monkey
     monkeypatch.setattr("agent.run_sql", run_sql)
     monkeypatch.setattr("agent.search_policies", policies)
 
-    response = app.test_client().post("/", data={"question": "West"})
+    response = post_form(app.test_client(), "/", data={"question": "West"})
 
     assert response.status_code == 503
     assert message in response.data
@@ -3175,7 +3283,7 @@ def test_ui_logs_sanitized_unexpected_failures(failure, monkeypatch, caplog):
 
     monkeypatch.setattr("app.answer_question", fail)
     with caplog.at_level("ERROR", logger=app.logger.name):
-        response = app.test_client().post("/", data={"question": "West private-question"})
+        response = post_form(app.test_client(), "/", data={"question": "West private-question"})
 
     assert response.status_code == 503
     assert b"Analysis unavailable." in response.data
@@ -3197,7 +3305,7 @@ def test_ui_data_quality_message_does_not_expose_exception_details(error_type, m
         raise getattr(agent, error_type)("secret-driver-settings")
 
     monkeypatch.setattr("app.answer_question", fail)
-    response = app.test_client().post("/", data={"question": "West"})
+    response = post_form(app.test_client(), "/", data={"question": "West"})
 
     assert response.status_code == 503
     assert b"Check" in response.data
@@ -3210,7 +3318,7 @@ def test_ui_logs_oracle_code_and_owned_failure_location(monkeypatch, caplog):
 
     monkeypatch.setattr("agent.run_sql", fail)
     with caplog.at_level("ERROR", logger=app.logger.name):
-        response = app.test_client().post("/", data={"question": "West"})
+        response = post_form(app.test_client(), "/", data={"question": "West"})
 
     assert response.status_code == 503
     assert "DatabaseError" in caplog.text
@@ -3227,7 +3335,7 @@ def test_ui_does_not_log_untrusted_exception_class_name(monkeypatch, caplog):
 
     monkeypatch.setattr("app.answer_question", fail)
     with caplog.at_level("ERROR", logger=app.logger.name):
-        response = app.test_client().post("/", data={"question": "West"})
+        response = post_form(app.test_client(), "/", data={"question": "West"})
 
     assert response.status_code == 503
     assert "Analysis failed" in caplog.text
@@ -3244,7 +3352,7 @@ def test_ui_sanitizes_invalid_policy_encoding(tmp_path, monkeypatch):
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
         "sql": sql, "params": params or {}, "rows": [row]})
 
-    response = app.test_client().post("/", data={"question": "West since July 2025"})
+    response = post_form(app.test_client(), "/", data={"question": "West since July 2025"})
 
     assert response.status_code == 503
     assert b"Analysis unavailable. Check the local Oracle connection and policy setup, then retry." in response.data
@@ -3256,7 +3364,7 @@ def test_ui_sanitizes_data_quality_error(monkeypatch):
         raise DataQualityError("private-data-quality-details")
 
     monkeypatch.setattr("app.answer_question", failure)
-    response = app.test_client().post("/", data={"question": "West"})
+    response = post_form(app.test_client(), "/", data={"question": "West"})
 
     assert response.status_code == 503
     assert b"Correct missing, incomplete, or duplicate monthly cost records, then retry." in response.data
@@ -3269,7 +3377,7 @@ def test_ui_sanitizes_discount_data_quality_error(monkeypatch):
         raise DiscountDataQualityError("private-data-quality-details")
 
     monkeypatch.setattr("app.answer_question", failure)
-    response = app.test_client().post("/", data={"question": "West"})
+    response = post_form(app.test_client(), "/", data={"question": "West"})
 
     assert response.status_code == 503
     assert b"Correct missing discount, quantity, or unit price inputs, then retry." in response.data
@@ -3282,7 +3390,7 @@ def test_ui_sanitizes_revenue_data_quality_error(monkeypatch):
         raise RevenueDataQualityError("private-data-quality-details")
 
     monkeypatch.setattr("app.answer_question", failure)
-    response = app.test_client().post("/", data={"question": "West"})
+    response = post_form(app.test_client(), "/", data={"question": "West"})
 
     assert response.status_code == 503
     assert b"Correct missing net revenue for sales, then retry." in response.data
@@ -3295,7 +3403,7 @@ def test_ui_sanitizes_downstream_value_error(monkeypatch):
         raise ValueError("private-internal-details")
 
     monkeypatch.setattr("agent.run_sql", failure)
-    response = app.test_client().post("/", data={"question": "West"})
+    response = post_form(app.test_client(), "/", data={"question": "West"})
 
     assert response.status_code == 503
     assert b"Analysis unavailable. Check the local Oracle connection and policy setup, then retry." in response.data
@@ -3314,7 +3422,7 @@ def test_script_starts_and_shows_unavailable_when_setup_fails(monkeypatch):
         started.append(server)
         client = server.test_client()
         assert client.get("/").status_code == 200
-        response = client.post("/", data={"question": "West"})
+        response = post_form(client, "/", data={"question": "West"})
         assert response.status_code == 503
         assert b"Analysis unavailable. Check the local Oracle connection and policy setup, then retry." in response.data
         assert b"secret-driver-settings" not in response.data
@@ -3327,8 +3435,8 @@ def test_ui_oversized_submission(monkeypatch):
         pytest.fail("Oversized submissions must not run analysis")
 
     monkeypatch.setattr("app.answer_question", unexpected_analysis)
-    response = app.test_client().post(
-        "/", data={"question": "x" * (app.config["MAX_CONTENT_LENGTH"] + 1)}
+    response = post_form(
+        app.test_client(), "/", data={"question": "x" * (app.config["MAX_CONTENT_LENGTH"] + 1)}
     )
     assert response.status_code == 413
     assert b'id="question-form"' in response.data
@@ -3337,6 +3445,6 @@ def test_ui_oversized_submission(monkeypatch):
 
 
 def test_ui_escapes_question():
-    response = app.test_client().post("/", data={"question": '<script>alert("x")</script> West'})
+    response = post_form(app.test_client(), "/", data={"question": '<script>alert("x")</script> West'})
     assert response.status_code == 200
     assert b'<script>alert("x")</script>' not in response.data

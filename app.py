@@ -2,8 +2,9 @@
 import builtins
 from decimal import Decimal
 from pathlib import Path
+import secrets
 
-from flask import Flask, render_template, request
+from flask import Flask, abort, render_template, request, session
 import oracledb
 
 from agent import (DataQualityError, DiscountDataQualityError, MissingCostsError,
@@ -11,8 +12,17 @@ from agent import (DataQualityError, DiscountDataQualityError, MissingCostsError
                    RevenueDataQualityError, answer_question)
 
 app = Flask(__name__)
+app.secret_key = secrets.token_hex(32)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024
 app.config["TRUSTED_HOSTS"] = ["localhost", "127.0.0.1"]
+app.config["SESSION_COOKIE_SAMESITE"] = "Strict"
+
+
+@app.template_global()
+def csrf_token():
+    if "csrf_token" not in session:
+        session["csrf_token"] = secrets.token_urlsafe(32)
+    return session["csrf_token"]
 
 
 @app.template_filter()
@@ -39,6 +49,13 @@ def submission_too_large(_):
 @app.route("/", methods=["GET", "POST"])
 def index():
     result, error = None, None
+    if request.method == "POST":
+        if request.headers.get("Origin") != request.host_url.rstrip("/"):
+            abort(403)
+        expected = session.get("csrf_token")
+        submitted = request.form.get("csrf_token", "")
+        if not expected or not secrets.compare_digest(expected.encode(), submitted.encode()):
+            abort(403)
     question = request.form.get("question", "") if request.method == "POST" else "Why did West margin fall since July 2025?"
     status = 200
     if request.method == "POST":
