@@ -1403,6 +1403,141 @@ def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
                 assert supported(part, result["evidence"])
 
 
+@pytest.mark.parametrize("zero_period", ["before", "after", "both"])
+def test_zero_revenue_preserves_available_metrics(zero_period, monkeypatch):
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West'), (2, 'East');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+        """)
+        for region_id in (1, 2):
+            for period, month, freight in (("before", "2025-06", 5), ("after", "2025-07", 8)):
+                zero = (region_id == 1 and zero_period in (period, "both")) or (region_id == 2 and period == "after")
+                con.execute("INSERT INTO sales VALUES (?, 1, ?, ?, 1, 100, ?)",
+                            (region_id, month, 0 if zero else 90, 100 if zero else 10))
+                con.execute("INSERT INTO costs VALUES (?, 1, ?, 60, ?)", (region_id, month, freight))
+
+        def run_sql(sql, params=None):
+            return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
+                con.execute(tools.validate_select(sql), params or {})]}
+
+        monkeypatch.setattr("agent.run_sql", run_sql)
+        policies = [{"id": i, "doc": path.name, "chunk": path.read_text(encoding="utf-8").strip()}
+                    for i, path in enumerate(sorted(Path(__file__).with_name("docs").glob("*.md")), 1)]
+        monkeypatch.setattr("agent.search_policies", lambda _: {
+            "sql": "SELECT policy evidence", "params": {}, "rows": policies})
+        question = "West since July 2025"
+        result = answer_question(question)
+        response = app.test_client().post("/", data={"question": question})
+        assert response.status_code == 200
+
+        rows = {row["region_name"]: row for row in result["evidence"]["E2"]["rows"]}
+        findings = [claim for claim in result["claims"] if claim["kind"] == "finding"]
+        render = lambda claim: "".join(p.get("text", str(p.get("value", "")) + p.get("suffix", ""))
+                                       for p in claim["parts"]).lower()
+        margin = next(claim for claim in findings if "margin" in render(claim))
+        assert "unavailable" in render(margin) and "revenue" in render(margin)
+        assert "missing" not in render(margin)
+        assert "unchanged" not in render(margin)
+        cited = {part["column"] for part in margin["parts"] if "value" in part}
+        for period in ("before", "after"):
+            if zero_period in (period, "both"):
+                assert rows["West"][f"{period}_margin_pct"] is None
+                assert any(part.get("column") == f"{period}_revenue" and part.get("value") == 0
+                           and supported(part, result["evidence"]) for part in margin["parts"])
+            else:
+                assert f"{period}_margin_pct" in cited
+        for metric, values in (("discount", (100 if zero_period in ("before", "both") else 10,
+                                              100 if zero_period in ("after", "both") else 10)),
+                               ("freight", (5, 8))):
+            finding = next(claim for claim in findings if metric in render(claim))
+            columns = ("discount_pct" if metric == "discount" else "freight_per_unit")
+            for period, value in zip(("before", "after"), values):
+                assert rows["West"][f"{period}_{columns}"] == value
+                assert any(part.get("column") == f"{period}_{columns}" and supported(part, result["evidence"])
+                           for part in finding["parts"])
+        comparison = next(claim for claim in result["claims"] if claim["kind"] == "comparison")
+        assert "unavailable" in render(comparison)
+        assert any(part.get("column") == "before_margin_pct" and supported(part, result["evidence"])
+                   for part in comparison["parts"])
+        reason = next(claim for claim in result["claims"] if claim["kind"] == "reason")
+        assert reason["policy_ids"]
+        assert not any(direction in render(reason) for direction in ("unchanged", "decline", "fell", "rose"))
+        assert result["dropped_count"] == 0
+
+        # A genuinely absent period must still be rejected, even when the other has zero revenue.
+        for missing_month in ("2025-06", "2025-07"):
+            con.execute("SAVEPOINT missing_period")
+            con.execute("DELETE FROM sales WHERE region_id=1 AND sale_month=?", (missing_month,))
+            response = app.test_client().post("/", data={"question": question})
+            assert response.status_code == 400
+            assert b"sales both before and after" in response.data
+            con.execute("ROLLBACK TO missing_period")
+            con.execute("RELEASE missing_period")
+
+
+@pytest.mark.parametrize("missing_period", ["before", "after"])
+def test_missing_revenue_is_not_reported_as_zero(missing_period, monkeypatch):
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+        """)
+        for period, month, freight in (("before", "2025-06", 5), ("after", "2025-07", 8)):
+            if period == missing_period:
+                # The partial sum is zero, but a missing value means total revenue is unknown.
+                con.executemany("INSERT INTO sales VALUES (1, 1, ?, ?, 1, 100, ?)",
+                                [(month, None, 10), (month, 0, 100)])
+            else:
+                con.execute("INSERT INTO sales VALUES (1, 1, ?, 90, 1, 100, 10)", (month,))
+            con.execute("INSERT INTO costs VALUES (1, 1, ?, 60, ?)", (month, freight))
+
+        snapshots = []
+
+        def run_sql(sql, params=None):
+            result = {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
+                con.execute(tools.validate_select(sql), params or {})]}
+            snapshots.append(result)
+            return result
+
+        policies = MagicMock(return_value={"rows": []})
+        monkeypatch.setattr("agent.run_sql", run_sql)
+        monkeypatch.setattr("agent.search_policies", policies)
+        with pytest.raises(RevenueDataQualityError, match="Missing net revenue"):
+            answer_question("West since July 2025")
+        policies.assert_not_called()
+
+        month = "2025-06" if missing_period == "before" else "2025-07"
+        monthly = next(row for row in snapshots[0]["rows"] if row["sale_month"] == month)
+        row = snapshots[1]["rows"][0]
+        assert monthly["revenue"] == 0 and monthly["missing_revenue_count"] == 1
+        assert monthly["margin_pct"] is None
+        assert row["missing_revenue_count"] == 1
+        assert row[f"{missing_period}_revenue"] is None
+        assert row[f"{missing_period}_margin_pct"] is None
+        assert row[f"{missing_period}_discount_pct"] == 55
+        assert row[f"{missing_period}_freight_per_unit"] == (5 if missing_period == "before" else 8)
+
+        # Replacing the missing value with an actual zero permits the analysis.
+        con.execute("UPDATE sales SET net_revenue=0 WHERE net_revenue IS NULL")
+        result = answer_question("West since July 2025")
+        row = result["evidence"]["E2"]["rows"][0]
+        assert row[f"{missing_period}_revenue"] == 0
+        margin = next(c for c in result["claims"] if c["kind"] == "finding"
+                      and "margin" in c["parts"][0].get("text", "").lower())
+        assert any(part.get("column") == f"{missing_period}_revenue" and part.get("value") == 0
+                   and supported(part, result["evidence"]) for part in margin["parts"])
+        assert result["dropped_count"] == 0
+
+
 @pytest.mark.parametrize("unavailable_metric", ["discount", "freight"])
 @pytest.mark.parametrize("unavailable_period", ["before", "after", "both"])
 def test_undefined_metric_preserves_other_metric(unavailable_metric, unavailable_period, monkeypatch):
@@ -2679,6 +2814,7 @@ def test_ui_sanitizes_invalid_policy_encoding(tmp_path, monkeypatch):
     monkeypatch.setattr("policies.DOCS", tmp_path)
     row = {"region_name": "West", "missing_cost_count": 0, "missing_discount_count": 0,
            "missing_revenue_count": 0,
+           "before_last_month": "2025-06", "after_first_month": "2025-07",
            "before_margin_pct": 40, "after_margin_pct": 25}
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
         "sql": sql, "params": params or {}, "rows": [row]})
