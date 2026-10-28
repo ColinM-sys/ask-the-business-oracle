@@ -1,5 +1,6 @@
 """Unit checks and live integration against the existing local Oracle tables."""
 import copy
+import hashlib
 import json
 import runpy
 import subprocess
@@ -21,7 +22,7 @@ from db import connect
 from agent import answer_question, parse_question, summary_sql
 from app import app
 from critic import critique, supported
-from policies import ensure_policies, hash_embedding
+from policies import embed, ensure_policies, hash_embedding
 
 
 @pytest.mark.parametrize("wallet", [None, "test-wallet"])
@@ -182,6 +183,53 @@ def test_hashing_is_stable_and_normalized():
     assert abs(sum(v*v for v in first) - 1) < 0.000001
 
 
+@pytest.mark.parametrize("text", ["123", "...", "界"])
+def test_hashing_rejects_zero_vectors(text):
+    with pytest.raises(ValueError, match="nonzero"):
+        hash_embedding(text)
+
+
+def test_model_embedding_rejects_zero_vector():
+    cursor = MagicMock()
+    cursor.execute.return_value.fetchone.return_value = ([0.0, 0.0],)
+
+    with pytest.raises(ValueError, match="nonzero"):
+        embed(cursor, "policy", "MODEL")
+
+
+def test_policy_search_rejects_zero_vector_before_cosine_query(monkeypatch):
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value.__enter__.return_value
+    cursor.execute.return_value.fetchone.return_value = ("hash-v1-512",)
+    monkeypatch.setattr(tools, "ensure_policies", lambda: None)
+    monkeypatch.setattr(tools, "connect", lambda: connection)
+
+    with pytest.raises(ValueError, match="nonzero"):
+        tools.search_policies("123")
+
+    assert not any("VECTOR_DISTANCE" in call.args[0] for call in cursor.execute.call_args_list)
+
+
+def test_zero_vector_policy_rejects_legacy_cache_before_writes(tmp_path, monkeypatch):
+    (tmp_path / "policy.md").write_text("123", encoding="utf-8")
+    old_fingerprint = hashlib.sha256(repr([("policy.md", "123")]).encode()).hexdigest()
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
+    cursor.execute.return_value.fetchall.side_effect = [[], [("hash-v1-512", old_fingerprint)]]
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+
+    with pytest.raises(ValueError, match="nonzero"):
+        ensure_policies()
+
+    assert not any(call.args[0].lstrip().startswith(("DELETE", "INSERT"))
+                   for call in cursor.execute.call_args_list)
+    connection.commit.assert_not_called()
+
+
 @pytest.mark.parametrize("failure", [
     RuntimeError("private-driver-details"),
     oracledb.DatabaseError(SimpleNamespace(code=3113, message="private-driver-details")),
@@ -256,6 +304,7 @@ def test_policy_chunks_fit_byte_limit(character, tmp_path, monkeypatch):
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
     connection.__enter__.return_value = connection
+    monkeypatch.setattr("policies.embed", lambda cur, text, backend: hash_embedding("policy"))
 
     ensure_policies()
 

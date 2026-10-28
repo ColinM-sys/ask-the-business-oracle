@@ -21,7 +21,9 @@ def hash_embedding(text, dimensions=512):
     for word in re.findall(r"[a-z]+", text.lower()):
         digest = hashlib.sha256(word.encode()).digest()
         values[int.from_bytes(digest[:4], "big") % dimensions] += 1
-    norm = math.sqrt(sum(v * v for v in values)) or 1
+    norm = math.sqrt(sum(v * v for v in values))
+    if not norm:
+        raise ValueError("Policy embedding must have a nonzero norm")
     return array("f", (v / norm for v in values))
 
 
@@ -30,10 +32,13 @@ def embed(cursor, text, backend):
         return hash_embedding(text)
     if not re.fullmatch(r"[A-Z][A-Z0-9_$#]*", backend):
         raise ValueError("Invalid embedding model name")
-    return cursor.execute(
+    vector = cursor.execute(
         f"SELECT VECTOR_EMBEDDING({backend} USING :text AS DATA) FROM dual",
         text=text,
     ).fetchone()[0]
+    if not any(vector):
+        raise ValueError("Policy embedding must have a nonzero norm")
+    return vector
 
 
 def ensure_policies():
@@ -42,7 +47,8 @@ def ensure_policies():
         sources = [(p.name, p.read_text(encoding="utf-8")) for p in sorted(DOCS.glob("*.md"))]
         if not sources:
             raise RuntimeError("No policy documents found")
-        fingerprint = hashlib.sha256(repr(sources).encode()).hexdigest()
+        # Revalidate cached chunks created before zero-vector checks were added.
+        fingerprint = hashlib.sha256(repr(("nonzero-v1", sources)).encode()).hexdigest()
         with connect() as con:
             cur = con.cursor()
             if not cur.execute("SELECT table_name FROM user_tables WHERE table_name='POLICY_CHUNKS'").fetchone():
