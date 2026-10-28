@@ -235,6 +235,27 @@ def test_guard_resolves_oracle_table_names(name, monkeypatch):
             tools.run_sql(f"SELECT * FROM sales JOIN {identifier} ON 1=1")
 
 
+@pytest.mark.parametrize("sql, columns, duplicate", [
+    ("SELECT 1 AS amount, 2 AS amount FROM regions", ("AMOUNT", "AMOUNT"), True),
+    ('SELECT 1 AS "Amount", 2 AS "amount" FROM regions', ("Amount", "amount"), True),
+    ('SELECT 1 AS "Amount", 2 AS "other" FROM regions', ("Amount", "other"), False),
+])
+@pytest.mark.parametrize("rows", [[], [(1, 2)]])
+def test_sql_requires_unique_normalized_column_names(sql, columns, duplicate, rows, monkeypatch):
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value.__enter__.return_value
+    cursor.description = [(name,) for name in columns]
+    cursor.fetchmany.return_value = rows
+    monkeypatch.setattr(tools, "connect", lambda: connection)
+
+    if duplicate:
+        with pytest.raises(ValueError, match="(?i)duplicate.*column|unique.*alias"):
+            tools.run_sql(sql)
+    else:
+        assert tools.run_sql(sql)["rows"] == ([{"amount": 1, "other": 2}] if rows else [])
+
+
 @pytest.fixture
 def sample_evidence():
     return {"E1": {"kind": "sql", "sql": "SELECT ...", "rows": [{"margin": 25.53}]},
