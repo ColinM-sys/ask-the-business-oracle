@@ -3,7 +3,7 @@ import builtins
 from decimal import Decimal
 from pathlib import Path
 
-from flask import Flask, render_template, request
+from flask import Flask, abort, render_template, request
 import oracledb
 
 from agent import (DataQualityError, DiscountDataQualityError, MissingCostsError,
@@ -38,6 +38,8 @@ def submission_too_large(_):
 
 @app.route("/", methods=["GET", "POST"])
 def index():
+    if request.method == "POST" and request.headers.get("Origin") != request.host_url.rstrip("/"):
+        abort(403)
     result, error = None, None
     question = request.form.get("question", "") if request.method == "POST" else "Why did West margin fall since July 2025?"
     status = 200
