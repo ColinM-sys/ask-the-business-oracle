@@ -124,6 +124,129 @@ def test_hashing_is_stable_and_normalized():
     assert abs(sum(v*v for v in first) - 1) < 0.000001
 
 
+@pytest.fixture
+def policy_setup(tmp_path, monkeypatch):
+    (tmp_path / "policy.md").write_text("Business policy", encoding="utf-8")
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.__enter__.return_value = cursor
+    state = SimpleNamespace(models=[("GOOD_MODEL", 1, 10)], existing=[], pending=[],
+                            connection=connection, cursor=cursor, docs=tmp_path)
+
+    def execute(sql, *args, **kwargs):
+        if "user_mining_models" in sql:
+            columns = 3 if "object_id" in sql else 2 if "creation_date" in sql else 1
+            cursor.fetchall.return_value = [row[:columns] for row in state.models]
+        elif "SELECT DISTINCT backend" in sql:
+            cursor.fetchall.return_value = state.existing
+        elif sql.startswith("DELETE FROM policy_chunks"):
+            state.pending = []
+        elif sql.startswith("INSERT INTO policy_chunks"):
+            state.pending = [(kwargs["backend"], kwargs["fingerprint"])]
+        elif "VECTOR_DISTANCE" in sql:
+            cursor.fetchall.return_value = [(1, "policy.md", "Business policy", 0.0)]
+        cursor.fetchone.return_value = ("POLICY_CHUNKS",)
+        if sql.startswith("SELECT backend"):
+            cursor.fetchone.return_value = (state.existing[0][0],)
+        return cursor
+
+    def commit():
+        state.existing = state.pending
+
+    cursor.execute.side_effect = execute
+    connection.commit.side_effect = commit
+    state.embedding = MagicMock(side_effect=lambda cur, text, backend: hash_embedding(text))
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies._policy_cache", None, raising=False)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+    monkeypatch.setattr("policies.embed", state.embedding)
+    monkeypatch.setattr(tools, "connect", lambda: connection)
+    monkeypatch.setattr(tools, "embed", state.embedding)
+    return state
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_policy_search_reuses_verified_setup_without_refresh_lock(policy_setup, monkeypatch, existing):
+    state = policy_setup
+    assert ensure_policies() == "GOOD_MODEL"
+    if existing:
+        monkeypatch.setattr("policies._policy_cache", None)
+        assert ensure_policies() == "GOOD_MODEL"
+    state.cursor.reset_mock()
+    state.embedding.reset_mock()
+
+    def unexpected_refresh(*args, **kwargs):
+        pytest.fail("Unchanged policies must not reread documents or take the refresh lock")
+
+    monkeypatch.setattr(Path, "read_text", unexpected_refresh)
+    lock = MagicMock()
+    lock.__enter__.side_effect = unexpected_refresh
+    monkeypatch.setattr("policies._lock", lock)
+    for _ in range(2):
+        assert tools.search_policies("West freight")["rows"]
+
+    assert [call.args[1:] for call in state.embedding.call_args_list] == [
+        ("West freight", "GOOD_MODEL"), ("West freight", "GOOD_MODEL")]
+    statements = [call.args[0] for call in state.cursor.execute.call_args_list]
+    # Model metadata, read-only transaction, snapshot backend, vector search per call.
+    assert len(statements) == 8
+    assert not any("user_tables" in sql or "SELECT DISTINCT" in sql for sql in statements)
+    state.connection.commit.assert_called_once()
+
+
+@pytest.mark.parametrize("change", ["edit", "add", "remove", "rename"])
+def test_policy_cache_invalidates_source_changes(policy_setup, change):
+    state = policy_setup
+    extra = state.docs / "extra.md"
+    extra.write_text("Freight policy", encoding="utf-8")
+    ensure_policies()
+    previous = state.existing
+    if change == "edit":
+        extra.write_text("Updated freight policy", encoding="utf-8")
+    elif change == "add":
+        (state.docs / "new.md").write_text("Discount policy", encoding="utf-8")
+    elif change == "remove":
+        extra.unlink()
+    else:
+        extra.rename(state.docs / "renamed.md")
+
+    assert ensure_policies() == "GOOD_MODEL"
+    assert state.existing != previous
+    assert state.connection.commit.call_count == 2
+
+
+@pytest.mark.parametrize("initial, changed, expected", [
+    ([], [("GOOD_MODEL", 1, 10)], "GOOD_MODEL"),
+    ([("GOOD_MODEL", 1, 10)], [], "hash-v1-512"),
+    ([("GOOD_MODEL", 1, 10)], [("ANOTHER_MODEL", 1, 11), ("GOOD_MODEL", 1, 10)], "ANOTHER_MODEL"),
+    ([("GOOD_MODEL", 1, 10)], [("GOOD_MODEL", 2, 11)], "GOOD_MODEL"),
+    ([("GOOD_MODEL", 1, 10)], [("GOOD_MODEL", 1, 11)], "GOOD_MODEL"),
+])
+def test_policy_cache_invalidates_model_changes(policy_setup, initial, changed, expected):
+    state = policy_setup
+    state.models = initial
+    ensure_policies()
+    previous = state.existing
+    state.models = changed
+
+    assert ensure_policies() == expected
+    assert state.existing != previous
+    assert state.connection.commit.call_count == 2
+
+
+def test_policy_cache_is_populated_only_after_success(policy_setup):
+    state = policy_setup
+    commit = state.connection.commit.side_effect
+    state.connection.commit.side_effect = RuntimeError("Commit failed")
+    with pytest.raises(RuntimeError, match="Commit failed"):
+        ensure_policies()
+    state.connection.commit.side_effect = commit
+
+    assert ensure_policies() == "GOOD_MODEL"
+    assert state.connection.commit.call_count == 2
+
+
 @pytest.mark.parametrize("failure", [
     RuntimeError("private-driver-details"),
     oracledb.DatabaseError(SimpleNamespace(code=3113, message="private-driver-details")),
@@ -135,7 +258,7 @@ def test_policy_probe_propagates_unexpected_failures(failure, tmp_path, monkeypa
     connection.__enter__.return_value = connection
     cursor = connection.cursor.return_value
     cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
-    cursor.execute.return_value.fetchall.side_effect = [[("BROKEN_MODEL",)], []]
+    cursor.execute.return_value.fetchall.side_effect = [[("BROKEN_MODEL", 1, 10)], []]
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
 
@@ -156,8 +279,8 @@ def test_policy_probe_propagates_unexpected_failures(failure, tmp_path, monkeypa
 
 @pytest.mark.parametrize("models, expected", [
     ([], "hash-v1-512"),
-    ([("INCOMPATIBLE_MODEL",)], "hash-v1-512"),
-    ([("INCOMPATIBLE_MODEL",), ("GOOD_MODEL",)], "GOOD_MODEL"),
+    ([("INCOMPATIBLE_MODEL", 1, 10)], "hash-v1-512"),
+    ([("INCOMPATIBLE_MODEL", 1, 10), ("GOOD_MODEL", 1, 11)], "GOOD_MODEL"),
 ])
 def test_policy_probe_fallback_is_explicit_and_sanitized(
         models, expected, tmp_path, monkeypatch, caplog):
