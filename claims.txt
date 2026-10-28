@@ -1,0 +1,7 @@
+# One claim per line. The swarm checks each against the web. Edit freely.
+Autonomous multi-agent swarms outperform a single strong model on real-world software engineering benchmarks.
+AI agents can now complete multi-hour software tasks end to end without human help.
+Most enterprise AI agent deployments in 2026 deliver measurable ROI.
+Open-weight models are within a few points of the best closed models on major reasoning benchmarks.
+Oracle AI Database 26ai runs vector search and relational SQL in the same query without a separate vector store.
+NVIDIA DGX Spark can run a 200B-parameter model locally.
