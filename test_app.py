@@ -394,6 +394,151 @@ def test_delayed_policy_refresh_preserves_newer_content(tmp_path, monkeypatch):
     connection.commit.assert_called_once()
 
 
+@pytest.mark.parametrize("code", [955, 1031])
+def test_policy_table_creation_race(code, tmp_path, monkeypatch):
+    (tmp_path / "policy.md").write_text("Business policy", encoding="utf-8")
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.fetchone.return_value = None
+    cursor.fetchall.return_value = []
+    failure = oracledb.DatabaseError(SimpleNamespace(code=code))
+
+    def execute(sql, **params):
+        if sql.lstrip().startswith("CREATE TABLE"):
+            raise failure
+        return cursor
+
+    cursor.execute.side_effect = execute
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+
+    if code == 955:
+        assert ensure_policies() == "hash-v1-512"
+        cursor.execute.assert_any_call("LOCK TABLE policy_chunks IN EXCLUSIVE MODE")
+        connection.commit.assert_called_once()
+    else:
+        with pytest.raises(oracledb.DatabaseError) as caught:
+            ensure_policies()
+        assert caught.value is failure
+        assert not any(call.args[0].startswith("LOCK TABLE") for call in cursor.execute.call_args_list)
+        connection.commit.assert_not_called()
+
+
+def test_policy_refresh_serializes_database_sessions(tmp_path, monkeypatch):
+    # Use the real Oracle lock with isolated fake rows, so the live corpus is untouched.
+    ensure_policies()
+    document = tmp_path / "policy.md"
+    document.write_text("Old policy", encoding="utf-8")
+    first_embedded = threading.Event()
+    resume_first = threading.Event()
+    second_attempted_lock = threading.Event()
+    second_read = threading.Event()
+    current = threading.local()
+    rows = []
+
+    class Source:
+        name = document.name
+
+        def read_text(self, **kwargs):
+            if current.refresh == "second":
+                second_read.set()
+            return document.read_text(**kwargs)
+
+    class Sources:
+        def glob(self, pattern):
+            return [Source()]
+
+    class Cursor:
+        def __init__(self, cursor):
+            self.cursor = cursor
+
+        def execute(self, sql, **params):
+            if sql.startswith("SELECT table_name"):
+                self.result = [("POLICY_CHUNKS",)]
+            elif sql.startswith("LOCK TABLE"):
+                if current.refresh == "second":
+                    second_attempted_lock.set()
+                self.cursor.execute(sql)
+            elif sql.startswith("SELECT model_name"):
+                self.result = []
+            elif sql.startswith("SELECT DISTINCT backend, source_hash"):
+                self.result = [(row["backend"], row["fingerprint"]) for row in rows]
+            elif sql.startswith("DELETE FROM policy_chunks"):
+                rows.clear()
+            elif sql.lstrip().startswith("INSERT INTO policy_chunks"):
+                rows.append(params)
+            else:
+                raise AssertionError(f"Unexpected SQL: {sql}")
+            return self
+
+        def fetchone(self):
+            return self.result[0] if self.result else None
+
+        def fetchall(self):
+            return self.result
+
+    class Connection:
+        def __enter__(self):
+            self.connection = connect().__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.connection.__exit__(*args)
+
+        def cursor(self):
+            return Cursor(self.connection.cursor())
+
+        def commit(self):
+            self.connection.commit()
+
+    def embedding(cursor, text, backend):
+        if current.refresh == "first":
+            first_embedded.set()
+            assert resume_first.wait(15), "First refresh was not released"
+        return hash_embedding(text)
+
+    def refresh(label):
+        current.refresh = label
+        return ensure_policies()
+
+    monkeypatch.setattr("policies.DOCS", Sources())
+    monkeypatch.setattr("policies.connect", Connection)
+    monkeypatch.setattr("policies.embed", embedding)
+    # Separate processes do not share the Python lock.
+    monkeypatch.setattr("policies._lock", nullcontext())
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(refresh, "first")
+        try:
+            assert first_embedded.wait(10), "First refresh did not reach embedding"
+            with connect() as observer, observer.cursor() as cursor:
+                with pytest.raises(oracledb.DatabaseError) as blocked:
+                    cursor.execute("LOCK TABLE policy_chunks IN EXCLUSIVE MODE NOWAIT")
+                assert blocked.value.args[0].code == 54
+            document.write_text("Updated policy", encoding="utf-8")
+            second = executor.submit(refresh, "second")
+            assert second_attempted_lock.wait(10), "Second refresh did not attempt the database lock"
+            assert not second_read.is_set()
+        finally:
+            resume_first.set()
+        assert first.result(timeout=10) == "hash-v1-512"
+        assert second.result(timeout=10) == "hash-v1-512"
+
+    assert second_read.is_set()
+    assert [row["chunk"] for row in rows] == ["Updated policy"]
+
+    # Both an unchanged refresh and an exception must release the table lock.
+    assert refresh("unchanged") == "hash-v1-512"
+    with connect() as observer, observer.cursor() as cursor:
+        cursor.execute("LOCK TABLE policy_chunks IN EXCLUSIVE MODE NOWAIT")
+    document.write_text(" ", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="No policy content"):
+        refresh("empty")
+    with connect() as observer, observer.cursor() as cursor:
+        cursor.execute("LOCK TABLE policy_chunks IN EXCLUSIVE MODE NOWAIT")
+
+
 def test_policy_search_handles_empty_table(monkeypatch):
     connection = MagicMock()
     connection.__enter__.return_value = connection
