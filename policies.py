@@ -38,7 +38,11 @@ def embed(cursor, text, backend):
     ).fetchone()[0]
 
 
-def ensure_policies():
+def source_fingerprint(sources):
+    return hashlib.sha256(repr(("chunk-v2", sources)).encode()).hexdigest()[:32]
+
+
+def ensure_policies(include_fingerprint=False):
     """Refresh only on source/model changes; never modify the business tables."""
     with _lock:
         with connect() as con:
@@ -58,7 +62,7 @@ def ensure_policies():
             if not sources:
                 raise RuntimeError("No policy documents found")
             # Refresh cached chunks when the chunking algorithm changes.
-            source_hash = hashlib.sha256(repr(("chunk-v2", sources)).encode()).hexdigest()
+            source_hash = source_fingerprint(sources)
             backend = "hash-v1-512"
             model_version = (backend,)
             models = cur.execute(
@@ -103,10 +107,10 @@ def ensure_policies():
             # Tag the collection fingerprint with the model revision. The non-hex prefix
             # also invalidates legacy rows, whose model revision was not recorded.
             version = "v" + hashlib.sha256(repr(model_version).encode()).hexdigest()[:31]
-            fingerprint = version + source_hash[:32]
+            fingerprint = version + source_hash
             existing = cur.execute("SELECT DISTINCT backend, source_hash FROM policy_chunks").fetchall()
             if existing == [(backend, fingerprint)]:
-                return backend
+                return (backend, fingerprint) if include_fingerprint else backend
             chunks = []
             for name, content in sources:
                 # Keep headings with their paragraphs; these short documents fit in one chunk.
@@ -150,7 +154,7 @@ def ensure_policies():
                     VALUES (:id,:doc,:chunk,:vector,:backend,:fingerprint)""",
                     id=index, doc=doc, chunk=chunk, vector=vector, backend=backend, fingerprint=fingerprint)
             con.commit()
-            return backend
+            return (backend, fingerprint) if include_fingerprint else backend
 
 
 if __name__ == "__main__":

@@ -52,15 +52,15 @@
   <p class="intro">Understand what changed, explore the evidence, and decide what to do next. Every number opens the SQL and rows behind it.</p>
   <form method="post" id="question-form">
     <label for="question">Your business question</label>
-    <input id="question" name="question" maxlength="1000" value="{{ question }}" required{% if question_error %} aria-invalid="true" aria-describedby="question-error" autofocus{% endif %}>
+    <input id="question" name="question" maxlength="1000" value="{{ question }}" required aria-describedby="question-hint{% if question_error %} question-error{% endif %}"{% if question_error %} aria-invalid="true" autofocus{% endif %}>
     <button class="submit" type="submit">Analyze question</button>
   </form>
-  <p class="hint">Fixed analysis of margin, discounts and freight. Name a region and comparison month; defaults are West and July 2025. Uses all available sales on each side of that month.</p>
+  <p class="hint" id="question-hint">Fixed analysis of margin, discounts and freight. Name a region and comparison month; defaults are West and July 2025. Uses all available sales on each side of that month.</p>
   {% if error %}<p class="error" role="alert" id="question-error"{% if not question_error %} tabindex="-1" autofocus{% endif %}>{{ error }}</p>{% endif %}
   {% if result %}
   <article class="card" aria-live="polite">
     <div class="eyebrow">Business brief · {{ result.region }}</div>
-    <h2>What changed, and what to do</h2>
+    <h2 tabindex="-1" autofocus>What changed, and what to do</h2>
     <button type="button" class="download" id="download-brief">Download brief</button>
     {% set reasons = result.claims | selectattr('kind', 'equalto', 'reason') | list %}
     {% set actions = result.claims | selectattr('kind', 'equalto', 'action') | list %}
@@ -195,7 +195,7 @@
       const findings = claims.filter(claim => claim.dataset.claimKind !== 'scope').map(claimText);
       const notices = Array.from(document.querySelectorAll('[data-notice]'), notice => escapeText(notice.textContent.trim()));
       const markdown = [
-        '# Business brief', '## Question', escapeText({{ question | tojson }}),
+        '# Business brief', '## Question', block({{ question | tojson }}),
         '## Scope', `Region: ${escapeText({{ result.region | tojson }})}`, ...scope,
         '## Retained claims', ...findings.map(claim => `- ${claim}`),
         '## Verification notices', ...notices.map(notice => `- ${notice}`),
