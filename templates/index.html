@@ -195,7 +195,7 @@
       const findings = claims.filter(claim => claim.dataset.claimKind !== 'scope').map(claimText);
       const notices = Array.from(document.querySelectorAll('[data-notice]'), notice => escapeText(notice.textContent.trim()));
       const markdown = [
-        '# Business brief', '## Question', escapeText({{ question | tojson }}),
+        '# Business brief', '## Question', block({{ question | tojson }}),
         '## Scope', `Region: ${escapeText({{ result.region | tojson }})}`, ...scope,
         '## Retained claims', ...findings.map(claim => `- ${claim}`),
         '## Verification notices', ...notices.map(notice => `- ${notice}`),

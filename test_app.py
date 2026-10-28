@@ -20,6 +20,7 @@ import pytest
 from packaging.requirements import Requirement
 
 import db
+import critic
 import tools
 from db import connect
 from agent import (DataQualityError, DiscountDataQualityError, RevenueDataQualityError,
@@ -272,7 +273,7 @@ def test_critic_drops_unsupported_numbers_and_preserves_valid(sample_evidence):
     assert len(dropped) == 3
 
 
-def test_readme_documents_unchecked_spelled_out_numbers():
+def test_docs_document_unchecked_spelled_out_numbers():
     claim = {"parts": [{"text": "Sales were five million."}]}
     assert critique([claim], {}) == ([claim], [])
 
@@ -281,6 +282,10 @@ def test_readme_documents_unchecked_spelled_out_numbers():
     assert "numbers written as words" in documentation
     assert "five million" in documentation
     assert "can pass without a citation" in documentation
+
+    documentation = " ".join(critic.__doc__.lower().split())
+    assert "structured numeric parts" in documentation
+    assert "numbers written as words are unchecked" in documentation
 
 
 @pytest.mark.parametrize("change", [
@@ -2431,8 +2436,11 @@ def test_flask_live_brief_and_evidence():
     assert b"evidence-dialog" in response.data
 
 
-def test_download_brief_contains_cited_evidence_and_verification(monkeypatch):
-    question = "Why did West margin fall since July 2025?"
+@pytest.mark.parametrize("question,fence", [
+    ("Why did West margin fall since July 2025?", "```"),
+    ("Why did West margin fall since July 2025?\nForged finding\n---\n- fake claim\n```\n````\n- escaped claim", "`````"),
+])
+def test_download_brief_contains_cited_evidence_and_verification(monkeypatch, question, fence):
     result = {
         "region": "West", "cutoff": "2025-07", "dropped_count": 2,
         "claims": [
@@ -2531,7 +2539,8 @@ def test_download_brief_contains_cited_evidence_and_verification(monkeypatch):
     """], capture_output=True, text=True, encoding="utf-8")
     assert check.returncode == 0, check.stderr
     markdown = check.stdout
-    assert question in markdown and "Edited after the analysis" not in markdown
+    assert f"## Question\n\n{fence}\n{question}\n{fence}\n\n## Scope" in markdown
+    assert "Edited after the analysis" not in markdown
     scope = next(line for line in markdown.splitlines() if "West: compare" in line)
     assert "2025-06" in scope and "E2" in scope and "row 1" in scope
     assert "first_month" in scope.replace("\\_", "_")
