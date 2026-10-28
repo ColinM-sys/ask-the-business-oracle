@@ -41,7 +41,7 @@ def critique(claims, evidence):
                 valid &= supported(part, evidence)
                 # Only literal units are supported; magnitude conversions are not.
                 valid &= part.get("suffix", "") in ("", "%", " percentage points")
-                rendered += str(part.get("value", "")) + part.get("suffix", "")
+                rendered += str(part.get("value", "")) + str(part.get("suffix") or "")
         valid &= all(p in evidence and evidence[p].get("kind") == "policy"
                      for p in claim.get("policy_ids", []))
         (kept if valid else dropped).append(claim)
