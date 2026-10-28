@@ -1,4 +1,5 @@
 oracledb>=2.2
+python-dotenv
 openai
 flask>=3.1
 sqlglot>=30.25,<31

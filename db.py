@@ -3,17 +3,14 @@ import os
 import threading
 
 import oracledb
+from dotenv import load_dotenv
 
 _pool = None
 _pool_lock = threading.Lock()
 
 
 def _load_env(path=os.path.join(os.path.dirname(__file__), ".env")):
-    if os.path.exists(path):
-        for line in open(path, encoding="utf-8"):
-            if "=" in line and not line.lstrip().startswith("#"):
-                k, v = line.strip().split("=", 1)
-                os.environ.setdefault(k, v)
+    load_dotenv(dotenv_path=path, override=False)
 
 
 def connect():

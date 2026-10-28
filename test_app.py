@@ -29,6 +29,33 @@ from critic import critique, supported
 from policies import ensure_policies, hash_embedding
 
 
+def test_load_env_parses_quoted_values_and_preserves_existing_variables(tmp_path, monkeypatch):
+    env_file = tmp_path / "settings.env"
+    env_file.write_text(
+        "  ORACLE_USER = 'test user'  # comment\n"
+        ' ORACLE_PASSWORD = "p@ss word= #value" # comment\n'
+        "ORACLE_DSN = 'file-dsn'\n"
+        'ORACLE_WALLET_PASSWORD = "file-password"\n',
+        encoding="utf-8",
+    )
+    for name in ("ORACLE_USER", "ORACLE_PASSWORD"):
+        monkeypatch.setenv(name, "temporary")
+        monkeypatch.delenv(name)
+    monkeypatch.setenv("ORACLE_DSN", "existing-dsn")
+    monkeypatch.setenv("ORACLE_WALLET_PASSWORD", "")
+
+    db._load_env(env_file)
+
+    user = db.os.getenv("ORACLE_USER")
+    password = db.os.getenv("ORACLE_PASSWORD")
+    dsn = db.os.getenv("ORACLE_DSN")
+    wallet_password = db.os.getenv("ORACLE_WALLET_PASSWORD")
+    assert user == "test user"
+    assert password == "p@ss word= #value"
+    assert dsn == "existing-dsn"
+    assert wallet_password == ""
+
+
 @pytest.mark.parametrize("wallet", [None, "test-wallet"])
 def test_connect_reuses_pool_and_preserves_settings(monkeypatch, wallet):
     monkeypatch.setattr(db, "_pool", None, raising=False)
