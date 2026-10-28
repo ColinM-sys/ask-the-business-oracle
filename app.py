@@ -1,22 +1,26 @@
 """Local Flask UI: python app.py, then http://127.0.0.1:5055."""
 import builtins
+from decimal import Decimal
 from pathlib import Path
 
 from flask import Flask, render_template, request
 import oracledb
 
-from agent import MissingCostsError, MissingDiscountInputsError, QuestionValidationError, answer_question
+from agent import (DataQualityError, DiscountDataQualityError, MissingCostsError,
+                   MissingDiscountInputsError, QuestionValidationError,
+                   RevenueDataQualityError, answer_question)
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024
+app.config["TRUSTED_HOSTS"] = ["localhost", "127.0.0.1"]
 
 
 @app.template_filter()
 def browser_evidence(evidence):
-    """Keep integer cells exact across JSON/JavaScript without changing SQL evidence."""
+    """Keep integer and Decimal cells exact in JavaScript without changing SQL evidence."""
     return {
         key: {**item, "rows": [
-            {column: str(value) if isinstance(value, int) and not isinstance(value, bool) else value
+            {column: str(value) if isinstance(value, (int, Decimal)) and not isinstance(value, bool) else value
              for column, value in row.items()}
             for row in item["rows"]
         ]}
@@ -43,9 +47,17 @@ def index():
         except QuestionValidationError as exc:
             error, status = str(exc), 400
         except MissingCostsError:
-            error, status = MissingCostsError.message, 503
+            error, status = (f"Analysis unavailable. {MissingCostsError.message} "
+                             "Correct missing, incomplete, or duplicate monthly cost records, then retry."), 503
         except MissingDiscountInputsError:
-            error, status = MissingDiscountInputsError.message, 503
+            error, status = (f"Analysis unavailable. {MissingDiscountInputsError.message} "
+                             "Correct missing discount, quantity, or unit price inputs, then retry."), 503
+        except DiscountDataQualityError:
+            error, status = "Analysis unavailable. Correct missing discount, quantity, or unit price inputs, then retry.", 503
+        except RevenueDataQualityError:
+            error, status = "Analysis unavailable. Correct missing net revenue for sales, then retry.", 503
+        except DataQualityError:
+            error, status = "Analysis unavailable. Correct missing, incomplete, or duplicate monthly cost records, then retry.", 503
         except Exception as exc:
             # Do not expose connection settings, driver errors or credentials.
             error_type = type(exc)

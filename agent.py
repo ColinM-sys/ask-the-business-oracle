@@ -11,18 +11,30 @@ class QuestionValidationError(ValueError):
     """A user-facing problem with the requested analysis."""
 
 
-class MissingCostsError(ValueError):
+class DataQualityError(ValueError):
+    """The underlying business data cannot support a reliable analysis."""
+
+
+class MissingCostsError(DataQualityError):
     """The sales data has missing or ambiguous costs."""
 
     message = ("Missing monthly costs or duplicate cost rows for some sales. "
                "Check the costs table for missing rows or values and duplicate rows.")
 
 
-class MissingDiscountInputsError(ValueError):
+class DiscountDataQualityError(DataQualityError):
+    """Discount inputs are missing from the underlying sales data."""
+
+
+class MissingDiscountInputsError(DiscountDataQualityError):
     """The sales data lacks inputs needed to calculate discounts."""
 
     message = ("Missing discount inputs for some sales. "
                "Check discount, quantity, and unit price values in the sales table.")
+
+
+class RevenueDataQualityError(DataQualityError):
+    """Net revenue is missing from the underlying sales data."""
 
 
 # SHA-256 of the complete, whitespace-normalized chunks reviewed for the fixed
@@ -35,8 +47,8 @@ REVIEWED_POLICY_HASHES = {
     "west_q3_volume_push.md": "5dc8fd6cd5ce406fcd582abb8220e16d24dbf5fe7a133eb798c5bf871a3f8c1f",
 }
 
-# The fixed claims below were reviewed against these complete document versions.
-# Review the claims again before accepting any changed document digest.
+# The fixed claims below were reviewed against this complete corpus.
+# Review the claims again before accepting any added, removed, or changed document.
 POLICY_SHA256 = {
     "west_q3_volume_push.md": "f5c98d964fc1b7b6a872152b15fef8044ff7a30797a3a65e1b5891e152bf3b71",
     "freight_contract_memo.md": "8b73b6dbad7be9dcdc24759e02da963a465420d4a00f1c0c8b0940c4dd6da747",
@@ -52,16 +64,19 @@ JOIN = """FROM sales s LEFT JOIN
     JOIN regions r ON r.region_id=s.region_id"""
 MISSING_DISCOUNT_COUNT = """SUM(CASE WHEN s.discount_pct IS NULL OR s.quantity IS NULL
     OR s.unit_price IS NULL THEN 1 ELSE 0 END)"""
+MISSING_REVENUE_COUNT = "SUM(CASE WHEN s.net_revenue IS NULL THEN 1 ELSE 0 END)"
 MONTHLY_SQL = f"""SELECT r.region_name, s.sale_month,
     ROUND(SUM(s.net_revenue),2) AS revenue,
     SUM(s.quantity) AS units,
-    ROUND(100*SUM(s.net_revenue-s.quantity*(c.unit_cogs+c.freight_per_unit))
-        /NULLIF(SUM(s.net_revenue),0),2) AS margin_pct,
+    CASE WHEN {MISSING_REVENUE_COUNT}=0 THEN
+        ROUND(100*SUM(s.net_revenue-s.quantity*(c.unit_cogs+c.freight_per_unit))
+            /NULLIF(SUM(s.net_revenue),0),2) END AS margin_pct,
     CASE WHEN {MISSING_DISCOUNT_COUNT}=0 THEN
         ROUND(SUM(s.quantity*s.unit_price*s.discount_pct)
             /NULLIF(SUM(s.quantity*s.unit_price),0),2) END AS discount_pct,
     ROUND(SUM(s.quantity*c.freight_per_unit)/NULLIF(SUM(s.quantity),0),2) AS freight_per_unit,
     SUM(CASE WHEN c.unit_cogs IS NULL OR c.freight_per_unit IS NULL THEN 1 ELSE 0 END) AS missing_cost_count,
+    {MISSING_REVENUE_COUNT} AS missing_revenue_count,
     {MISSING_DISCOUNT_COUNT} AS missing_discount_count
     {JOIN} GROUP BY r.region_name,s.sale_month ORDER BY r.region_name,s.sale_month"""
 
@@ -76,7 +91,7 @@ def summary_sql():
         revenue = total("s.net_revenue")
         units = total("s.quantity")
         raw[period] = {
-            "margin_pct": f"100*{total('s.net_revenue-s.quantity*(c.unit_cogs+c.freight_per_unit)')}/NULLIF({revenue},0)",
+            "margin_pct": f"CASE WHEN {MISSING_REVENUE_COUNT}=0 THEN 100*{total('s.net_revenue-s.quantity*(c.unit_cogs+c.freight_per_unit)')}/NULLIF({revenue},0) END",
             "discount_pct": f"CASE WHEN {MISSING_DISCOUNT_COUNT}=0 THEN {total('s.quantity*s.unit_price*s.discount_pct')}/NULLIF({total('s.quantity*s.unit_price')},0) END",
             "freight_per_unit": f"{total('s.quantity*c.freight_per_unit')}/NULLIF({units},0)",
         }
@@ -84,6 +99,7 @@ def summary_sql():
             columns.append(f"ROUND({expression},2) AS {period}_{name}")
     columns.extend([
         "SUM(CASE WHEN c.unit_cogs IS NULL OR c.freight_per_unit IS NULL THEN 1 ELSE 0 END) AS missing_cost_count",
+        f"{MISSING_REVENUE_COUNT} AS missing_revenue_count",
         f"{MISSING_DISCOUNT_COUNT} AS missing_discount_count",
         f"CASE WHEN ({raw['before']['margin_pct']}) > ({raw['after']['margin_pct']}) THEN 'fell' WHEN ({raw['before']['margin_pct']}) < ({raw['after']['margin_pct']}) THEN 'rose' ELSE 'was unchanged' END AS margin_direction",
         f"ROUND(({raw['before']['margin_pct']})-({raw['after']['margin_pct']}),2) AS margin_drop_pts",
@@ -103,11 +119,13 @@ MONTHS["sept"] = "09"
 
 def parse_question(question):
     unsupported = re.search(
-        r"\b(north|northwest|northeast|southwest|southeast)\b", question, re.I)
+        r"\b(north|northwest|northeast|southwest|southeast)(?:ern)?\b", question, re.I)
     if unsupported:
         raise QuestionValidationError(f"Unsupported region: {unsupported[0]}. Choose West, Central, East, or South.")
-    region_matches = [r for r in ("West", "Central", "East", "South")
-                      if re.search(rf"\b{r}\b", question, re.I)]
+    region_matches = [region for region, pattern in (
+        ("West", r"west(?:ern)?"), ("Central", r"central"),
+        ("East", r"east(?:ern)?"), ("South", r"south(?:ern)?"))
+        if re.search(rf"\b{pattern}\b", question, re.I)]
     if len(region_matches) > 1:
         raise QuestionValidationError("Ask about one region at a time; the evidence includes all regions for comparison.")
     cutoff = "2025-07"
@@ -141,11 +159,16 @@ def answer_question(question):
         raise QuestionValidationError(f"No sales/cost data found for {region}.")
     if any(row["missing_cost_count"] for key in ("E1", "E2") for row in evidence[key]["rows"]):
         raise MissingCostsError(MissingCostsError.message)
+    if any(row["missing_revenue_count"] for key in ("E1", "E2") for row in evidence[key]["rows"]):
+        raise RevenueDataQualityError("Missing net revenue for some sales; cannot analyze incomplete data.")
     if any(row["missing_discount_count"] for key in ("E1", "E2") for row in evidence[key]["rows"]):
         raise MissingDiscountInputsError(MissingDiscountInputsError.message)
     row = rows[index]
     if row["before_margin_pct"] is None or row["after_margin_pct"] is None:
-        raise QuestionValidationError("The comparison date must have sales both before and after it.")
+        raise QuestionValidationError(
+            "The comparison date must have sales both before and after it. "
+            f"{region} sales are available from {row['first_month']} through {row['last_month']}. "
+            "The cutoff must be after the first month and no later than the last month.")
     policies = search_policies(f"{region} margin discount freight policy " + question)
     for policy in policies["rows"]:
         evidence[f"P{policy['id']}"] = {"kind": "policy",
@@ -163,13 +186,17 @@ def answer_question(question):
         return ([text(prefix), number(column, suffix)] if row[column] is not None
                 else [text("unavailable")])
 
+    # An unchanged document can be superseded by any other policy in the corpus.
+    try:
+        corpus_hashes = {
+            path.name: sha256(path.read_text(encoding="utf-8").strip().encode("utf-8")).hexdigest()
+            for path in DOCS.glob("*.md")
+        }
+    except (OSError, UnicodeError):
+        corpus_hashes = {}
+
     def policy_ids(filename):
-        # Verify the whole source too: an old chunk may survive a contradictory addendum.
-        try:
-            source = (DOCS / filename).read_text(encoding="utf-8").strip()
-        except (OSError, UnicodeError):
-            return []
-        if sha256(source.encode("utf-8")).hexdigest() != POLICY_SHA256[filename]:
+        if corpus_hashes != POLICY_SHA256:
             return []
         # These reviewed documents each fit in one chunk; partial text is not proof.
         citations = []
@@ -206,8 +233,10 @@ def answer_question(question):
     for other_index, other in enumerate(rows):
         if other_index != index:
             claim("comparison", [text(f"{other['region_name']} margin: "),
-                number("before_margin_pct", "%", other_index), text(" before; "),
-                number("after_margin_pct", "%", other_index), text(" after.")])
+                number("before_margin_pct", "%", other_index) if other["before_margin_pct"] is not None
+                else text("unavailable"), text(" before; "),
+                number("after_margin_pct", "%", other_index) if other["after_margin_pct"] is not None
+                else text("unavailable"), text(" after.")])
     if region == "West" and cutoff == "2025-07":
         push, freight = policy_ids("west_q3_volume_push.md"), policy_ids("freight_contract_memo.md")
         if push and freight:

@@ -27,8 +27,11 @@ def critique(claims, evidence):
     name the evidence, row, column and exact value. Policy text is evidence for
     qualitative reasons only, never an authority for business numbers. Numeric
     suffixes are limited to "", "%", and " percentage points", without checking
-    the cell's units. Only selected adjacent text modifiers are rejected; other
-    unit or magnitude modifiers, such as "quadrillion", may pass unchecked.
+    the cell's units. The adjacent-text check rejects certain unit and magnitude
+    tokens only at the start of the text after a number, after whitespace and
+    joining adjacent text parts; it does not catch other wording such as
+    ' (in millions)'. Other unit or magnitude modifiers, such as "quadrillion",
+    may pass unchecked.
     """
     kept, dropped = [], []
     for claim in claims:
@@ -45,7 +48,7 @@ def critique(claims, evidence):
                 # A sign must belong to the cited value, even across text parts.
                 valid &= not bool(re.search(r"[+\-\u2212]\s*$", rendered))
                 valid &= supported(part, evidence)
-                # Only literal units are supported; magnitude conversions are not.
+                # Limit suffixes; the cited cell's units are not checked.
                 valid &= part.get("suffix", "") in ("", "%", " percentage points")
                 rendered += str(part.get("value", "")) + str(part.get("suffix") or "")
                 number_tails.append("")
