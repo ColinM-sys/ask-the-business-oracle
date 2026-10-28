@@ -1042,6 +1042,173 @@ def test_flask_live_brief_and_evidence():
     assert b"evidence-dialog" in response.data
 
 
+def test_downloaded_brief_matches_displayed_claims_and_evidence(monkeypatch):
+    question = "Why did West margin fall?"
+    result = {
+        "question": question, "region": "West", "dropped_count": 1,
+        "claims": [
+            {"kind": "scope", "parts": [{"text": "West comparison since July."}], "policy_ids": []},
+            {"kind": "finding", "parts": [
+                {"text": "Margin was "},
+                {"value": 25.6, "suffix": "%", "evidence": "E1", "row": 1, "column": "margin"},
+                {"text": " on "},
+                {"value": 9007199254740993, "suffix": "", "evidence": "E1", "row": 1, "column": "units"},
+                {"text": " units."},
+            ], "policy_ids": []},
+            {"kind": "reason", "parts": [{"text": "The policy explains the change."}], "policy_ids": ["P1"]},
+            {"kind": "action", "parts": [{"text": "Review discounts."}], "policy_ids": ["P1"]},
+        ],
+        "evidence": {
+            "E1": {"kind": "sql", "sql": "SELECT region, margin, units FROM sales WHERE region=:region",
+                   "params": {"region": "West"},
+                   "rows": [{"region": "East", "margin": 30, "units": 4},
+                            {"region": "West", "margin": 25.6, "units": 9007199254740993}]},
+            "P1": {"kind": "policy", "sql": "SELECT doc, chunk FROM policy_chunks WHERE id=:id",
+                   "params": {"id": 1},
+                   "rows": [{"doc": "pricing.md", "chunk": "Review approvals.\n```\nPolicy detail\n```"}]},
+            "E2": {"kind": "sql", "sql": "SELECT unused FROM sales", "params": {}, "rows": []},
+        },
+    }
+    monkeypatch.setattr("app.answer_question", lambda _: result)
+    html = app.test_client().post("/", data={"question": question}).get_data(as_text=True)
+    assert 'id="download-brief"' in html
+
+    # Use the actual rendered claim nodes, including their citation attributes, as
+    # the browser DOM. This checks the download against what the user sees.
+    class ClaimsParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.claims = []
+            self.claim = None
+            self.button = None
+            self.notes = []
+            self.note = None
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == "p" and "brief-claim" in attrs.get("class", "").split():
+                self.claim = {"classes": attrs["class"].split(), "nodes": []}
+                self.claims.append(self.claim)
+            elif tag == "p" and "brief-note" in attrs.get("class", "").split():
+                self.note = []
+                self.notes.append(self.note)
+            elif tag == "button" and self.claim is not None:
+                self.button = {"classes": attrs["class"].split(), "attrs": attrs, "text": ""}
+                self.claim["nodes"].append(self.button)
+
+        def handle_data(self, data):
+            if self.button is not None:
+                self.button["text"] += data
+            elif self.claim is not None:
+                self.claim["nodes"].append({"text": data})
+            elif self.note is not None:
+                self.note.append(data)
+
+        def handle_endtag(self, tag):
+            if tag == "button":
+                self.button = None
+            elif tag == "p":
+                self.claim = None
+                self.note = None
+
+    parser = ClaimsParser()
+    parser.feed(html)
+    assert len(parser.claims) == len(result["claims"])
+    script = html.split("<script>", 1)[1].split("</script>", 1)[0]
+    harness = """
+        const assert = require('node:assert/strict');
+        const rawClaims = RAW_CLAIMS;
+        const notes = RAW_NOTES.map(textContent => ({textContent}));
+        const claims = rawClaims.map(claim => ({
+            classList: {contains: name => claim.classes.includes(name)},
+            childNodes: claim.nodes.map(node => node.attrs ? {
+                nodeType: 1, textContent: node.text,
+                classList: {contains: name => node.classes.includes(name)},
+                dataset: {evidence: node.attrs['data-evidence'],
+                          row: node.attrs['data-row'], column: node.attrs['data-column']},
+            } : {nodeType: 3, textContent: node.text}),
+        }));
+        const handlers = {}, elements = {};
+        let blob, link, clicked = false;
+        global.document = {
+            getElementById(id) {
+                return elements[id] ||= {value: '', addEventListener(event, handler) {
+                    handlers[id + ':' + event] = handler;
+                }};
+            },
+            querySelectorAll(selector) {
+                if (selector === '.brief-claim') return claims;
+                if (selector === '.brief-note') return notes;
+                return [];
+            },
+            createElement(tag) {
+                assert.equal(tag, 'a');
+                return link = {click() { clicked = true; }, remove() {}};
+            },
+            body: {append() {}},
+        };
+        global.URL = {createObjectURL(value) { blob = value; return 'blob:test'; }, revokeObjectURL() {}};
+        global.setTimeout = () => {};
+    """.replace("RAW_CLAIMS", json.dumps(parser.claims)).replace(
+        "RAW_NOTES", json.dumps(["".join(note) for note in parser.notes]))
+    check = subprocess.run(["node", "-e", harness + script + """
+        document.getElementById('question').value = 'A different, unsubmitted question';
+        handlers['download-brief:click']();
+        assert.ok(clicked);
+        blob.text().then(markdown => process.stdout.write(JSON.stringify({
+            markdown, filename: link.download, mime: blob.type,
+        })));
+    """], capture_output=True, text=True, encoding="utf-8")
+    assert check.returncode == 0, check.stderr
+    downloaded = json.loads(check.stdout)
+    markdown = downloaded["markdown"]
+    assert downloaded["filename"].endswith(".md")
+    assert downloaded["mime"].startswith("text/markdown")
+    assert question in markdown
+    assert "A different, unsubmitted question" not in markdown
+    assert "## Scope" in markdown and "Region: West" in markdown
+    assert "## Verified claims" in markdown
+
+    # Remove citation markup to compare the downloaded claims to rendered text.
+    plain = re.sub(r"\[([^]]+)\]\(#evidence-[^)]+\)(?: \(row \d+, column [^)]+\))?", r"\1", markdown)
+    plain = " ".join(plain.split())
+    for claim in parser.claims:
+        displayed = " ".join("".join(
+            (" " if "citation" in node.get("classes", []) else "") + node["text"]
+            for node in claim["nodes"]
+        ).split())
+        assert displayed in plain
+        for node in claim["nodes"]:
+            if "attrs" not in node:
+                continue
+            attrs = node["attrs"]
+            citation = f"[{node['text']}](#evidence-{attrs['data-evidence']})"
+            if "number" in node["classes"]:
+                citation += f" (row {int(attrs['data-row']) + 1}, column {attrs['data-column']})"
+            assert citation in markdown
+    assert "1 claim was omitted because they failed verification." in markdown
+    for evidence_id in ("E1", "P1"):
+        item = result["evidence"][evidence_id]
+        anchor = f'<a id="evidence-{evidence_id}"></a>'
+        assert markdown.count(anchor) == 1
+        section = markdown.split(anchor, 1)[1].split('<a id="evidence-', 1)[0]
+
+        def block(heading):
+            match = re.search(rf"#### {re.escape(heading)}\n\n(`{{3,}})\w*\n(.*?)\n\1(?:\n|$)",
+                              section, re.DOTALL)
+            assert match, f"Missing or malformed {heading} block for {evidence_id}"
+            return match.group(2)
+
+        assert block("SQL") == item["sql"]
+        assert json.loads(block("Bound parameters")) == item["params"]
+        expected_rows = [{key: str(value) if type(value) is int else value
+                          for key, value in row.items()} for row in item["rows"]]
+        assert json.loads(block("Returned rows")) == expected_rows
+        if evidence_id == "P1":
+            assert block("Policy text (row 1)") == item["rows"][0]["chunk"]
+    assert "SELECT unused FROM sales" not in markdown
+
+
 @pytest.mark.parametrize("has_claims,dropped_count", [(True, 0), (True, 2), (False, 2), (False, 0)])
 def test_ui_discloses_dropped_claims_and_empty_brief(monkeypatch, has_claims, dropped_count):
     result = {

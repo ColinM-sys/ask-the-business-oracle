@@ -17,6 +17,7 @@
     input { flex: 1; min-width: 230px; padding: 16px; border: 1px solid #b9ccc2; border-radius: 10px; font: inherit; background: white; }
     button { font: inherit; cursor: pointer; }
     .submit { border: 0; border-radius: 10px; background: #1d5c4f; color: white; padding: 16px 24px; font-weight: 650; }
+    .download { border: 1px solid #1d5c4f; border-radius: 8px; background: white; color: #1d5c4f; padding: 10px 16px; font-weight: 650; }
     .card { background: white; border: 1px solid #dbe3d8; border-radius: 16px; padding: 26px; margin: 22px 0; }
     h2 { margin-top: 0; font-size: 1.35rem; }
     p { line-height: 1.7; }
@@ -59,15 +60,16 @@
   <article class="card" aria-live="polite">
     <div class="eyebrow">Business brief · {{ result.region }}</div>
     <h2>What changed, and what to do</h2>
+    <button type="button" class="download" id="download-brief">Download brief as Markdown</button>
     {% set reasons = result.claims | selectattr('kind', 'equalto', 'reason') | list %}
     {% set actions = result.claims | selectattr('kind', 'equalto', 'action') | list %}
     {% set policy_reasons = reasons | selectattr('policy_ids') | list %}
     {% set policy_actions = actions | selectattr('policy_ids') | list %}
     {% if result.dropped_count %}
-    <p class="error" role="alert">{{ result.dropped_count }} claim{{ 's' if result.dropped_count != 1 else '' }} {{ 'were' if result.dropped_count != 1 else 'was' }} omitted because they failed verification.</p>
+    <p class="error brief-note" role="alert">{{ result.dropped_count }} claim{{ 's' if result.dropped_count != 1 else '' }} {{ 'were' if result.dropped_count != 1 else 'was' }} omitted because they failed verification.</p>
     {% endif %}
     {% for claim in result.claims %}
-      <p class="{{ claim.kind }}">
+      <p class="{{ claim.kind }} brief-claim">
       {%- for part in claim.parts -%}
         {%- if 'text' in part -%}{{ part.text }}
         {%- else -%}<button type="button" class="number" data-evidence="{{ part.evidence }}" data-row="{{ part.row }}" data-column="{{ part.column }}" aria-label="Evidence for {{ part.value }}{{ part.suffix }}">{{ part.value }}{{ part.suffix }}</button>{%- endif -%}
@@ -75,16 +77,16 @@
       {% for id in claim.policy_ids %}<button type="button" class="citation" data-evidence="{{ id }}" aria-label="{{ id }}: {{ result.evidence[id].rows[0].doc }}">{{ id }}</button>{% endfor %}
       </p>
     {% else %}
-    <p>No verified claims are available for this brief.</p>
+    <p class="brief-note">No verified claims are available for this brief.</p>
     {% endfor %}
     {% if not policy_reasons %}
-    <p class="hint">{% if not reasons %}Explanation unavailable: {% endif %}Policy-backed explanation is unavailable for this brief.</p>
+    <p class="hint brief-note">{% if not reasons %}Explanation unavailable: {% endif %}Policy-backed explanation is unavailable for this brief.</p>
     {% endif %}
     {% if not policy_actions %}
-    <p class="hint">{% if not actions %}Recommendations unavailable: {% endif %}Policy-backed recommendations are unavailable for this brief.</p>
+    <p class="hint brief-note">{% if not actions %}Recommendations unavailable: {% endif %}Policy-backed recommendations are unavailable for this brief.</p>
     {% endif %}
     {% if result.claims %}
-    <p class="hint">Numbers in retained claims verified against cited SQL cells.{% if policy_reasons %} Policy citations support the qualitative explanation.{% endif %}</p>
+    <p class="hint brief-note">Numbers in retained claims verified against cited SQL cells.{% if policy_reasons %} Policy citations support the qualitative explanation.{% endif %}</p>
     {% endif %}
     <details><summary>Explore all evidence</summary>
       <p>{% for id in result.evidence %}<button type="button" class="citation" data-evidence="{{ id }}"{% if result.evidence[id].kind == 'policy' %} aria-label="{{ id }}: {{ result.evidence[id].rows[0].doc }}"{% endif %}>{{ id }}</button>{% endfor %}</p>
@@ -100,6 +102,8 @@
   </dialog>
   <script>
     const evidence = {{ result.evidence | browser_evidence | tojson }};
+    const briefQuestion = {{ question | tojson }};
+    const briefRegion = {{ result.region | tojson }};
     const dialog = document.getElementById('evidence-dialog');
     document.querySelectorAll('[data-evidence]').forEach(button => button.addEventListener('click', () => {
       const item = evidence[button.dataset.evidence];
@@ -130,6 +134,58 @@
       dialog.querySelector('.selected')?.scrollIntoView({block: 'nearest'});
     }));
     document.getElementById('close-dialog').addEventListener('click', () => dialog.close());
+    document.getElementById('download-brief').addEventListener('click', () => {
+      const referenced = new Set();
+      const escapeMarkdown = text => String(text).replace(/[\\`*_{}\[\]<>#!|]/g, '\\$&');
+      const renderClaim = claim => Array.from(claim.childNodes, node => {
+        if (node.nodeType !== 1 || !node.dataset.evidence) return escapeMarkdown(node.textContent);
+        const id = node.dataset.evidence;
+        referenced.add(id);
+        const link = `[${escapeMarkdown(node.textContent)}](#evidence-${encodeURIComponent(id)})`;
+        return node.classList.contains('number')
+          ? `${link} (row ${Number(node.dataset.row) + 1}, column ${escapeMarkdown(node.dataset.column)})`
+          : ` ${link}`;
+      }).join('').replace(/\s+/g, ' ').trim();
+      const claims = Array.from(document.querySelectorAll('.brief-claim'));
+      const scope = claims.filter(claim => claim.classList.contains('scope')).map(renderClaim);
+      const findings = claims.filter(claim => !claim.classList.contains('scope')).map(renderClaim);
+      const notes = Array.from(document.querySelectorAll('.brief-note'), note => escapeMarkdown(note.textContent.trim()));
+      // A longer fence keeps backticks in SQL or policy text inside the block.
+      const codeBlock = (text, language = '') => {
+        text = String(text ?? '');
+        const fence = '`'.repeat(Math.max(3, ...(text.match(/`+/g) || []).map(run => run.length + 1)));
+        return `${fence}${language}\n${text}\n${fence}`;
+      };
+      const markdown = [
+        '# Business brief', '', `Question: ${escapeMarkdown(briefQuestion)}`, '',
+        '## Scope', '', `Region: ${escapeMarkdown(briefRegion)}`, '',
+        ...scope.flatMap(claim => [claim, '']),
+        '## Verified claims', '',
+        ...findings.flatMap(claim => [claim, '']),
+      ];
+      if (notes.length) markdown.push('## Brief notes', '', ...notes.flatMap(note => [note, '']));
+      if (referenced.size) markdown.push('## Supporting evidence', '');
+      for (const id of referenced) {
+        const item = evidence[id];
+        markdown.push(`<a id="evidence-${encodeURIComponent(id)}"></a>`, '',
+          `### ${escapeMarkdown(id)} · ${item.kind === 'sql' ? 'Business data' : 'Policy search'}`, '',
+          '#### SQL', '', codeBlock(item.sql, 'sql'), '',
+          '#### Bound parameters', '', codeBlock(JSON.stringify(item.params, null, 2), 'json'), '',
+          '#### Returned rows', '', codeBlock(JSON.stringify(item.rows, null, 2), 'json'), '');
+        if (item.kind === 'policy') item.rows.forEach((row, index) => {
+          if (typeof row.chunk === 'string') markdown.push(`#### Policy text (row ${index + 1})`, '', codeBlock(row.chunk), '');
+        });
+      }
+      const url = URL.createObjectURL(new Blob([markdown.join('\n')], {type: 'text/markdown;charset=utf-8'}));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'business-brief.md';
+      link.hidden = true;
+      document.body.append(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    });
   </script>
   {% endif %}
   <script>
