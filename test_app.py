@@ -732,6 +732,22 @@ def test_question_scope():
         parse_question("West and East")
 
 
+@pytest.mark.parametrize("name, expected", [
+    ("Eastern", "East"), ("eAsTeRn", "East"),
+    ("Western", "West"), ("Southern", "South"), ("Central", "Central"),
+])
+def test_question_recognizes_region_adjectives(name, expected):
+    assert parse_question(f"Why did the {name} region's margin fall since July 2025?") == (expected, "2025-07")
+
+
+def test_question_counts_region_adjectives_as_the_same_region():
+    assert parse_question("East and Eastern since July 2025") == ("East", "2025-07")
+
+
+@pytest.mark.parametrize("regions", ["West and Eastern", "Western and East", "Southern and East"])
+def test_question_rejects_multiple_regions_with_adjectives(regions):
+    with pytest.raises(ValueError, match="one region"):
+        parse_question(f"{regions} since July 2025")
 @pytest.mark.parametrize("region_id", [1, 2])
 @pytest.mark.parametrize("month", ["2025-06", "2025-07"])
 @pytest.mark.parametrize("incomplete_when", ["both", "monthly", "summary"])
@@ -811,11 +827,11 @@ def test_missing_net_revenue_rejects_analysis(region_id, month, incomplete_when,
         assert result["dropped_count"] == 0
 
 
-@pytest.mark.parametrize("column", ["discount_pct", "quantity", "unit_price"])
+@pytest.mark.parametrize("column", ["discount_pct", "quantity", "unit_price", "net_revenue"])
 @pytest.mark.parametrize("region_id", [1, 2])
 @pytest.mark.parametrize("month", ["2025-06", "2025-07"])
 @pytest.mark.parametrize("incomplete_when", ["both", "monthly", "summary"])
-def test_missing_discount_inputs_reject_analysis(column, region_id, month, incomplete_when, monkeypatch):
+def test_missing_sales_inputs_reject_analysis(column, region_id, month, incomplete_when, monkeypatch):
     with sqlite3.connect(":memory:") as con:
         con.row_factory = sqlite3.Row
         con.executescript("""
@@ -833,6 +849,8 @@ def test_missing_discount_inputs_reject_analysis(column, region_id, month, incom
                             (current_region, current_month))
         sale_id = con.execute("INSERT INTO sales VALUES (?, 1, ?, 100.0, 1, 100.0, 0)",
                               (region_id, month)).lastrowid
+        if column == "net_revenue":
+            con.execute("UPDATE sales SET net_revenue=0 WHERE rowid=?", (sale_id,))
 
         def execute(sql, params=None):
             return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
@@ -854,7 +872,7 @@ def test_missing_discount_inputs_reject_analysis(column, region_id, month, incom
         def set_input(value):
             con.execute(f"UPDATE sales SET {column}=? WHERE rowid=?", (value, sale_id))
 
-        valid_value = {"discount_pct": 0, "quantity": 1, "unit_price": 100.0}[column]
+        valid_value = {"discount_pct": 0, "quantity": 1, "unit_price": 100.0, "net_revenue": 0}[column]
         if incomplete_when != "summary":
             set_input(None)
         snapshots = []
@@ -870,12 +888,21 @@ def test_missing_discount_inputs_reject_analysis(column, region_id, month, incom
             return result
 
         monkeypatch.setattr("agent.run_sql", run_sql)
-        with pytest.raises(DiscountDataQualityError, match="Missing discount inputs"):
+        error = RevenueDataQualityError if column == "net_revenue" else DiscountDataQualityError
+        message = "Missing net revenue" if column == "net_revenue" else "Missing discount inputs"
+        with pytest.raises(error, match=message):
             answer_question("West since July 2025")
         policies.assert_not_called()
-        for snapshot in snapshots:
+        assert len(snapshots) == 2
+        for index, snapshot in enumerate(snapshots):
             for row in snapshot["rows"]:
-                if row["missing_discount_count"]:
+                if column == "net_revenue":
+                    incomplete = incomplete_when == "both" or incomplete_when == (
+                        "monthly" if index == 0 else "summary")
+                    affected = row["region_name"] == region and (
+                        "sale_month" not in row or row["sale_month"] == month)
+                    assert row["missing_revenue_count"] == int(incomplete and affected)
+                elif row["missing_discount_count"]:
                     if "sale_month" in row:
                         assert row["discount_pct"] is None
                     else:
@@ -885,7 +912,9 @@ def test_missing_discount_inputs_reject_analysis(column, region_id, month, incom
         monkeypatch.setattr("agent.run_sql", execute)
         response = app.test_client().post("/", data={"question": "West since July 2025"})
         assert response.status_code == 503
-        assert b"Correct missing discount, quantity, or unit price inputs, then retry." in response.data
+        message = (b"Correct missing net revenue for sales, then retry." if column == "net_revenue"
+                   else b"Correct missing discount, quantity, or unit price inputs, then retry.")
+        assert message in response.data
         policies.assert_not_called()
 
 
@@ -1443,7 +1472,8 @@ def test_question_rejects_unsupported_explicit_dates(date):
 
 def test_question_defaults_only_without_date():
     assert parse_question("Why did West margin fall?") == ("West", "2025-07")
-@pytest.mark.parametrize("region", ["North", "north", "Northeast", "Northwest", "Southeast", "Southwest", "West and North"])
+@pytest.mark.parametrize("region", ["North", "north", "Northeast", "Northwest", "Southeast", "Southwest", "West and North",
+                                    "Northern", "Northeastern", "Northwestern", "Southeastern", "Southwestern", "West and Northern"])
 def test_unsupported_region_is_rejected_before_querying(monkeypatch, region):
     def forbidden_query(*args, **kwargs):
         pytest.fail("Unsupported regions must be rejected before querying")
@@ -2283,7 +2313,8 @@ def test_ui_validation_and_safe_error(monkeypatch):
 def test_ui_sanitizes_invalid_policy_encoding(tmp_path, monkeypatch):
     (tmp_path / "policy.md").write_bytes(b"\xff")
     monkeypatch.setattr("policies.DOCS", tmp_path)
-    row = {"region_name": "West", "missing_cost_count": 0, "missing_discount_count": 0, "missing_revenue_count": 0,
+    row = {"region_name": "West", "missing_cost_count": 0, "missing_discount_count": 0,
+           "missing_revenue_count": 0,
            "before_margin_pct": 40, "after_margin_pct": 25}
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
         "sql": sql, "params": params or {}, "rows": [row]})

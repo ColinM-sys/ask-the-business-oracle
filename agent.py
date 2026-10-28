@@ -105,11 +105,13 @@ MONTHS["sept"] = "09"
 
 def parse_question(question):
     unsupported = re.search(
-        r"\b(north|northwest|northeast|southwest|southeast)\b", question, re.I)
+        r"\b(north|northwest|northeast|southwest|southeast)(?:ern)?\b", question, re.I)
     if unsupported:
         raise QuestionValidationError(f"Unsupported region: {unsupported[0]}. Choose West, Central, East, or South.")
-    region_matches = [r for r in ("West", "Central", "East", "South")
-                      if re.search(rf"\b{r}\b", question, re.I)]
+    region_matches = [region for region, pattern in (
+        ("West", r"west(?:ern)?"), ("Central", r"central"),
+        ("East", r"east(?:ern)?"), ("South", r"south(?:ern)?"))
+        if re.search(rf"\b{pattern}\b", question, re.I)]
     if len(region_matches) > 1:
         raise QuestionValidationError("Ask about one region at a time; the evidence includes all regions for comparison.")
     cutoff = "2025-07"
