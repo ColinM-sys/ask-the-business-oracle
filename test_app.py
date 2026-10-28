@@ -874,6 +874,37 @@ def test_ui_discloses_dropped_claims_and_empty_brief(monkeypatch, has_claims, dr
     assert (b"No verified claims are available for this brief." in response.data) == (not has_claims)
     assert (b"Numbers in retained claims verified against cited SQL cells." in response.data) == has_claims
     assert (b"Retained finding." in response.data) == has_claims
+    assert b"Policy-backed explanation is unavailable for this brief." in response.data
+    assert b"Policy-backed recommendations are unavailable for this brief." in response.data
+
+
+@pytest.mark.parametrize("unavailable,question,missing_reason,missing_actions", [
+    ((), "West since July 2025", False, False),
+    (("west_q3_volume_push.md",), "West since July 2025", True, False),
+    (("pricing_policy.md",), "West since July 2025", False, True),
+    (("west_q3_volume_push.md", "pricing_policy.md"), "West since July 2025", True, True),
+    (None, "West since July 2025", True, True),
+    ((), "West since August 2025", True, False),
+])
+def test_ui_reports_unavailable_policy_claims(
+        policy_rows, unavailable, question, missing_reason, missing_actions):
+    if unavailable is None:
+        policy_rows.clear()
+    else:
+        for policy in policy_rows:
+            if policy["doc"] in unavailable:
+                policy["chunk"] = "This policy has changed."
+
+    response = app.test_client().post("/", data={"question": question})
+
+    assert response.status_code == 200
+    assert b'data-evidence="E2"' in response.data
+    assert b"West gross margin fell from" in response.data
+    assert (b"Policy-backed explanation is unavailable for this brief." in response.data) == missing_reason
+    assert (b"Policy-backed recommendations are unavailable for this brief." in response.data) == missing_actions
+    assert (b"Policy citations support the qualitative explanation." in response.data) == (not missing_reason)
+
+
 @pytest.mark.parametrize("data", [None, {}, {"unrelated": "value"}, {"question": ""}])
 def test_ui_missing_question_rejected_before_querying(monkeypatch, data):
     def forbidden_query(*args, **kwargs):
