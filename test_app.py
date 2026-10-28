@@ -28,6 +28,7 @@ from policies import ensure_policies, hash_embedding
     "SELECT * INTO shadow FROM sales", "SELECT my_function() FROM sales",
     "SELECT dbms_random.value() FROM sales", "SELECT seq.nextval FROM sales",
     "SELECT * FROM user_users", "SELECT * FROM other.sales",
+    'SELECT * FROM "sales"', 'SELECT * FROM "SaLeS"',
     "WITH x AS (SELECT * FROM sales) DELETE FROM sales", "", "-- just a comment",
     "SELECT UTL_HTTP.REQUEST('https://example.com') FROM sales",
     "SELECT * FROM sales UNION ALL SELECT * FROM sales",
@@ -45,6 +46,12 @@ def test_guard_refuses_before_connect(sql, monkeypatch):
 def test_guard_accepts_comments_and_harmless_string():
     tools.validate_select("/* report */ SELECT COUNT(*) FROM sales WHERE sale_month=:month;")
     tools.validate_select("SELECT 'DROP TABLE sales' AS harmless FROM regions")
+
+
+@pytest.mark.parametrize("table", ["sales", "SALES", "SaLeS", '"SALES"'])
+def test_guard_accepts_oracle_resolved_table_names(table):
+    sql = f"SELECT * FROM {table}"
+    assert tools.validate_select(sql) == sql
 
 
 @pytest.fixture
