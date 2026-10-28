@@ -30,17 +30,25 @@ POLICY_SHA256 = {
     "regional_playbook.md": "6a3fd585c58b2528206a9545db63db828c836ce0a265e1fb3fc90525d6ab03d8",
 }
 
-JOIN = """FROM sales s LEFT JOIN costs c ON c.region_id=s.region_id
+JOIN = """FROM sales s LEFT JOIN
+    (SELECT region_id, product_id, cost_month, MIN(unit_cogs) AS unit_cogs,
+        MIN(freight_per_unit) AS freight_per_unit FROM costs
+        GROUP BY region_id, product_id, cost_month HAVING COUNT(*)=1) c ON c.region_id=s.region_id
     AND c.product_id=s.product_id AND c.cost_month=s.sale_month
     JOIN regions r ON r.region_id=s.region_id"""
+MISSING_DISCOUNT_COUNT = """SUM(CASE WHEN s.discount_pct IS NULL OR s.quantity IS NULL
+    OR s.unit_price IS NULL THEN 1 ELSE 0 END)"""
 MONTHLY_SQL = f"""SELECT r.region_name, s.sale_month,
     ROUND(SUM(s.net_revenue),2) AS revenue,
     SUM(s.quantity) AS units,
     ROUND(100*SUM(s.net_revenue-s.quantity*(c.unit_cogs+c.freight_per_unit))
         /NULLIF(SUM(s.net_revenue),0),2) AS margin_pct,
-    ROUND(SUM(s.quantity*s.unit_price*s.discount_pct)
-        /NULLIF(SUM(s.quantity*s.unit_price),0),2) AS discount_pct,
-    ROUND(SUM(s.quantity*c.freight_per_unit)/NULLIF(SUM(s.quantity),0),2) AS freight_per_unit
+    CASE WHEN {MISSING_DISCOUNT_COUNT}=0 THEN
+        ROUND(SUM(s.quantity*s.unit_price*s.discount_pct)
+            /NULLIF(SUM(s.quantity*s.unit_price),0),2) END AS discount_pct,
+    ROUND(SUM(s.quantity*c.freight_per_unit)/NULLIF(SUM(s.quantity),0),2) AS freight_per_unit,
+    SUM(CASE WHEN c.unit_cogs IS NULL OR c.freight_per_unit IS NULL THEN 1 ELSE 0 END) AS missing_cost_count,
+    {MISSING_DISCOUNT_COUNT} AS missing_discount_count
     {JOIN} GROUP BY r.region_name,s.sale_month ORDER BY r.region_name,s.sale_month"""
 
 
@@ -55,13 +63,14 @@ def summary_sql():
         units = total("s.quantity")
         raw[period] = {
             "margin_pct": f"100*{total('s.net_revenue-s.quantity*(c.unit_cogs+c.freight_per_unit)')}/NULLIF({revenue},0)",
-            "discount_pct": f"{total('s.quantity*s.unit_price*s.discount_pct')}/NULLIF({total('s.quantity*s.unit_price')},0)",
+            "discount_pct": f"CASE WHEN {MISSING_DISCOUNT_COUNT}=0 THEN {total('s.quantity*s.unit_price*s.discount_pct')}/NULLIF({total('s.quantity*s.unit_price')},0) END",
             "freight_per_unit": f"{total('s.quantity*c.freight_per_unit')}/NULLIF({units},0)",
         }
         for name, expression in raw[period].items():
             columns.append(f"ROUND({expression},2) AS {period}_{name}")
     columns.extend([
         "SUM(CASE WHEN c.unit_cogs IS NULL OR c.freight_per_unit IS NULL THEN 1 ELSE 0 END) AS missing_cost_count",
+        f"{MISSING_DISCOUNT_COUNT} AS missing_discount_count",
         f"CASE WHEN ({raw['before']['margin_pct']}) > ({raw['after']['margin_pct']}) THEN 'fell' WHEN ({raw['before']['margin_pct']}) < ({raw['after']['margin_pct']}) THEN 'rose' ELSE 'was unchanged' END AS margin_direction",
         f"ROUND(({raw['before']['margin_pct']})-({raw['after']['margin_pct']}),2) AS margin_drop_pts",
         f"ROUND(100*(({raw['after']['freight_per_unit']})/NULLIF(({raw['before']['freight_per_unit']}),0)-1),2) AS freight_increase_pct",
@@ -116,8 +125,10 @@ def answer_question(question):
     index = next((i for i, row in enumerate(rows) if row["region_name"] == region), None)
     if index is None:
         raise QuestionValidationError(f"No sales/cost data found for {region}.")
-    if any(row["missing_cost_count"] for row in rows):
-        raise ValueError("Missing monthly costs for some sales; cannot analyze incomplete data.")
+    if any(row["missing_cost_count"] for key in ("E1", "E2") for row in evidence[key]["rows"]):
+        raise ValueError("Missing monthly costs or duplicate cost rows for some sales; cannot analyze incomplete or ambiguous data.")
+    if any(row["missing_discount_count"] for key in ("E1", "E2") for row in evidence[key]["rows"]):
+        raise ValueError("Missing discount inputs for some sales; cannot analyze incomplete data.")
     row = rows[index]
     if row["before_margin_pct"] is None or row["after_margin_pct"] is None:
         raise QuestionValidationError("The comparison date must have sales both before and after it.")
@@ -133,6 +144,10 @@ def answer_question(question):
     def number(column, suffix="", row_index=index):
         return {"value": rows[row_index][column], "evidence": "E2", "row": row_index,
                 "column": column, "suffix": suffix}
+
+    def metric(column, prefix="", suffix=""):
+        return ([text(prefix), number(column, suffix)] if row[column] is not None
+                else [text("unavailable")])
 
     def policy_ids(filename):
         # Verify the whole source too: an old chunk may survive a contradictory addendum.
@@ -169,12 +184,11 @@ def answer_question(question):
     claim("finding", [text(f"{region} gross margin {direction} from "), number("before_margin_pct", "%"),
         text(" to "), number("after_margin_pct", "%"), text("; the signed margin drop is "),
         number("margin_drop_pts", " percentage points"), text("." + precision_note)])
-    freight_parts = [text("Average discount moved from "), number("before_discount_pct", "%"),
-        text(" to "), number("after_discount_pct", "%"), text(". Freight per unit moved from $"),
-        number("before_freight_per_unit"), text(" to $"), number("after_freight_per_unit")]
-    if row["freight_increase_pct"] is not None:
-        freight_parts.extend([text(" (change: "), number("freight_increase_pct", "%"), text(")")])
-    claim("finding", freight_parts + [text(".")])
+    claim("finding", [text("Average discount: before ")] + metric("before_discount_pct", suffix="%")
+        + [text("; after ")] + metric("after_discount_pct", suffix="%") + [text(".")])
+    claim("finding", [text("Freight per unit: before ")] + metric("before_freight_per_unit", prefix="$")
+        + [text("; after ")] + metric("after_freight_per_unit", prefix="$")
+        + [text("; change: ")] + metric("freight_increase_pct", suffix="%") + [text(".")])
     for other_index, other in enumerate(rows):
         if other_index != index:
             claim("comparison", [text(f"{other['region_name']} margin: "),
