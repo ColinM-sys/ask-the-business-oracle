@@ -1647,7 +1647,7 @@ def test_ui_missing_question_rejected_before_querying(monkeypatch, data):
     assert response.status_code == 400
 
 
-def test_focus_indicator_contrasts_with_page_and_cards():
+def test_ui_boundaries_contrast_with_adjacent_backgrounds():
     html = app.test_client().get("/").get_data(as_text=True)
 
     def declaration(selector, name):
@@ -1665,11 +1665,17 @@ def test_focus_indicator_contrasts_with_page_and_cards():
                   for c in channels]
         return sum(weight * channel for weight, channel in zip((0.2126, 0.7152, 0.0722), linear))
 
-    outline = declaration(":focus-visible", "outline").split()[-1]
-    for surface in (declaration(":root", "background"), declaration(".card", "background")):
-        dark, light = sorted((luminance(outline), luminance(surface)))
-        contrast = (light + 0.05) / (dark + 0.05)
-        assert contrast >= 3, f"Focus outline {outline} has {contrast:.2f}:1 contrast against {surface}"
+    page = declaration(":root", "background")
+    for boundary, surfaces in (
+        (declaration(":focus-visible", "outline").split()[-1],
+         (page, declaration(".card", "background"))),
+        (declaration("input", "border").split()[-1],
+         (page, declaration("input", "background"))),
+    ):
+        for surface in surfaces:
+            dark, light = sorted((luminance(boundary), luminance(surface)))
+            contrast = (light + 0.05) / (dark + 0.05)
+            assert contrast >= 3, f"Boundary {boundary} has {contrast:.2f}:1 contrast against {surface}"
 
 
 def test_ui_restores_submit_button_on_pageshow():
@@ -1750,6 +1756,56 @@ def test_evidence_dialog_preserves_exact_integers(monkeypatch):
     assert check.returncode == 0, check.stderr
 
 
+def test_evidence_dialog_explains_empty_rows(monkeypatch):
+    result = {
+        "region": "West", "claims": [], "evidence": {
+            "E1": {"kind": "sql", "sql": "SELECT ...", "params": {}, "rows": []},
+            "E2": {"kind": "sql", "sql": "SELECT ...", "params": {},
+                   "rows": [{"region": "West"}]},
+        },
+    }
+    monkeypatch.setattr("app.answer_question", lambda _: result)
+    response = app.test_client().post("/", data={"question": "West"})
+    assert response.status_code == 200
+    script = response.get_data(as_text=True).split("<script>", 1)[1].split("</script>", 1)[0]
+    check = subprocess.run(["node", "-e", """
+        const assert = require('node:assert/strict');
+        class Element {
+            constructor() { this.children = []; this.value = ''; }
+            set textContent(value) { this.value = String(value); this.children = []; }
+            get textContent() { return this.value + this.children.map(child => typeof child === 'string' ? child : child.textContent).join(''); }
+            append(...children) { this.children.push(...children); }
+            replaceChildren(...children) { this.value = ''; this.children = children; }
+            addEventListener() {}
+            showModal() {}
+            querySelector() { return null; }
+            createTHead() { const child = new Element(); this.append(child); return child; }
+            createTBody() { const child = new Element(); this.append(child); return child; }
+            insertRow() { const child = new Element(); this.append(child); return child; }
+            insertCell() { const child = new Element(); this.append(child); return child; }
+        }
+        const elements = {};
+        const buttons = ['E1', 'E2'].map(id => ({
+            dataset: {evidence: id},
+            addEventListener: (_, handler) => { buttonsById[id] = handler; },
+        }));
+        const buttonsById = {};
+        global.document = {
+            getElementById: id => elements[id] ||= new Element(),
+            querySelectorAll: () => buttons,
+            createElement: () => new Element(),
+        };
+    """ + script + """
+        buttonsById.E2();
+        const rows = elements['evidence-rows'];
+        assert.match(rows.textContent, /West/);
+        buttonsById.E1();
+        assert.equal(rows.textContent.trim(), 'No rows returned');
+        buttonsById.E2();
+        assert.match(rows.textContent, /West/);
+        assert.doesNotMatch(rows.textContent, /No rows returned/);
+    """], capture_output=True, text=True)
+    assert check.returncode == 0, check.stderr
 def test_evidence_rows_region_is_keyboard_focusable_and_named(monkeypatch):
     monkeypatch.setattr("app.answer_question", lambda _: {
         "region": "West", "claims": [], "evidence": {},
@@ -1802,6 +1858,77 @@ def test_evidence_dialog_identifies_cited_cell(monkeypatch):
     assert "td.append(' (Cited cell)');" in html
     assert "td.setAttribute('aria-describedby', 'evidence-description');" in html
     assert html.index("description.textContent = `Cited cell:") < html.index("dialog.showModal()")
+
+
+def test_evidence_dialog_focuses_cited_cell(monkeypatch):
+    result = {
+        "region": "West", "claims": [],
+        "evidence": {"E1": {"kind": "sql", "sql": "SELECT ...", "params": {},
+                            "rows": [{"margin": 38}, {"margin": 25}]}},
+    }
+    monkeypatch.setattr("app.answer_question", lambda _: result)
+    html = app.test_client().post("/", data={"question": "West"}).get_data(as_text=True)
+    script = html.split("<script>", 1)[1].split("</script>", 1)[0]
+    check = subprocess.run(["node", "-e", """
+        const assert = require('node:assert/strict');
+        const close = {addEventListener() {}};
+        const buttons = [
+            {dataset: {evidence: 'E1', row: '1', column: 'margin'}},
+            {dataset: {evidence: 'E1'}},
+        ];
+        buttons.forEach(button => button.addEventListener = (_, handler) => button.click = handler);
+        let cells = [];
+        let visibleCell = null;
+        const modalStub = {
+            showModal() { document.activeElement = close; visibleCell = null; },
+            querySelector: () => cells.find(cell => cell.className === 'selected'),
+        };
+        const elements = {
+            'evidence-dialog': modalStub, 'close-dialog': close,
+            'evidence-description': {}, 'evidence-title': {},
+            'evidence-sql': {}, 'evidence-params': {},
+            'evidence-rows': {replaceChildren() {}},
+        };
+        global.document = {
+            getElementById: id => elements[id],
+            querySelectorAll: () => buttons,
+            createElement(tag) {
+                if (tag !== 'table') return {};
+                cells = [];
+                return {
+                    createTHead: () => ({insertRow: () => ({append() {}})}),
+                    createTBody: () => ({insertRow: () => ({insertCell() {
+                        const cell = {
+                            attributes: {}, append() {},
+                            setAttribute(name, value) { this.attributes[name] = value; },
+                            scrollIntoView() { visibleCell = this; },
+                            focus(options = {}) {
+                                if (this.attributes.tabindex === '-1') {
+                                    document.activeElement = this;
+                                    if (!options.preventScroll) visibleCell = this;
+                                }
+                            },
+                        };
+                        cells.push(cell);
+                        return cell;
+                    }})}),
+                };
+            },
+        };
+    """ + script + """
+        buttons[0].click();
+        assert.equal(document.activeElement, cells[1]);
+        assert.equal(visibleCell, cells[1]);
+        assert.equal(cells[1].attributes.tabindex, '-1');
+        assert.equal(cells[0].attributes.tabindex, undefined);
+
+        buttons[1].click();
+        assert.equal(document.activeElement, close);
+        assert.equal(visibleCell, null);
+    """], capture_output=True, text=True)
+    assert check.returncode == 0, check.stderr
+
+
 def test_policy_citations_have_descriptive_accessible_names(monkeypatch):
     documents = {"P1": "west_q3_volume_push.md", "P2": 'Freight & "carrier" memo.md'}
     result = {
@@ -1879,16 +2006,25 @@ def test_question_validation_errors_are_associated_and_focused(monkeypatch):
         assert page.question.get("aria-describedby") == page.alert.get("id")
         assert page.question.get("aria-describedby")
         assert "autofocus" in page.question
+        assert "autofocus" not in page.alert
         assert message in page.alert_text
 
     def failure(_):
         raise RuntimeError("unavailable")
 
     monkeypatch.setattr("app.answer_question", failure)
-    for response in [client.get("/"), client.post("/", data={"question": "West"})]:
+    for response, status in [(client.get("/"), 200),
+                             (client.post("/", data={"question": "West"}), 503)]:
+        assert response.status_code == status
         page = parse(response)
         assert "aria-invalid" not in page.question
         assert "autofocus" not in page.question
+        if status == 503:
+            assert page.alert.get("tabindex") == "-1"
+            assert "autofocus" in page.alert
+            assert "Analysis unavailable" in page.alert_text
+        else:
+            assert page.alert is None
 
 
 def test_ui_validation_and_safe_error(monkeypatch):
