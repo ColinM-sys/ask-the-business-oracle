@@ -38,15 +38,23 @@ def test_connect_reuses_pool_and_preserves_settings(monkeypatch, wallet):
         monkeypatch.setenv("ORACLE_WALLET_PASSWORD", "test-wallet-password")
         settings.update(config_dir=wallet, wallet_location=wallet,
                         wallet_password="test-wallet-password")
+    connections = [SimpleNamespace(call_timeout=0) for _ in range(4)]
     create_pool = MagicMock()
+    create_pool.return_value.acquire.side_effect = connections
     standalone_connect = MagicMock()
     monkeypatch.setattr(db.oracledb, "create_pool", create_pool)
     monkeypatch.setattr(db.oracledb, "connect", standalone_connect)
 
-    for _ in range(4):
-        assert connect() is create_pool.return_value.acquire.return_value
+    for connection in connections:
+        assert connect() is connection
+        assert isinstance(connection.call_timeout, int) and 0 < connection.call_timeout <= 30000
 
-    create_pool.assert_called_once_with(**settings)
+    create_pool.assert_called_once()
+    pool_settings = create_pool.call_args.kwargs
+    assert pool_settings.pop("getmode", None) == oracledb.POOL_GETMODE_TIMEDWAIT
+    wait_timeout = pool_settings.pop("wait_timeout", 0)
+    assert isinstance(wait_timeout, int) and 0 < wait_timeout <= 30000
+    assert pool_settings == settings
     assert create_pool.return_value.acquire.call_count == 4
     standalone_connect.assert_not_called()
 
@@ -73,6 +81,67 @@ def test_pooled_connection_cleans_up_transaction(monkeypatch, fail):
     finally:
         if db._pool is not None:
             db._pool.close(force=True)
+
+
+def test_exhausted_pool_returns_503_within_timed_wait(monkeypatch):
+    monkeypatch.setattr(db, "_pool", None)
+    create_pool = oracledb.create_pool
+
+    def small_pool(**kwargs):
+        # Keep this integration test fast while retaining the configured get mode.
+        return create_pool(**{**kwargs, "min": 1, "max": 1, "wait_timeout": 200})
+
+    def request_connection(_):
+        with connect():
+            return {"region": "West", "claims": [], "evidence": {}}
+
+    monkeypatch.setattr(db.oracledb, "create_pool", small_pool)
+    monkeypatch.setattr("app.answer_question", request_connection)
+    response = None
+    try:
+        held = connect()
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(app.test_client().post, "/", data={"question": "West"})
+            try:
+                response = future.result(timeout=3)
+            except TimeoutError:
+                pass
+            finally:
+                # Also releases the blocked request if the pool uses infinite waits.
+                held.close()
+    finally:
+        if db._pool is not None:
+            db._pool.close(force=True)
+
+    assert response is not None, "Exhausted pool waited indefinitely"
+    assert response.status_code == 503
+    assert b"Analysis unavailable." in response.data
+
+
+@pytest.mark.parametrize("where", ["acquire", "execute"])
+def test_oracle_timeouts_return_sanitized_503(monkeypatch, where):
+    pool = MagicMock()
+    timeout = oracledb.OperationalError(
+        "DPY-4005: private timeout details" if where == "acquire"
+        else "DPY-4024: private timeout details")
+    if where == "acquire":
+        pool.acquire.side_effect = timeout
+    else:
+        connection = pool.acquire.return_value
+        connection.__enter__.return_value = connection
+        connection.cursor.return_value.__enter__.return_value.execute.side_effect = timeout
+    monkeypatch.setattr(db, "_pool", pool)
+
+    response = app.test_client().post("/", data={"question": "West"})
+
+    pool.acquire.assert_called_once()
+    if where == "execute":
+        connection.cursor.return_value.__enter__.return_value.execute.assert_called_once()
+    assert response.status_code == 503
+    assert b"Analysis unavailable." in response.data
+    assert b"private timeout details" not in response.data
+
+
 def test_readme_documents_node_test_prerequisite():
     readme = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
     test_instructions = readme.split("python -m pytest -q test_app.py", 1)[1]

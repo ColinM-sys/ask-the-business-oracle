@@ -21,13 +21,16 @@ def connect():
     with _pool_lock:
         if _pool is None:
             _load_env()
-            kw = dict(user=os.environ["ORACLE_USER"], password=os.environ["ORACLE_PASSWORD"], dsn=os.environ["ORACLE_DSN"])
+            kw = dict(user=os.environ["ORACLE_USER"], password=os.environ["ORACLE_PASSWORD"], dsn=os.environ["ORACLE_DSN"],
+                      getmode=oracledb.POOL_GETMODE_TIMEDWAIT, wait_timeout=5000)
             wallet = os.environ.get("ORACLE_WALLET_DIR")
             if wallet:
                 kw.update(config_dir=wallet, wallet_location=wallet, wallet_password=os.environ.get("ORACLE_WALLET_PASSWORD"))
             _pool = oracledb.create_pool(**kw)
     # Connection.close()/context exit rolls back and returns the connection to the pool.
-    return _pool.acquire()
+    con = _pool.acquire()
+    con.call_timeout = 30000
+    return con
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-oracledb>=2
+oracledb>=2.3
 openai
 flask
 sqlglot>=30.25,<31
