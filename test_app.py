@@ -867,10 +867,16 @@ def test_question_month_abbreviations(month):
 
 @pytest.mark.parametrize("date", ["2026-13", "2026-00", "2026/07", "2026-07-15",
                                   "Smarch 2026", "2026", "July 26", "July",
-                                  "July 2025 and 2026-13"])
+                                  "July 2025 and 2026-13", "15 July 2025",
+                                  "15th July 2025", "15th of July 2025", "1st Jul. 2025",
+                                  "15-Jul 2025", "15/Jul 2025", "15th day of July 2025"])
 def test_question_rejects_unsupported_explicit_dates(date):
     with pytest.raises(ValueError, match="date"):
         parse_question(f"West since {date}")
+
+
+def test_question_allows_unrelated_number_with_month():
+    assert parse_question("Why did a 15% discount affect West since July 2025?") == ("West", "2025-07")
 
 
 def test_question_defaults_only_without_date():
