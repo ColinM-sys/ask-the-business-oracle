@@ -8,6 +8,7 @@ import sqlite3
 from contextlib import nullcontext
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from decimal import Decimal
 from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
@@ -1022,6 +1023,32 @@ def test_real_select_and_bind(ending):
     result = tools.run_sql(sql, {"name": "West"})
     assert result["rows"] == [{"region_name": "West"}]
     assert result["sql"] == sql
+
+
+def test_fractional_number_evidence_preserves_precision(monkeypatch):
+    exact = "123456789012345678.123456789012345678"
+    result = tools.run_sql(
+        f"SELECT {exact} AS positive, -{exact} AS negative, 42 AS whole, "
+        "NULL AS missing, 'text' AS label FROM regions WHERE region_name=:name",
+        {"name": "West"},
+    )
+    row = result["rows"][0]
+    assert row == {"positive": Decimal(exact), "negative": Decimal("-" + exact),
+                   "whole": Decimal(42), "missing": None, "label": "text"}
+    assert all(isinstance(row[key], Decimal) for key in ("positive", "negative", "whole"))
+
+    evidence = {"E1": {"kind": "sql", **result}}
+    original = copy.deepcopy(evidence)
+    monkeypatch.setattr("app.answer_question", lambda _: {
+        "region": "West", "claims": [], "evidence": evidence,
+    })
+    response = app.test_client().post("/", data={"question": "West"})
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    browser_data = json.loads(html.split("const evidence = ", 1)[1].split(";", 1)[0])
+    assert browser_data["E1"]["rows"] == [{"positive": exact, "negative": "-" + exact,
+                                           "whole": "42", "missing": None, "label": "text"}]
+    assert evidence == original
 
 
 def test_select_preserves_semicolon_in_string():
