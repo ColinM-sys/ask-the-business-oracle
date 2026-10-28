@@ -123,6 +123,46 @@ def test_critic_drops_unsupported_numbers_and_preserves_valid(sample_evidence):
     assert len(dropped) == 3
 
 
+@pytest.mark.parametrize("phrase", [
+    "thirteen percentage points", "THIRTEEN points", "twenty-one percent", "a hundred units",
+    "a third of sales", "half the margin", "a dozen orders", "zero revenue",
+])
+@pytest.mark.parametrize("split", [False, True])
+def test_critic_rejects_spelled_out_numbers(sample_evidence, phrase, split):
+    text = "Margin changed by " + phrase + "."
+    parts = [{"text": character} for character in text] if split else [{"text": text}]
+    claim = {"parts": parts}
+    assert critique([claim], sample_evidence) == ([], [claim])
+
+
+def test_critic_rejects_number_word_split_across_cited_value(sample_evidence):
+    sample_evidence["E1"]["rows"][0]["fragment"] = "r"
+    claim = {"parts": [{"text": "Margin fell thi"},
+                       {"value": "r", "evidence": "E1", "row": 0, "column": "fragment"},
+                       {"text": "teen points."}]}
+    assert critique([claim], sample_evidence) == ([], [claim])
+
+
+@pytest.mark.parametrize("text_first", [False, True])
+def test_critic_rejects_number_word_adjacent_to_cited_number(sample_evidence, text_first):
+    word = {"text": "thirteen"}
+    number = {"value": 25.53, "evidence": "E1", "row": 0, "column": "margin"}
+    claim = {"parts": [word, number] if text_first else [number, word]}
+    assert critique([claim], sample_evidence) == ([], [claim])
+
+
+def test_critic_preserves_cited_number_word(sample_evidence):
+    sample_evidence["E1"]["rows"][0]["label"] = "thirteen"
+    claim = {"parts": [{"text": "Recorded value: "},
+                       {"value": "thirteen", "evidence": "E1", "row": 0, "column": "label"}]}
+    assert critique([claim], sample_evidence) == ([claim], [])
+
+
+def test_critic_preserves_qualitative_words_containing_number_words(sample_evidence):
+    claim = {"parts": [{"text": "Someone reviewed the freight contract."}]}
+    assert critique([claim], sample_evidence) == ([claim], [])
+
+
 @pytest.mark.parametrize("change", [
     {"row": -1}, {"row": 10}, {"column": "missing"}, {"evidence": "missing"},
     {"value": "NaN"}, {"value": "Infinity"}, {"evidence": "P1", "value": 99},
@@ -599,6 +639,31 @@ def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
     for part in finding["parts"]:
         if "value" in part:
             assert supported(part, result["evidence"])
+
+
+def test_comparisons_only_use_controlled_region_labels(monkeypatch):
+    row = {
+        "region_name": "West", "first_month": "2025-01", "last_month": "2025-09",
+        "before_last_month": "2025-06", "after_first_month": "2025-07",
+        "before_margin_pct": 40, "after_margin_pct": 25, "margin_drop_pts": 15,
+        "margin_direction": "fell", "before_discount_pct": 3, "after_discount_pct": 18,
+        "before_freight_per_unit": 5, "after_freight_per_unit": 8,
+        "freight_increase_pct": 60, "missing_cost_count": 0,
+    }
+    rows = [row, {**row, "region_name": "East"},
+            {**row, "region_name": "East profits rose thirteen percentage points"},
+            {**row, "region_name": "East profits rose dramatically"}]
+    monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
+        "sql": sql, "params": params or {}, "rows": rows})
+    monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
+
+    result = answer_question("West since July 2025")
+
+    comparisons = [claim for claim in result["claims"] if claim["kind"] == "comparison"]
+    assert len(comparisons) == 1
+    assert comparisons[0]["parts"][0]["text"] == "East margin: "
+    assert comparisons[0]["parts"][1]["row"] == 1
+    assert result["dropped_count"] == 0
 
 
 @pytest.fixture

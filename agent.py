@@ -80,6 +80,7 @@ MONTHS = {name: f"{index:02}" for index, name in enumerate(
     ("january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"), 1)}
 MONTHS.update({name[:3]: value for name, value in list(MONTHS.items())})
 MONTHS["sept"] = "09"
+REGIONS = ("West", "Central", "East", "South")
 
 
 def parse_question(question):
@@ -87,7 +88,7 @@ def parse_question(question):
         r"\b(north|northwest|northeast|southwest|southeast)\b", question, re.I)
     if unsupported:
         raise QuestionValidationError(f"Unsupported region: {unsupported[0]}. Choose West, Central, East, or South.")
-    region_matches = [r for r in ("West", "Central", "East", "South")
+    region_matches = [r for r in REGIONS
                       if re.search(rf"\b{r}\b", question, re.I)]
     if len(region_matches) > 1:
         raise QuestionValidationError("Ask about one region at a time; the evidence includes all regions for comparison.")
@@ -180,7 +181,7 @@ def answer_question(question):
         freight_parts.extend([text(" (change: "), number("freight_increase_pct", "%"), text(")")])
     claim("finding", freight_parts + [text(".")])
     for other_index, other in enumerate(rows):
-        if other_index != index:
+        if other_index != index and other["region_name"] in REGIONS:
             claim("comparison", [text(f"{other['region_name']} margin: "),
                 number("before_margin_pct", "%", other_index), text(" before; "),
                 number("after_margin_pct", "%", other_index), text(" after.")])
