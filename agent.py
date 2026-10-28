@@ -192,8 +192,10 @@ def answer_question(question):
     for other_index, other in enumerate(rows):
         if other_index != index:
             claim("comparison", [text(f"{other['region_name']} margin: "),
-                number("before_margin_pct", "%", other_index), text(" before; "),
-                number("after_margin_pct", "%", other_index), text(" after.")])
+                number("before_margin_pct", "%", other_index) if other["before_margin_pct"] is not None
+                else text("unavailable"), text(" before; "),
+                number("after_margin_pct", "%", other_index) if other["after_margin_pct"] is not None
+                else text("unavailable"), text(" after.")])
     if region == "West" and cutoff == "2025-07":
         push, freight = policy_ids("west_q3_volume_push.md"), policy_ids("freight_contract_memo.md")
         if push and freight:
