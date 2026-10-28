@@ -77,18 +77,21 @@ def search_policies(text, k=5):
         raise ValueError("k must be between one and twenty")
     if not isinstance(text, str) or not text.strip():
         raise ValueError("Search text is required")
-    ensure_policies()
+    expected = ensure_policies(include_fingerprint=True)
     with connect() as con, con.cursor() as cur:
+        # Keep the metadata check and vector search on the same snapshot.
         cur.execute("SET TRANSACTION READ ONLY")
-        row = cur.execute("SELECT backend FROM policy_chunks FETCH FIRST 1 ROW ONLY").fetchone()
-        if row is None:
+        metadata = cur.execute("SELECT DISTINCT backend, source_hash FROM policy_chunks").fetchall()
+        if not metadata:
             raise RuntimeError("No policy chunks available")
-        backend = row[0]
+        if metadata != [expected]:
+            raise RuntimeError("Policy corpus changed during search setup")
+        backend, fingerprint = expected
         vector = embed(cur, text, backend)
         # Store the exact vector as JSON; SQL converts it back on execution/replay.
         params = {"query_vector": json.dumps(vector.tolist()), "k": k}
         sql = """SELECT id, doc, chunk, VECTOR_DISTANCE(embedding, TO_VECTOR(:query_vector), COSINE) AS distance
             FROM policy_chunks ORDER BY distance, id FETCH FIRST :k ROWS ONLY"""
         rows = cur.execute(sql, params).fetchall()
-        return {"sql": sql, "params": params,
+        return {"sql": sql, "params": params, "source_hash": fingerprint,
                 "rows": [dict(zip(("id", "doc", "chunk", "distance"), row)) for row in rows]}
