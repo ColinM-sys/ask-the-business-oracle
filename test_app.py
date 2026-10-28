@@ -1585,6 +1585,60 @@ def test_comparison_keeps_available_margin_when_other_period_is_empty(available_
     assert result["dropped_count"] == 0
 
 
+def test_freight_rounding_notice_explains_rounded_zero_baseline(monkeypatch):
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+        """)
+        for month, freight in (("2025-06", 0.004), ("2025-07", 0.008)):
+            con.execute("INSERT INTO sales VALUES (1, 1, ?, 100.0, 1, 100.0, 0)", (month,))
+            con.execute("INSERT INTO costs VALUES (1, 1, ?, 60.0, ?)", (month, freight))
+
+        def run_sql(sql, params=None):
+            return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
+                con.execute(tools.validate_select(sql), params or {})]}
+
+        monkeypatch.setattr("agent.run_sql", run_sql)
+        monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
+        response = app.test_client().post("/", data={"question": "West since July 2025"})
+
+    assert response.status_code == 200
+
+    class Paragraphs(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.paragraphs = []
+            self.current = None
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "p":
+                self.current = (dict(attrs), [])
+
+        def handle_data(self, data):
+            if self.current is not None:
+                self.current[1].append(data)
+
+        def handle_endtag(self, tag):
+            if tag == "p" and self.current is not None:
+                attrs, text = self.current
+                self.paragraphs.append((attrs, "".join(text).strip()))
+                self.current = None
+
+    parser = Paragraphs()
+    parser.feed(response.get_data(as_text=True))
+    assert any(text == "Freight per unit: before $0.0; after $0.01; change: 100.0%."
+               for _, text in parser.paragraphs)
+    notice = ("Freight costs and percentage changes are independently rounded from unrounded "
+              "aggregates; a nonzero cost can round to zero.")
+    assert any(text == notice and "data-notice" in attrs and "hidden" not in attrs
+               for attrs, text in parser.paragraphs)
+
+
 def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
     row = {
         "region_name": "West", "first_month": "2025-01", "last_month": "2025-09",

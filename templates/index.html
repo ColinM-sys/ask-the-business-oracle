@@ -102,6 +102,7 @@
     {% endif %}
     {% if result.claims %}
     <p class="hint" data-notice>Numbers in retained claims verified against cited SQL cells.{% if policy_reasons %} Policy citations support the qualitative explanation.{% endif %}</p>
+    <p class="hint" data-notice>Freight costs and percentage changes are independently rounded from unrounded aggregates; a nonzero cost can round to zero.</p>
     {% endif %}
     {% set monthly_rows = result.evidence.get('E1', {}).get('rows', []) %}
     {% if monthly_rows | selectattr('region_name', 'defined') | selectattr('region_name', 'equalto', result.region) | list %}
