@@ -402,6 +402,9 @@ def test_missing_monthly_costs_reject_incomplete_analysis(region_id, month, prod
         with pytest.raises(ValueError, match="Missing monthly costs"):
             answer_question("West since July 2025")
         policies.assert_not_called()
+        response = app.test_client().post("/", data={"question": "West since July 2025"})
+        assert response.status_code == 503
+        assert b"Missing monthly costs" not in response.data
 
         if cost is None:
             con.execute("INSERT INTO costs VALUES (?, ?, ?, 60.0, 5.0)",
@@ -693,6 +696,18 @@ def test_west_live_end_to_end(west_answer):
 
 
 def test_live_evidence_replays(west_answer):
+    policy_sources = [(key, source) for key, source in west_answer["evidence"].items()
+                      if source["kind"] == "policy"]
+    assert len(policy_sources) > 1
+    with connect() as con, con.cursor() as cur:
+        cur.execute("SET TRANSACTION READ ONLY")
+        for key, source in policy_sources:
+            params = json.loads(json.dumps(source["params"]))
+            rows = cur.execute(source["sql"], params).fetchall()
+            columns = [column[0].lower() for column in cur.description]
+            assert [dict(zip(columns, row)) for row in rows] == source["rows"]
+            assert len(source["rows"]) == 1
+            assert key == f"P{source['rows'][0]['id']}"
     for source in west_answer["evidence"].values():
         if source["kind"] == "sql":
             assert tools.run_sql(source["sql"], source["params"])["rows"] == source["rows"]
@@ -920,6 +935,33 @@ def test_ui_validation_and_safe_error(monkeypatch):
     response = client.post("/", data={"question": "West"})
     assert response.status_code == 503
     assert b"secret-driver-settings" not in response.data
+
+
+def test_ui_sanitizes_invalid_policy_encoding(tmp_path, monkeypatch):
+    (tmp_path / "policy.md").write_bytes(b"\xff")
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    row = {"region_name": "West", "missing_cost_count": 0,
+           "before_margin_pct": 40, "after_margin_pct": 25}
+    monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
+        "sql": sql, "params": params or {}, "rows": [row]})
+
+    response = app.test_client().post("/", data={"question": "West since July 2025"})
+
+    assert response.status_code == 503
+    assert b"Analysis unavailable. Check the local Oracle connection and policy setup, then retry." in response.data
+    assert b"codec" not in response.data
+
+
+def test_ui_sanitizes_downstream_value_error(monkeypatch):
+    def failure(*args, **kwargs):
+        raise ValueError("private-internal-details")
+
+    monkeypatch.setattr("agent.run_sql", failure)
+    response = app.test_client().post("/", data={"question": "West"})
+
+    assert response.status_code == 503
+    assert b"Analysis unavailable. Check the local Oracle connection and policy setup, then retry." in response.data
+    assert b"private-internal-details" not in response.data
 
 
 def test_script_starts_and_shows_unavailable_when_setup_fails(monkeypatch):
