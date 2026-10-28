@@ -93,7 +93,7 @@ def parse_question(question):
     # A recognized date must not hide another unsupported date expression.
     matched = date or named
     remaining = question[:matched.start()] + question[matched.end():] if matched else question
-    if (re.search(r"\b\d{4}\b|\b\d+[-/]\d+\b", remaining)
+    if (re.search(r"\b\d{4,}\b|\b\d+[-/]\d+\b", remaining)
             or re.search(month_pattern, remaining, re.I)):
         raise ValueError("Unsupported date; use YYYY-MM or a month name and four-digit year.")
     return region_matches[0] if region_matches else "West", cutoff

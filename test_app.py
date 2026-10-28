@@ -559,7 +559,9 @@ def test_question_month_abbreviations(month):
 
 @pytest.mark.parametrize("date", ["2026-13", "2026-00", "2026/07", "2026-07-15",
                                   "Smarch 2026", "2026", "July 26", "July",
-                                  "July 2025 and 2026-13"])
+                                  "202612", "202613", "20261231", "31122026",
+                                  "July 2025 and 2026-13", "July 2025 and 202612",
+                                  "202612 and 2025-07"])
 def test_question_rejects_unsupported_explicit_dates(date):
     with pytest.raises(ValueError, match="date"):
         parse_question(f"West since {date}")
