@@ -9,7 +9,7 @@ from sqlglot import exp
 from db import connect
 from policies import embed, ensure_policies
 
-TABLES = {"sales", "costs", "customers", "discounts", "products", "regions"}
+TABLES = {"SALES", "COSTS", "CUSTOMERS", "DISCOUNTS", "PRODUCTS", "REGIONS"}
 FUNCTIONS = {"SUM", "MIN", "MAX", "AVG", "COUNT", "ROUND", "NULLIF", "COALESCE", "ABS", "AND", "OR"}
 
 
@@ -35,7 +35,10 @@ def validate_select(sql):
                          exp.Delete, exp.Create, exp.Drop, exp.Alter, exp.With)):
         raise ValueError("SQL writes, locks and procedural statements are refused")
     for table in tree.find_all(exp.Table):
-        if table.name.lower() not in TABLES or table.db or table.catalog:
+        name = table.name
+        # Oracle preserves quoted case; only ASCII names can match these objects.
+        resolved_name = name if table.this.args.get("quoted") else name.upper()
+        if not name.isascii() or resolved_name not in TABLES or table.db or table.catalog:
             raise ValueError("Only governed business tables are allowed")
     for function in tree.find_all(exp.Func):
         # CASE is represented as a function by the parser, but performs no calls.
