@@ -1,10 +1,19 @@
 """Local Flask UI: python app.py, then http://127.0.0.1:5055."""
-from flask import Flask, render_template, request
+from flask import Flask, abort, render_template, request
 
 from agent import QuestionValidationError, answer_question
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024
+
+
+@app.before_request
+def protect_local_requests():
+    if request.headers.get("Host") != "127.0.0.1:5055":
+        abort(400)
+    if (request.method not in ("GET", "HEAD", "OPTIONS")
+            and request.headers.get("Origin") != "http://127.0.0.1:5055"):
+        abort(403)
 
 
 @app.template_filter()
