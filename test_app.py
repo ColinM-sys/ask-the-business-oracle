@@ -1158,10 +1158,17 @@ def test_focus_indicator_contrasts_with_page_and_cards():
         assert contrast >= 3, f"Focus outline {outline} has {contrast:.2f}:1 contrast against {surface}"
 
 
-def test_ui_restores_submit_button_on_pageshow():
-    html = app.test_client().get("/").get_data(as_text=True)
-    script = html.rsplit("<script>", 1)[1].split("</script>", 1)[0]
-    subprocess.run(["node", "-e", """
+@pytest.mark.parametrize("has_result", [False, True])
+def test_ui_can_retry_after_submission_is_stopped(monkeypatch, has_result):
+    monkeypatch.setattr("app.answer_question", lambda _: {
+        "region": "West", "claims": [], "dropped_count": 0, "evidence": {},
+    })
+    client = app.test_client()
+    response = client.post("/", data={"question": "West"}) if has_result else client.get("/")
+    html = response.get_data(as_text=True)
+    assert '<button class="submit" type="submit">Analyze question</button>' in html
+    scripts = re.findall(r"<script>(.*?)</script>", html, re.DOTALL)
+    check = subprocess.run(["node", "-e", """
         const assert = require('node:assert/strict');
         const handlers = {};
         const button = {disabled: false, textContent: 'Analyze question'};
@@ -1169,18 +1176,21 @@ def test_ui_restores_submit_button_on_pageshow():
         global.document = {
             getElementById: () => form,
             querySelector: () => button,
+            querySelectorAll: () => [],
         };
         global.window = {addEventListener: (event, handler) => handlers[event] = handler};
-    """ + script + """
-        for (let visit = 0; visit < 2; visit++) {
-            handlers.submit();
-            assert.equal(button.disabled, true);
-            assert.equal(button.textContent, 'Analyzing\u2026');
-            handlers.pageshow({persisted: true});
+    """ + "\n".join(scripts) + """
+        // Stop the first navigation without a pageshow event, then submit again.
+        for (let attempt = 0; attempt < 2; attempt++) {
+            assert.equal(button.disabled, false);
+            handlers.submit?.({});
             assert.equal(button.disabled, false);
             assert.equal(button.textContent, 'Analyze question');
         }
-    """], check=True, capture_output=True, text=True)
+    """], capture_output=True, text=True)
+    assert check.returncode == 0, check.stderr
+
+
 def test_evidence_dialog_preserves_exact_integers(monkeypatch):
     values = [9007199254740993, -9007199254740993, 10**37 + 1,
               9007199254740991, 0, 42, 1.25, None, True, False, "text"]
