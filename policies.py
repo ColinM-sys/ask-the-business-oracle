@@ -50,12 +50,16 @@ def ensure_policies():
                     id NUMBER PRIMARY KEY, doc VARCHAR2(255), chunk VARCHAR2(4000),
                     embedding VECTOR(*, FLOAT32), backend VARCHAR2(128), source_hash VARCHAR2(64))""")
             backend = "hash-v1-512"
-            for (model,) in cur.execute(
-                "SELECT model_name FROM user_mining_models WHERE mining_function='EMBEDDING' ORDER BY model_name"
+            for model, model_id in cur.execute(
+                """SELECT model_name, object_id FROM user_mining_models
+                   JOIN user_objects ON object_name = model_name AND object_type = 'MINING MODEL'
+                   WHERE mining_function='EMBEDDING' ORDER BY model_name"""
             ).fetchall():
                 try:
                     embed(cur, "Business policy", model)
                     backend = model
+                    # Replacing a model under the same name gives it a new object ID.
+                    fingerprint = hashlib.sha256(repr((sources, model_id)).encode()).hexdigest()
                     break
                 except oracledb.DatabaseError as exc:
                     code = getattr(exc.args[0], "code", None) if exc.args else None

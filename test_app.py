@@ -1,4 +1,5 @@
 """Unit checks and live integration against the existing local Oracle tables."""
+from array import array
 import copy
 import json
 import runpy
@@ -193,7 +194,7 @@ def test_policy_probe_propagates_unexpected_failures(failure, tmp_path, monkeypa
     connection.__enter__.return_value = connection
     cursor = connection.cursor.return_value
     cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
-    cursor.execute.return_value.fetchall.side_effect = [[("BROKEN_MODEL",)], []]
+    cursor.execute.return_value.fetchall.side_effect = [[("BROKEN_MODEL", 1)], []]
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
 
@@ -214,8 +215,8 @@ def test_policy_probe_propagates_unexpected_failures(failure, tmp_path, monkeypa
 
 @pytest.mark.parametrize("models, expected", [
     ([], "hash-v1-512"),
-    ([("INCOMPATIBLE_MODEL",)], "hash-v1-512"),
-    ([("INCOMPATIBLE_MODEL",), ("GOOD_MODEL",)], "GOOD_MODEL"),
+    ([("INCOMPATIBLE_MODEL", 1)], "hash-v1-512"),
+    ([("INCOMPATIBLE_MODEL", 1), ("GOOD_MODEL", 2)], "GOOD_MODEL"),
 ])
 def test_policy_probe_fallback_is_explicit_and_sanitized(
         models, expected, tmp_path, monkeypatch, caplog):
@@ -243,6 +244,52 @@ def test_policy_probe_fallback_is_explicit_and_sanitized(
     assert ("Using hash-v1-512 fallback" in caplog.text) == (expected == "hash-v1-512")
     assert "private-driver-details" not in caplog.text
     assert "forged log entry" not in caplog.text
+
+
+@pytest.mark.parametrize("new_dimensions", [2, 3])
+def test_policy_refreshes_when_named_model_is_replaced(tmp_path, monkeypatch, new_dimensions):
+    (tmp_path / "policy.md").write_text("Document text", encoding="utf-8")
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.fetchone.return_value = ("POLICY_CHUNKS",)
+    rows = []
+    model_id = 1
+
+    def execute(sql, **params):
+        if sql.startswith("SELECT model_name"):
+            cursor.fetchall.return_value = ([("EMBEDDING_MODEL", model_id)] if "object_id" in sql.lower()
+                                            else [("EMBEDDING_MODEL",)])
+        elif sql.startswith("SELECT DISTINCT backend, source_hash"):
+            cursor.fetchall.return_value = [(row["backend"], row["fingerprint"]) for row in rows]
+        elif sql.startswith("DELETE FROM policy_chunks"):
+            rows.clear()
+        elif sql.startswith("INSERT INTO policy_chunks"):
+            rows.append(params)
+        return cursor
+
+    def embedding(cur, text, backend):
+        assert backend == "EMBEDDING_MODEL"
+        dimensions = 2 if model_id == 1 else new_dimensions
+        if text == "Business policy":
+            return array("f", [1.0, 0.0] + [0.0] * (dimensions - 2))
+        values = [1.0, 0.0] if model_id == 1 else [0.0, 1.0]
+        return array("f", values + [0.0] * (dimensions - 2))
+
+    cursor.execute.side_effect = execute
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+    monkeypatch.setattr("policies.embed", embedding)
+
+    assert ensure_policies() == "EMBEDDING_MODEL"
+    assert len(rows) == 1 and list(rows[0]["vector"]) == [1.0, 0.0]
+    assert ensure_policies() == "EMBEDDING_MODEL"
+    connection.commit.assert_called_once()
+
+    model_id = 2
+    assert ensure_policies() == "EMBEDDING_MODEL"
+    assert len(rows) == 1 and list(rows[0]["vector"]) == [0.0, 1.0] + [0.0] * (new_dimensions - 2)
+    assert connection.commit.call_count == 2
 
 
 @pytest.mark.parametrize("character", ["界", "😀"])
