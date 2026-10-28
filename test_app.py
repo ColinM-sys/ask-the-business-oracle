@@ -4,6 +4,7 @@ import json
 import runpy
 import subprocess
 import sqlite3
+from contextlib import nullcontext
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
@@ -14,6 +15,7 @@ from unittest.mock import MagicMock
 import oracledb
 import pytest
 
+import db
 import tools
 from db import connect
 from agent import answer_question, parse_question, summary_sql
@@ -22,6 +24,54 @@ from critic import critique, supported
 from policies import ensure_policies, hash_embedding
 
 
+@pytest.mark.parametrize("wallet", [None, "test-wallet"])
+def test_connect_reuses_pool_and_preserves_settings(monkeypatch, wallet):
+    monkeypatch.setattr(db, "_pool", None, raising=False)
+    monkeypatch.setattr(db, "_load_env", lambda: None)
+    settings = {"user": "test-user", "password": "test-password", "dsn": "test-dsn"}
+    for key, value in settings.items():
+        monkeypatch.setenv("ORACLE_" + key.upper(), value)
+    monkeypatch.delenv("ORACLE_WALLET_DIR", raising=False)
+    if wallet:
+        monkeypatch.setenv("ORACLE_WALLET_DIR", wallet)
+        monkeypatch.setenv("ORACLE_WALLET_PASSWORD", "test-wallet-password")
+        settings.update(config_dir=wallet, wallet_location=wallet,
+                        wallet_password="test-wallet-password")
+    create_pool = MagicMock()
+    standalone_connect = MagicMock()
+    monkeypatch.setattr(db.oracledb, "create_pool", create_pool)
+    monkeypatch.setattr(db.oracledb, "connect", standalone_connect)
+
+    for _ in range(4):
+        assert connect() is create_pool.return_value.acquire.return_value
+
+    create_pool.assert_called_once_with(**settings)
+    assert create_pool.return_value.acquire.call_count == 4
+    standalone_connect.assert_not_called()
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_pooled_connection_cleans_up_transaction(monkeypatch, fail):
+    monkeypatch.setattr(db, "_pool", None)
+    create_pool = oracledb.create_pool
+    monkeypatch.setattr(db.oracledb, "create_pool",
+                        lambda **kw: create_pool(min=1, max=1, **kw))
+    try:
+        with pytest.raises(RuntimeError, match="test failure") if fail else nullcontext():
+            with connect() as con, con.cursor() as cur:
+                cur.execute("SET TRANSACTION READ ONLY")
+                session = cur.execute("SELECT SYS_CONTEXT('USERENV', 'SID') FROM dual").fetchone()
+                if fail:
+                    raise RuntimeError("test failure")
+        assert db._pool.busy == 0
+        with connect() as con, con.cursor() as cur:
+            # This must start a new transaction on the same physical session.
+            cur.execute("SET TRANSACTION READ WRITE")
+            assert cur.execute("SELECT SYS_CONTEXT('USERENV', 'SID') FROM dual").fetchone() == session
+        assert db._pool.busy == 0
+    finally:
+        if db._pool is not None:
+            db._pool.close(force=True)
 def test_readme_documents_node_test_prerequisite():
     readme = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
     test_instructions = readme.split("python -m pytest -q test_app.py", 1)[1]
