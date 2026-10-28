@@ -17,6 +17,7 @@ import oracledb
 import pytest
 
 import db
+import policies
 import tools
 from db import connect
 from agent import answer_question, parse_question, summary_sql
@@ -209,6 +210,102 @@ def test_hashing_is_stable_and_normalized():
     first = hash_embedding("West freight contract")
     assert first == hash_embedding("West freight contract")
     assert abs(sum(v*v for v in first) - 1) < 0.000001
+
+
+def test_policy_initialization_cache_and_invalidation(tmp_path, monkeypatch):
+    document = tmp_path / "policy.md"
+    document.write_text("Original policy", encoding="utf-8")
+    reads = []
+    original_read = Path.read_text
+
+    def read_text(path, *args, **kwargs):
+        if path == document:
+            reads.append(path)
+        return original_read(path, *args, **kwargs)
+
+    class CountingLock:
+        def __init__(self):
+            self.lock = threading.Lock()
+            self.entries = 0
+
+        def __enter__(self):
+            self.lock.acquire()
+            self.entries += 1
+
+        def __exit__(self, *args):
+            self.lock.release()
+
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.fetchone.return_value = ("POLICY_CHUNKS",)
+    rows = []
+
+    def execute(sql, **params):
+        if sql.startswith("SELECT model_name"):
+            cursor.fetchall.return_value = [("MODEL_A",)]
+        elif sql.startswith("SELECT DISTINCT backend, source_hash"):
+            cursor.fetchall.return_value = [(row["backend"], row["fingerprint"]) for row in rows]
+        elif sql.startswith("DELETE FROM policy_chunks"):
+            rows.clear()
+        elif sql.startswith("INSERT INTO policy_chunks"):
+            rows.append(params)
+        return cursor
+
+    cursor.execute.side_effect = execute
+    connect_mock = MagicMock(return_value=connection)
+    version = ["first"]
+    embedding = MagicMock(side_effect=lambda cur, text, backend: hash_embedding(text + version[0]))
+    lock = CountingLock()
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", connect_mock)
+    monkeypatch.setattr("policies.embed", embedding)
+    monkeypatch.setattr("policies._lock", lock)
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    assert ensure_policies() == "MODEL_A"
+    assert ensure_policies() == "MODEL_A"
+    assert connect_mock.call_count == 1
+    assert reads == [document]
+    assert embedding.call_count == 2  # One model probe and one chunk embedding.
+    assert lock.entries == 1
+
+    document.write_text("Updated policy content", encoding="utf-8")
+    assert ensure_policies() == "MODEL_A"
+    assert rows[0]["chunk"] == "Updated policy content"
+    assert connect_mock.call_count == 2
+    assert reads == [document, document]
+    assert connection.commit.call_count == 2
+    previous_vector = rows[0]["vector"]
+
+    # Replacing a model without changing its name requires re-embedding the rows.
+    version[0] = "second"
+    policies.invalidate_policies()
+    assert ensure_policies() == "MODEL_A"
+    assert connect_mock.call_count == 3
+    assert connection.commit.call_count == 3
+    assert rows[0]["vector"] != previous_vector
+
+
+def test_policy_initialization_failure_is_retried(tmp_path, monkeypatch):
+    (tmp_path / "policy.md").write_text("Business policy", encoding="utf-8")
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
+    cursor.execute.return_value.fetchall.side_effect = [[("MODEL_A",)], [("MODEL_A",)], []]
+    connect_mock = MagicMock(return_value=connection)
+    embedding = MagicMock(side_effect=[RuntimeError("probe failed"), hash_embedding("probe"),
+                                       hash_embedding("policy")])
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", connect_mock)
+    monkeypatch.setattr("policies.embed", embedding)
+
+    with pytest.raises(RuntimeError, match="probe failed"):
+        ensure_policies()
+    assert ensure_policies() == "MODEL_A"
+    assert connect_mock.call_count == 2
+    connection.commit.assert_called_once()
 
 
 @pytest.mark.parametrize("failure", [

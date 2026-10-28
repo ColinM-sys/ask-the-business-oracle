@@ -30,6 +30,10 @@ Open http://127.0.0.1:5055 and ask â€œWhy did West margin fall since July 2025?â
 deterministic normalized hashing vectors. Source changes trigger a transactional
 policy refresh. Queries use Oracle `VECTOR_DISTANCE` with cosine distance; the
 local hashing fallback is lexical retrieval rather than a semantic language model.
+After changing an Oracle embedding model, stop the app, rebuild the vectors with
+`python -c "from policies import invalidate_policies, ensure_policies; invalidate_policies(); ensure_policies()"`,
+and restart the app. In a running process, `invalidate_policies()` forces the next
+search to reselect the model and rebuild the vectors.
 
 The app runs fixed analysis for margin, discount and freight, regardless of
 question wording. It recognizes West, Central, East or South and a full month
