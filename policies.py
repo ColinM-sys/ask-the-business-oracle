@@ -87,12 +87,18 @@ def ensure_policies():
                     chunks.append((name, chunk))
             if not chunks:
                 raise RuntimeError("No policy content found")
-            vectors = [embed(cur, chunk, backend) for _, chunk in chunks]
+            rows = [dict(id=index, doc=doc, chunk=chunk, backend=backend, fingerprint=fingerprint)
+                    for index, (doc, chunk) in enumerate(chunks, 1)]
+            if backend == "hash-v1-512":
+                for row in rows:
+                    row["vector"] = hash_embedding(row["chunk"])
+            vector_value = ":vector" if backend == "hash-v1-512" else "NULL"
             cur.execute("DELETE FROM policy_chunks")
-            for index, ((doc, chunk), vector) in enumerate(zip(chunks, vectors), 1):
-                cur.execute("""INSERT INTO policy_chunks (id,doc,chunk,embedding,backend,source_hash)
-                    VALUES (:id,:doc,:chunk,:vector,:backend,:fingerprint)""",
-                    id=index, doc=doc, chunk=chunk, vector=vector, backend=backend, fingerprint=fingerprint)
+            cur.executemany(f"""INSERT INTO policy_chunks (id,doc,chunk,embedding,backend,source_hash)
+                VALUES (:id,:doc,:chunk,{vector_value},:backend,:fingerprint)""", rows)
+            if backend != "hash-v1-512":
+                cur.execute(f"""UPDATE policy_chunks
+                    SET embedding = VECTOR_EMBEDDING({backend} USING chunk AS DATA)""")
             con.commit()
             return backend
 

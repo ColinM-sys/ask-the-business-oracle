@@ -182,6 +182,85 @@ def test_hashing_is_stable_and_normalized():
     assert abs(sum(v*v for v in first) - 1) < 0.000001
 
 
+@pytest.mark.parametrize("backend", ["hash-v1-512", "GOOD_MODEL"])
+def test_policy_refresh_batches_chunks_and_embeddings(backend, tmp_path, monkeypatch):
+    (tmp_path / "a.md").write_text("First policy", encoding="utf-8")
+    (tmp_path / "b.md").write_text("Second policy", encoding="utf-8")
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.fetchone.return_value = ("POLICY_CHUNKS",)
+    operations = []
+
+    def execute(sql, **params):
+        operations.append(("execute", sql))
+        if sql.startswith("SELECT model_name"):
+            cursor.fetchall.return_value = [] if backend == "hash-v1-512" else [(backend,)]
+        elif sql.startswith("SELECT DISTINCT backend, source_hash"):
+            cursor.fetchall.return_value = []
+        return cursor
+
+    cursor.execute.side_effect = execute
+    cursor.executemany.side_effect = lambda sql, rows: operations.append(("executemany", sql))
+    connection.commit.side_effect = lambda: operations.append(("commit", ""))
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+
+    assert ensure_policies() == backend
+
+    cursor.executemany.assert_called_once()
+    insert_sql, rows = cursor.executemany.call_args.args
+    assert insert_sql.lstrip().startswith("INSERT INTO policy_chunks")
+    assert [(row["id"], row["doc"], row["chunk"]) for row in rows] == [
+        (1, "a.md", "First policy"), (2, "b.md", "Second policy")]
+    assert all(row["backend"] == backend for row in rows)
+    assert len({row["fingerprint"] for row in rows}) == 1
+    updates = [sql for op, sql in operations if op == "execute" and sql.startswith("UPDATE policy_chunks")]
+    probes = [sql for op, sql in operations if op == "execute" and sql.startswith("SELECT VECTOR_EMBEDDING")]
+    if backend == "hash-v1-512":
+        assert [row["vector"] for row in rows] == [hash_embedding(row["chunk"]) for row in rows]
+        assert not updates and not probes
+    else:
+        assert len(probes) == 1
+        assert len(updates) == 1
+        assert "VECTOR_EMBEDDING(GOOD_MODEL USING chunk AS DATA)" in updates[0]
+    writes = [op for op, sql in operations
+              if op in ("executemany", "commit") or sql.startswith(("DELETE", "UPDATE"))]
+    assert writes == (["execute", "executemany", "commit"] if backend == "hash-v1-512"
+                      else ["execute", "executemany", "execute", "commit"])
+
+
+@pytest.mark.parametrize("failed_operation", ["insert", "embedding"])
+def test_policy_refresh_does_not_commit_failed_batch(failed_operation, tmp_path, monkeypatch):
+    (tmp_path / "policy.md").write_text("Changed policy", encoding="utf-8")
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.fetchone.return_value = ("POLICY_CHUNKS",)
+    failure = RuntimeError("batch failed")
+
+    def execute(sql, **params):
+        if sql.startswith("SELECT model_name"):
+            cursor.fetchall.return_value = [("GOOD_MODEL",)]
+        elif sql.startswith("SELECT DISTINCT backend, source_hash"):
+            cursor.fetchall.return_value = [("GOOD_MODEL", "old-hash")]
+        elif sql.startswith("UPDATE policy_chunks") and failed_operation == "embedding":
+            raise failure
+        return cursor
+
+    cursor.execute.side_effect = execute
+    if failed_operation == "insert":
+        cursor.executemany.side_effect = failure
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+
+    with pytest.raises(RuntimeError, match="batch failed"):
+        ensure_policies()
+
+    connection.commit.assert_not_called()
+    assert connection.__exit__.call_args.args[:2] == (RuntimeError, failure)
+
+
 @pytest.mark.parametrize("failure", [
     RuntimeError("private-driver-details"),
     oracledb.DatabaseError(SimpleNamespace(code=3113, message="private-driver-details")),
@@ -259,8 +338,7 @@ def test_policy_chunks_fit_byte_limit(character, tmp_path, monkeypatch):
 
     ensure_policies()
 
-    chunks = [call.kwargs["chunk"] for call in cursor.execute.call_args_list
-              if call.args[0].lstrip().startswith("INSERT INTO policy_chunks")]
+    chunks = [row["chunk"] for row in cursor.executemany.call_args.args[1]]
     assert chunks
     assert all(chunk and len(chunk.encode("utf-8")) <= 4000 for chunk in chunks)
     assert "".join(chunks).replace("\n", "") == content.replace("\n", "")
@@ -316,11 +394,10 @@ def test_delayed_policy_refresh_preserves_newer_content(tmp_path, monkeypatch):
             cursor.fetchall.return_value = [(row["backend"], row["fingerprint"]) for row in rows]
         elif sql.startswith("DELETE FROM policy_chunks"):
             rows.clear()
-        elif sql.startswith("INSERT INTO policy_chunks"):
-            rows.append(params)
         return cursor
 
     cursor.execute.side_effect = execute
+    cursor.executemany.side_effect = lambda sql, batch: rows.extend(batch)
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
     monkeypatch.setattr("policies._lock", DelayedLock())
