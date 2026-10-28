@@ -258,6 +258,21 @@ def test_flask_live_brief_and_evidence():
     assert b"evidence-dialog" in response.data
 
 
+def test_evidence_dialog_identifies_cited_cell(monkeypatch):
+    monkeypatch.setattr("app.answer_question", lambda _: {
+        "region": "West", "claims": [], "evidence": {},
+    })
+    html = app.test_client().post("/", data={"question": "West"}).get_data(as_text=True)
+
+    assert 'aria-describedby="evidence-description"' in html
+    assert '<p id="evidence-description"></p>' in html
+    assert "description.textContent = '';" in html  # Clear the previous citation on every open.
+    assert "description.textContent = `Cited cell: row ${index + 1}, column ${column}.`;" in html
+    assert "td.append(' (Cited cell)');" in html
+    assert "td.setAttribute('aria-describedby', 'evidence-description');" in html
+    assert html.index("description.textContent = `Cited cell:") < html.index("dialog.showModal()")
+
+
 def test_ui_validation_and_safe_error(monkeypatch):
     client = app.test_client()
     assert client.post("/", data={"question": ""}).status_code == 400
