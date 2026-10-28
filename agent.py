@@ -1,8 +1,19 @@
 """Fixed, auditable business analysis; no language model or API key needed."""
+import hashlib
 import re
 
 from critic import critique
+from policies import DOCS
 from tools import run_sql, search_policies
+
+# The fixed claims below were reviewed against these complete document versions.
+# Review the claims again before accepting any changed document digest.
+POLICY_SHA256 = {
+    "west_q3_volume_push.md": "f5c98d964fc1b7b6a872152b15fef8044ff7a30797a3a65e1b5891e152bf3b71",
+    "freight_contract_memo.md": "8b73b6dbad7be9dcdc24759e02da963a465420d4a00f1c0c8b0940c4dd6da747",
+    "pricing_policy.md": "79264bb14aae2da366604872c36b2b4e4ae26a27459b7cb801873e0df8f8fac0",
+    "regional_playbook.md": "6a3fd585c58b2528206a9545db63db828c836ce0a265e1fb3fc90525d6ab03d8",
+}
 
 JOIN = """FROM sales s LEFT JOIN costs c ON c.region_id=s.region_id
     AND c.product_id=s.product_id AND c.cost_month=s.sale_month
@@ -108,8 +119,17 @@ def answer_question(question):
                 "column": column, "suffix": suffix}
 
     def policy_ids(filename):
+        # Verify the whole source too: an old chunk may survive a contradictory addendum.
+        try:
+            source = (DOCS / filename).read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError):
+            return []
+        if hashlib.sha256(source.encode("utf-8")).hexdigest() != POLICY_SHA256[filename]:
+            return []
+        # These reviewed documents each fit in one chunk; partial text is not proof.
         return [key for key, value in evidence.items()
-                if value["kind"] == "policy" and value["rows"][0]["doc"] == filename]
+                if value["kind"] == "policy" and value["rows"][0]["doc"] == filename
+                and value["rows"][0].get("chunk") == source]
 
     claims = []
     def claim(kind, parts, citations=None):
