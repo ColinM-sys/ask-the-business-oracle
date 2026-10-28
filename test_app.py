@@ -19,7 +19,7 @@ import pytest
 import db
 import tools
 from db import connect
-from agent import answer_question, parse_question, summary_sql
+from agent import QuestionValidationError, answer_question, parse_question, summary_sql
 from app import app
 from critic import critique, supported
 from policies import ensure_policies, hash_embedding
@@ -652,6 +652,48 @@ def test_missing_region_has_descriptive_validation_error(monkeypatch, rows):
     response = app.test_client().post("/", data={"question": "West"})
     assert response.status_code == 400
     assert b"No sales/cost data found for West" in response.data
+
+
+@pytest.mark.parametrize("zero_period,missing_period", [
+    ("before", None), ("after", None), ("both", None),
+    (None, "before"), (None, "after"),
+    ("after", "before"), ("before", "after"),
+])
+def test_zero_revenue_distinguished_from_missing_period(zero_period, missing_period, monkeypatch):
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+        """)
+        for period, month in (("before", "2025-06"), ("after", "2025-07")):
+            if period == missing_period:
+                continue
+            con.execute("INSERT INTO sales VALUES (1, 1, ?, 100, 1, 100, 0)", (month,))
+            if zero_period in (period, "both"):
+                con.execute("INSERT INTO sales VALUES (1, 1, ?, -100, -1, 100, 0)", (month,))
+            con.execute("INSERT INTO costs VALUES (1, 1, ?, 60, 5)", (month,))
+
+        def run_sql(sql, params=None):
+            return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
+                con.execute(tools.validate_select(sql), params or {})]}
+
+        monkeypatch.setattr("agent.run_sql", run_sql)
+        policies = MagicMock()
+        monkeypatch.setattr("agent.search_policies", policies)
+        message = ("comparison date must have sales both before and after"
+                   if missing_period else r"(?i)margin.*undefined.*revenue.*(?:zero|0)")
+        with pytest.raises(QuestionValidationError, match=message):
+            answer_question("West since July 2025")
+        response = app.test_client().post("/", data={"question": "West since July 2025"})
+        assert response.status_code == 400
+        assert re.search(message, response.get_data(as_text=True))
+        policies.assert_not_called()
+
+
 @pytest.mark.parametrize("before,after,direction,below_precision", [
     (25.001, 25.004, "rose", True),
     (25.004, 25.001, "fell", True),
@@ -1354,7 +1396,8 @@ def test_ui_sanitizes_invalid_policy_encoding(tmp_path, monkeypatch):
     (tmp_path / "policy.md").write_bytes(b"\xff")
     monkeypatch.setattr("policies.DOCS", tmp_path)
     row = {"region_name": "West", "missing_cost_count": 0, "missing_discount_count": 0,
-           "before_margin_pct": 40, "after_margin_pct": 25}
+           "before_margin_pct": 40, "after_margin_pct": 25,
+           "before_last_month": "2025-06", "after_first_month": "2025-07"}
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
         "sql": sql, "params": params or {}, "rows": [row]})
 
