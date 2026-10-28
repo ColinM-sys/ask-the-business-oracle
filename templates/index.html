@@ -80,9 +80,10 @@
       <p>{% for id in result.evidence %}<button type="button" class="citation" data-evidence="{{ id }}">{{ id }}</button>{% endfor %}</p>
     </details>
   </article>
-  <dialog id="evidence-dialog" aria-labelledby="evidence-title">
+  <dialog id="evidence-dialog" aria-labelledby="evidence-title" aria-describedby="evidence-description">
     <button type="button" class="close" id="close-dialog">Close</button>
     <h2 id="evidence-title">Evidence</h2>
+    <p id="evidence-description"></p>
     <h3>SQL</h3><pre id="evidence-sql"></pre>
     <h3>Bound parameters</h3><pre id="evidence-params"></pre>
     <h3>Returned rows</h3><div class="table-wrap" id="evidence-rows"></div>
@@ -92,6 +93,8 @@
     const dialog = document.getElementById('evidence-dialog');
     document.querySelectorAll('[data-evidence]').forEach(button => button.addEventListener('click', () => {
       const item = evidence[button.dataset.evidence];
+      const description = document.getElementById('evidence-description');
+      description.textContent = '';
       document.getElementById('evidence-title').textContent = button.dataset.evidence + ' · ' + (item.kind === 'sql' ? 'Business data' : 'Policy search');
       document.getElementById('evidence-sql').textContent = item.sql;
       document.getElementById('evidence-params').textContent = JSON.stringify(item.params, null, 2);
@@ -104,7 +107,12 @@
         const tr = body.insertRow();
         columns.forEach(column => {
           const td = tr.insertCell(); td.textContent = row[column] === null ? 'NULL' : row[column];
-          if (String(index) === button.dataset.row && column === button.dataset.column) td.className = 'selected';
+          if (String(index) === button.dataset.row && column === button.dataset.column) {
+            td.className = 'selected';
+            td.append(' (Cited cell)');
+            description.textContent = `Cited cell: row ${index + 1}, column ${column}.`;
+            td.setAttribute('aria-describedby', 'evidence-description');
+          }
         });
       });
       document.getElementById('evidence-rows').replaceChildren(table);
