@@ -79,6 +79,11 @@ def test_readme_documents_node_test_prerequisite():
     assert "Node.js installed and available as `node` on PATH" in " ".join(test_instructions.split())
 
 
+def test_readme_explains_independent_rounding():
+    readme = " ".join(Path(__file__).with_name("README.md").read_text(encoding="utf-8").split())
+    assert "Changes and margin direction use unrounded aggregates." in readme
+    assert "SQL rounds period metrics and changes independently to two decimal places" in readme
+    assert "subtracting displayed endpoints may give a different result" in readme
 def test_readme_documents_request_time_policy_writes():
     readme = " ".join(Path(__file__).with_name("README.md").read_text(encoding="utf-8").split())
     assert "Each `search_policies` call runs `ensure_policies`" in readme
