@@ -1,4 +1,6 @@
 """Constrained, read-only business SQL and Oracle vector policy retrieval."""
+import json
+
 import sqlglot
 from sqlglot import exp
 
@@ -16,6 +18,9 @@ def validate_select(sql):
         statements = sqlglot.parse(sql, read="oracle")
     except sqlglot.errors.SqlglotError as exc:
         raise ValueError("Invalid SELECT") from exc
+    # SQLGlot represents comments after a terminal delimiter as a Semicolon node.
+    if len(statements) == 2 and isinstance(statements[-1], exp.Semicolon):
+        statements.pop()
     if len(statements) != 1 or not isinstance(statements[0], exp.Select):
         raise ValueError("Only a single read-only SELECT is allowed")
     tree = statements[0]
@@ -33,15 +38,15 @@ def validate_select(sql):
             raise ValueError("Function is not in the read-only allowlist")
     if tree.find(exp.Dot) or any(c.name.lower() in {"nextval", "currval"} for c in tree.find_all(exp.Column)):
         raise ValueError("Object calls and sequence access are refused")
-    return sql
+    return tree.sql(dialect="oracle", comments=False)
 
 
 def run_sql(select, params=None):
-    validate_select(select)
+    executable = validate_select(select)
     with connect() as con:
         with con.cursor() as cur:
             cur.execute("SET TRANSACTION READ ONLY")
-            cur.execute(select.rstrip().removesuffix(";"), params or {})
+            cur.execute(executable, params or {})
             columns = [d[0].lower() for d in cur.description]
             rows = cur.fetchmany(1001)
             if len(rows) > 1000:
@@ -60,8 +65,10 @@ def search_policies(text, k=5):
         cur.execute("SET TRANSACTION READ ONLY")
         backend = cur.execute("SELECT backend FROM policy_chunks FETCH FIRST 1 ROW ONLY").fetchone()[0]
         vector = embed(cur, text, backend)
-        sql = """SELECT id, doc, chunk, VECTOR_DISTANCE(embedding, :query_vector, COSINE) AS distance
+        # Store the exact vector as JSON; SQL converts it back on execution/replay.
+        params = {"query_vector": json.dumps(vector.tolist()), "k": k}
+        sql = """SELECT id, doc, chunk, VECTOR_DISTANCE(embedding, TO_VECTOR(:query_vector), COSINE) AS distance
             FROM policy_chunks ORDER BY distance, id FETCH FIRST :k ROWS ONLY"""
-        rows = cur.execute(sql, query_vector=vector, k=k).fetchall()
-        return {"sql": sql, "params": {"text": text, "k": k, "backend": backend},
+        rows = cur.execute(sql, params).fetchall()
+        return {"sql": sql, "params": params,
                 "rows": [dict(zip(("id", "doc", "chunk", "distance"), row)) for row in rows]}

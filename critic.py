@@ -30,12 +30,18 @@ def critique(claims, evidence):
     kept, dropped = [], []
     for claim in claims:
         valid = bool(claim.get("parts"))
+        rendered = ""
         for part in claim.get("parts", []):
             if "text" in part:
                 valid &= not bool(re.search(r"\d", part["text"]))
+                rendered += part["text"]
             else:
+                # A sign must belong to the cited value, even across text parts.
+                valid &= not bool(re.search(r"[+\-\u2212]\s*$", rendered))
                 valid &= supported(part, evidence)
-                valid &= not bool(re.search(r"\d", part.get("suffix", "")))
+                # Only literal units are supported; magnitude conversions are not.
+                valid &= part.get("suffix", "") in ("", "%", " percentage points")
+                rendered += str(part.get("value", "")) + str(part.get("suffix") or "")
         valid &= all(p in evidence and evidence[p].get("kind") == "policy"
                      for p in claim.get("policy_ids", []))
         (kept if valid else dropped).append(claim)
