@@ -1249,6 +1249,64 @@ def test_evidence_dialog_identifies_cited_cell(monkeypatch):
     assert "td.append(' (Cited cell)');" in html
     assert "td.setAttribute('aria-describedby', 'evidence-description');" in html
     assert html.index("description.textContent = `Cited cell:") < html.index("dialog.showModal()")
+
+
+def test_numeric_evidence_buttons_have_descriptive_accessible_names(monkeypatch):
+    summary = {
+        "first_month": "2025-06", "before_last_month": "2025-06",
+        "after_first_month": "2025-07", "last_month": "2025-07",
+        "before_margin_pct": 25, "after_margin_pct": 25, "margin_drop_pts": 0,
+        "margin_direction": "was unchanged", "before_discount_pct": 25,
+        "after_discount_pct": 25, "before_freight_per_unit": 25,
+        "after_freight_per_unit": 25, "freight_increase_pct": 0,
+        "missing_cost_count": 0, "missing_discount_count": 0,
+    }
+    rows = [{**summary, "region_name": region} for region in ("West", "East")]
+    monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
+        "sql": sql, "params": params or {}, "rows": rows})
+    monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
+
+    class NumberParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.buttons = []
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == "button" and attrs.get("class") == "number":
+                self.buttons.append(attrs)
+
+    response = app.test_client().post("/", data={"question": "West since July 2025"})
+    assert response.status_code == 200
+    parser = NumberParser()
+    parser.feed(response.get_data(as_text=True))
+    buttons = {(int(button["data-row"]), button["data-column"]): button for button in parser.buttons}
+    expected = {
+        (0, "first_month"): ("2025-06", "first month before"),
+        (0, "before_last_month"): ("2025-06", "last month before"),
+        (0, "after_first_month"): ("2025-07", "first month since"),
+        (0, "last_month"): ("2025-07", "last month since"),
+        (0, "before_margin_pct"): ("25%", "gross margin before"),
+        (0, "after_margin_pct"): ("25%", "gross margin since"),
+        (0, "margin_drop_pts"): ("0 percentage points", "gross margin drop from before to since"),
+        (0, "before_discount_pct"): ("25%", "average discount before"),
+        (0, "after_discount_pct"): ("25%", "average discount since"),
+        (0, "before_freight_per_unit"): ("25", "freight per unit before"),
+        (0, "after_freight_per_unit"): ("25", "freight per unit since"),
+        (0, "freight_increase_pct"): ("0%", "freight per unit change from before to since"),
+        (1, "before_margin_pct"): ("25%", "gross margin before"),
+        (1, "after_margin_pct"): ("25%", "gross margin since"),
+    }
+    assert len(parser.buttons) == len(buttons) == len(expected)
+    assert buttons.keys() == expected.keys()
+    for (row, column), (value, context) in expected.items():
+        name = buttons[(row, column)]["aria-label"]
+        assert value in name
+        assert rows[row]["region_name"] in name
+        assert f"{context} 2025-07" in name
+    assert len({button["aria-label"] for button in parser.buttons}) == len(parser.buttons)
+
+
 def test_policy_citations_have_descriptive_accessible_names(monkeypatch):
     documents = {"P1": "west_q3_volume_push.md", "P2": 'Freight & "carrier" memo.md'}
     result = {

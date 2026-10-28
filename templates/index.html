@@ -63,6 +63,20 @@
     {% set actions = result.claims | selectattr('kind', 'equalto', 'action') | list %}
     {% set policy_reasons = reasons | selectattr('policy_ids') | list %}
     {% set policy_actions = actions | selectattr('policy_ids') | list %}
+    {% set number_labels = {
+      'first_month': 'first month before',
+      'before_last_month': 'last month before',
+      'after_first_month': 'first month since',
+      'last_month': 'last month since',
+      'before_margin_pct': 'gross margin before',
+      'after_margin_pct': 'gross margin since',
+      'margin_drop_pts': 'gross margin drop from before to since',
+      'before_discount_pct': 'average discount before',
+      'after_discount_pct': 'average discount since',
+      'before_freight_per_unit': 'freight per unit before',
+      'after_freight_per_unit': 'freight per unit since',
+      'freight_increase_pct': 'freight per unit change from before to since'
+    } %}
     {% if result.dropped_count %}
     <p class="error" role="alert">{{ result.dropped_count }} claim{{ 's' if result.dropped_count != 1 else '' }} {{ 'were' if result.dropped_count != 1 else 'was' }} omitted because they failed verification.</p>
     {% endif %}
@@ -70,7 +84,7 @@
       <p class="{{ claim.kind }}">
       {%- for part in claim.parts -%}
         {%- if 'text' in part -%}{{ part.text }}
-        {%- else -%}<button type="button" class="number" data-evidence="{{ part.evidence }}" data-row="{{ part.row }}" data-column="{{ part.column }}" aria-label="Evidence for {{ part.value }}{{ part.suffix }}">{{ part.value }}{{ part.suffix }}</button>{%- endif -%}
+        {%- else -%}<button type="button" class="number" data-evidence="{{ part.evidence }}" data-row="{{ part.row }}" data-column="{{ part.column }}" aria-label="Evidence for {{ part.value }}{{ part.suffix }}: {{ result.evidence[part.evidence].rows[part.row].region_name }}, {{ number_labels.get(part.column, part.column | replace('_', ' ')) }} {{ result.cutoff }}">{{ part.value }}{{ part.suffix }}</button>{%- endif -%}
       {%- endfor -%}
       {% for id in claim.policy_ids %}<button type="button" class="citation" data-evidence="{{ id }}" aria-label="{{ id }}: {{ result.evidence[id].rows[0].doc }}">{{ id }}</button>{% endfor %}
       </p>
