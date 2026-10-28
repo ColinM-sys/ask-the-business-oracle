@@ -1,6 +1,7 @@
 """Unit checks and live integration against the existing local Oracle tables."""
 import copy
 import json
+import re
 import runpy
 import subprocess
 import sqlite3
@@ -18,6 +19,17 @@ from agent import answer_question, parse_question, summary_sql
 from app import app
 from critic import critique, supported
 from policies import ensure_policies, hash_embedding
+
+
+def test_readme_installation_requirements():
+    root = Path(__file__).resolve().parent
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    command = re.search(r"^python -m pip install -r (\S+)$", readme, re.MULTILINE)
+    assert command is not None, "README must document installing the dependency file"
+    requirements = (root / command.group(1)).read_text(encoding="utf-8")
+    packages = {name.lower() for name in re.findall(
+        r"^([A-Za-z0-9_.-]+)", requirements, re.MULTILINE)}
+    assert {"flask", "oracledb", "sqlglot", "pytest"} <= packages
 
 
 @pytest.mark.parametrize("sql", [
