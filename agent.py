@@ -10,6 +10,10 @@ from tools import run_sql, search_policies
 class QuestionValidationError(ValueError):
     """A user-facing problem with the requested analysis."""
 
+    def __init__(self, message, field="question"):
+        super().__init__(message)
+        self.field = field
+
 
 # SHA-256 of the complete, whitespace-normalized chunks reviewed for the fixed
 # claims below. Changed or partial chunks require reviewing both the claims and
@@ -36,7 +40,18 @@ JOIN = """FROM sales s LEFT JOIN
         GROUP BY region_id, product_id, cost_month HAVING COUNT(*)=1) c ON c.region_id=s.region_id
     AND c.product_id=s.product_id AND c.cost_month=s.sale_month
     JOIN regions r ON r.region_id=s.region_id"""
-MONTHLY_SQL = f"""SELECT r.region_name, s.sale_month,
+
+def sales_bounds(start_month, end_month):
+    conditions = []
+    if start_month:
+        conditions.append("s.sale_month >= :start_month")
+    if end_month:
+        conditions.append("s.sale_month <= :end_month")
+    return " WHERE " + " AND ".join(conditions) if conditions else ""
+
+
+def monthly_sql(start_month=None, end_month=None):
+    return f"""SELECT r.region_name, s.sale_month,
     ROUND(SUM(s.net_revenue),2) AS revenue,
     SUM(s.quantity) AS units,
     ROUND(100*SUM(s.net_revenue-s.quantity*(c.unit_cogs+c.freight_per_unit))
@@ -45,10 +60,10 @@ MONTHLY_SQL = f"""SELECT r.region_name, s.sale_month,
         /NULLIF(SUM(s.quantity*s.unit_price),0),2) AS discount_pct,
     ROUND(SUM(s.quantity*c.freight_per_unit)/NULLIF(SUM(s.quantity),0),2) AS freight_per_unit,
     SUM(CASE WHEN c.unit_cogs IS NULL OR c.freight_per_unit IS NULL THEN 1 ELSE 0 END) AS missing_cost_count
-    {JOIN} GROUP BY r.region_name,s.sale_month ORDER BY r.region_name,s.sale_month"""
+    {JOIN}{sales_bounds(start_month, end_month)} GROUP BY r.region_name,s.sale_month ORDER BY r.region_name,s.sale_month"""
 
 
-def summary_sql():
+def summary_sql(start_month=None, end_month=None):
     # Compute changes in SQL too: a difference calculated in Python is not evidence.
     columns = []
     raw = {}
@@ -73,7 +88,7 @@ def summary_sql():
         "MIN(CASE WHEN s.sale_month >= :cutoff THEN s.sale_month END) AS after_first_month",
         "MAX(CASE WHEN s.sale_month < :cutoff THEN s.sale_month END) AS before_last_month",
     ])
-    return f"SELECT r.region_name, {', '.join(columns)} {JOIN} GROUP BY r.region_name ORDER BY r.region_name"
+    return f"SELECT r.region_name, {', '.join(columns)} {JOIN}{sales_bounds(start_month, end_month)} GROUP BY r.region_name ORDER BY r.region_name"
 
 
 MONTHS = {name: f"{index:02}" for index, name in enumerate(
@@ -108,13 +123,22 @@ def parse_question(question):
     return region_matches[0] if region_matches else "West", cutoff
 
 
-def answer_question(question):
+def answer_question(question, start_month=None, end_month=None):
     if not isinstance(question, str) or not question.strip() or len(question) > 1000:
         raise QuestionValidationError("Enter a business question of up to one thousand characters.")
     region, cutoff = parse_question(question)
+    for label, month in (("Start", start_month), ("End", end_month)):
+        if month not in (None, "") and (not isinstance(month, str) or
+                not re.fullmatch(r"20[0-9]{2}-(?:0[1-9]|1[0-2])", month)):
+            raise QuestionValidationError(f"{label} month must use YYYY-MM.", f"{label.lower()}_month")
+    if start_month and start_month >= cutoff:
+        raise QuestionValidationError("The start month must be before the comparison month.", "start_month")
+    if end_month and end_month < cutoff:
+        raise QuestionValidationError("The end month must be on or after the comparison month.", "end_month")
+    bounds = {name: value for name, value in (("start_month", start_month), ("end_month", end_month)) if value}
     evidence = {
-        "E1": {"kind": "sql", **run_sql(MONTHLY_SQL)},
-        "E2": {"kind": "sql", **run_sql(summary_sql(), {"cutoff": cutoff})},
+        "E1": {"kind": "sql", **run_sql(monthly_sql(start_month, end_month), bounds)},
+        "E2": {"kind": "sql", **run_sql(summary_sql(start_month, end_month), {**bounds, "cutoff": cutoff})},
     }
     rows = evidence["E2"]["rows"]
     index = next((i for i, row in enumerate(rows) if row["region_name"] == region), None)

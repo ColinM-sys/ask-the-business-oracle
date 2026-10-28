@@ -15,6 +15,10 @@
     form { display: flex; gap: 12px; margin: 28px 0; flex-wrap: wrap; }
     label { width: 100%; font-weight: 650; }
     input { flex: 1; min-width: 230px; padding: 16px; border: 1px solid #b9ccc2; border-radius: 10px; font: inherit; background: white; }
+    .period-fields { display: flex; flex-wrap: wrap; gap: 12px; width: 100%; }
+    .period-field { flex: 1; min-width: 230px; }
+    .period-field label { display: block; margin-bottom: 6px; }
+    .period-field input { width: 100%; min-width: 0; }
     button { font: inherit; cursor: pointer; }
     .submit { border: 0; border-radius: 10px; background: #1d5c4f; color: white; padding: 16px 24px; font-weight: 650; }
     .card { background: white; border: 1px solid #dbe3d8; border-radius: 16px; padding: 26px; margin: 22px 0; }
@@ -51,9 +55,19 @@
   <form method="post" id="question-form">
     <label for="question">Your business question</label>
     <input id="question" name="question" maxlength="1000" value="{{ question }}" required{% if question_error %} aria-invalid="true" aria-describedby="question-error" autofocus{% endif %}>
+    <div class="period-fields">
+      <div class="period-field">
+        <label for="start_month">Start month (optional)</label>
+        <input type="month" id="start_month" name="start_month" value="{{ start_month }}" aria-describedby="period-hint{% if error_field == 'start_month' %} question-error{% endif %}"{% if error_field == 'start_month' %} aria-invalid="true" autofocus{% endif %}>
+      </div>
+      <div class="period-field">
+        <label for="end_month">End month (optional)</label>
+        <input type="month" id="end_month" name="end_month" value="{{ end_month }}" aria-describedby="period-hint{% if error_field == 'end_month' %} question-error{% endif %}"{% if error_field == 'end_month' %} aria-invalid="true" autofocus{% endif %}>
+      </div>
+    </div>
     <button class="submit" type="submit">Analyze question</button>
   </form>
-  <p class="hint">Fixed analysis of margin, discounts and freight. Name a region and comparison month; defaults are West and July 2025. Uses all available sales on each side of that month.</p>
+  <p class="hint" id="period-hint">Name a region and comparison month; defaults are West and July 2025. The comparison month starts the later period. Optional start and end months are inclusive; without them, all available sales are used.</p>
   {% if error %}<p class="error" role="alert" id="question-error">{{ error }}</p>{% endif %}
   {% if result %}
   <article class="card" aria-live="polite">

@@ -363,6 +363,85 @@ def test_question_scope():
         parse_question("West and East")
 
 
+@pytest.mark.parametrize("start_month,end_month,months,before,after", [
+    ("2025-04", "2025-09", ["2025-04", "2025-06", "2025-07", "2025-09"], 35, 15),
+    ("2025-06", "2025-07", ["2025-06", "2025-07"], 35, 15),
+    ("2025-04", None, ["2025-04", "2025-06", "2025-07", "2025-09", "2025-10"], 35, 35),
+    (None, "2025-09", ["2025-03", "2025-04", "2025-06", "2025-07", "2025-09"], 53.33, 15),
+])
+def test_bounded_comparison_limits_both_evidence_queries(
+        monkeypatch, start_month, end_month, months, before, after):
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+        """)
+        for month, cogs in [("2025-03", 5), ("2025-04", 60), ("2025-06", 60),
+                            ("2025-07", 80), ("2025-09", 80), ("2025-10", 20)]:
+            con.execute("INSERT INTO sales VALUES (1, 1, ?, 100.0, 1, 100.0, 0)", (month,))
+            con.execute("INSERT INTO costs VALUES (1, 1, ?, ?, 5.0)", (month, cogs))
+        if start_month and end_month:
+            # Missing costs outside the requested period must not invalidate it.
+            for month in ("2025-03", "2025-10"):
+                con.execute("INSERT INTO sales VALUES (1, 2, ?, 100.0, 1, 100.0, 0)", (month,))
+
+        def execute(sql, params=None):
+            return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
+                con.execute(tools.validate_select(sql), params or {})]}
+
+        monkeypatch.setattr("agent.run_sql", execute)
+        monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
+        result = answer_question("West since July 2025", start_month=start_month, end_month=end_month)
+
+        monthly, summary = result["evidence"]["E1"], result["evidence"]["E2"]
+        assert [row["sale_month"] for row in monthly["rows"]] == months
+        assert (summary["rows"][0]["before_margin_pct"],
+                summary["rows"][0]["after_margin_pct"]) == (before, after)
+        for evidence in (monthly, summary):
+            if start_month:
+                assert evidence["params"]["start_month"] == start_month
+            if end_month:
+                assert evidence["params"]["end_month"] == end_month
+        scope = next(claim for claim in result["claims"] if claim["kind"] == "scope")
+        assert [part["value"] for part in scope["parts"] if "value" in part] == [
+            months[0], "2025-06", "2025-07", months[-1]]
+        assert result["dropped_count"] == 0
+
+        if start_month == "2025-04" and end_month == "2025-09":
+            response = app.test_client().post("/", data={
+                "question": "West since July 2025",
+                "start_month": start_month, "end_month": end_month,
+            })
+            assert response.status_code == 200
+            assert b'name="start_month"' in response.data
+            assert b'name="end_month"' in response.data
+            assert b"2025-04" in response.data and b"2025-09" in response.data
+
+
+@pytest.mark.parametrize("start_month,end_month", [
+    ("2025-07", None), (None, "2025-06"), ("2025-09", "2025-04"),
+    ("2025-4", None), (None, "2025-13"), ("2025-04-01", None),
+])
+def test_bounded_comparison_rejects_invalid_dates_before_querying(monkeypatch, start_month, end_month):
+    def forbidden_query(*args, **kwargs):
+        pytest.fail("Invalid bounds must be rejected before querying")
+
+    monkeypatch.setattr("agent.run_sql", forbidden_query)
+    with pytest.raises(ValueError):
+        answer_question("West since July 2025", start_month=start_month, end_month=end_month)
+    response = app.test_client().post("/", data={
+        "question": "West since July 2025", "start_month": start_month or "", "end_month": end_month or "",
+    })
+    assert response.status_code == 400
+    field, value = ("start_month", start_month) if start_month else ("end_month", end_month)
+    assert (f'name="{field}" value="{value}" aria-describedby="period-hint question-error" '
+            'aria-invalid="true" autofocus') in response.get_data(as_text=True)
+
+
 @pytest.mark.parametrize("region_id", [1, 2])
 @pytest.mark.parametrize("cost", [None, (None, 5.0), (60.0, None), (None, None)])
 @pytest.mark.parametrize("month,product_id", [
@@ -813,6 +892,18 @@ def test_live_evidence_replays(west_answer):
     for source in west_answer["evidence"].values():
         if source["kind"] == "sql":
             assert tools.run_sql(source["sql"], source["params"])["rows"] == source["rows"]
+
+
+def test_live_bounded_evidence_replays():
+    result = answer_question("West since July 2025", start_month="2025-04", end_month="2025-09")
+    for key in ("E1", "E2"):
+        source = result["evidence"][key]
+        assert source["params"]["start_month"] == "2025-04"
+        assert source["params"]["end_month"] == "2025-09"
+        assert tools.run_sql(source["sql"], source["params"])["rows"] == source["rows"]
+    scope = next(claim for claim in result["claims"] if claim["kind"] == "scope")
+    assert [part["value"] for part in scope["parts"] if "value" in part] == [
+        "2025-04", "2025-06", "2025-07", "2025-09"]
 
 
 def test_policy_vector_search_and_idempotent_setup():

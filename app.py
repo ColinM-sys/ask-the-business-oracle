@@ -30,19 +30,24 @@ def submission_too_large(_):
 
 @app.route("/", methods=["GET", "POST"])
 def index():
-    result, error = None, None
+    result, error, error_field = None, None, None
     question = request.form.get("question", "") if request.method == "POST" else "Why did West margin fall since July 2025?"
+    start_month = request.form.get("start_month", "") if request.method == "POST" else ""
+    end_month = request.form.get("end_month", "") if request.method == "POST" else ""
     status = 200
     if request.method == "POST":
         try:
-            result = answer_question(question)
+            bounds = {name: value for name, value in (("start_month", start_month), ("end_month", end_month)) if value}
+            result = answer_question(question, **bounds)
         except QuestionValidationError as exc:
             error, status = str(exc), 400
+            error_field = exc.field
         except Exception:
             # Do not expose connection settings, driver errors or credentials.
             error, status = "Analysis unavailable. Check the local Oracle connection and policy setup, then retry.", 503
     return render_template("index.html", result=result, error=error, question=question,
-                           question_error=status == 400), status
+                           start_month=start_month, end_month=end_month,
+                           question_error=error_field == "question", error_field=error_field), status
 
 
 if __name__ == "__main__":
