@@ -1,6 +1,7 @@
 """Unit checks and live integration against the existing local Oracle tables."""
 import copy
 import json
+import re
 import runpy
 import subprocess
 import sqlite3
@@ -72,6 +73,17 @@ def test_pooled_connection_cleans_up_transaction(monkeypatch, fail):
     finally:
         if db._pool is not None:
             db._pool.close(force=True)
+
+
+def test_readme_install_requirements_are_available():
+    readme = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
+    assert "python -m pip install -r requirements.txt" in readme
+    requirements = Path(__file__).with_name("requirements.txt").read_text(encoding="utf-8")
+    packages = {re.split(r"[<>=!~\[;\s]", line.strip(), maxsplit=1)[0].lower()
+                for line in requirements.splitlines()}
+    assert {"flask", "oracledb", "sqlglot", "pytest"} <= packages
+
+
 def test_readme_documents_node_test_prerequisite():
     readme = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
     test_instructions = readme.split("python -m pytest -q test_app.py", 1)[1]
