@@ -184,6 +184,7 @@ def test_hashing_is_stable_and_normalized():
 
 @pytest.mark.parametrize("failure", [
     RuntimeError("private-driver-details"),
+    ValueError("private-driver-details"),
     oracledb.DatabaseError(SimpleNamespace(code=3113, message="private-driver-details")),
     oracledb.DatabaseError(SimpleNamespace(code=40284, message="private-driver-details")),
 ])
@@ -243,6 +244,30 @@ def test_policy_probe_fallback_is_explicit_and_sanitized(
     assert ("Using hash-v1-512 fallback" in caplog.text) == (expected == "hash-v1-512")
     assert "private-driver-details" not in caplog.text
     assert "forged log entry" not in caplog.text
+
+
+@pytest.mark.parametrize("unsupported", ["lowercase", "BAD-MODEL", 'BAD") FROM dual --'])
+@pytest.mark.parametrize("later_model", [False, True])
+def test_policy_probe_skips_unsupported_model_names(unsupported, later_model, tmp_path, monkeypatch):
+    (tmp_path / "policy.md").write_text("Business policy", encoding="utf-8")
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.execute.return_value.fetchone.side_effect = [
+        ("POLICY_CHUNKS",),
+        *((hash_embedding("Business policy"),) for _ in range(2 if later_model else 0)),
+    ]
+    models = [(unsupported,)] + ([("GOOD_MODEL",)] if later_model else [])
+    cursor.execute.return_value.fetchall.side_effect = [models, []]
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+
+    assert ensure_policies() == ("GOOD_MODEL" if later_model else "hash-v1-512")
+    embedding_sql = [call.args[0] for call in cursor.execute.call_args_list
+                     if "VECTOR_EMBEDDING(" in call.args[0]]
+    assert embedding_sql == (["SELECT VECTOR_EMBEDDING(GOOD_MODEL USING :text AS DATA) FROM dual"] * 2
+                             if later_model else [])
+    connection.commit.assert_called_once()
 
 
 @pytest.mark.parametrize("character", ["界", "😀"])
