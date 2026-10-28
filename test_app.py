@@ -77,6 +77,16 @@ def test_question_scope():
         parse_question("West and East")
 
 
+@pytest.mark.parametrize("region", ["North", "north", "Northeast", "Northwest", "Southeast", "Southwest", "West and North"])
+def test_unsupported_region_is_rejected_before_querying(monkeypatch, region):
+    def forbidden_query(*args, **kwargs):
+        pytest.fail("Unsupported regions must be rejected before querying")
+    monkeypatch.setattr("agent.run_sql", forbidden_query)
+    with pytest.raises(ValueError, match="Unsupported region"):
+        answer_question(f"Why did {region} margin fall since July 2025?")
+    assert parse_question("Why did margin fall since July 2025?") == ("West", "2025-07")
+
+
 @pytest.fixture(scope="module")
 def west_answer():
     return answer_question("Why did West margin fall since July 2025?")

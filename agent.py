@@ -49,6 +49,10 @@ MONTHS = {name: f"{index:02}" for index, name in enumerate(
 
 
 def parse_question(question):
+    unsupported = re.search(
+        r"\b(north|northwest|northeast|southwest|southeast)\b", question, re.I)
+    if unsupported:
+        raise ValueError(f"Unsupported region: {unsupported[0]}. Choose West, Central, East, or South.")
     region_matches = [r for r in ("West", "Central", "East", "South")
                       if re.search(rf"\b{r}\b", question, re.I)]
     if len(region_matches) > 1:
