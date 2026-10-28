@@ -79,6 +79,19 @@ def test_readme_documents_node_test_prerequisite():
     assert "Node.js installed and available as `node` on PATH" in " ".join(test_instructions.split())
 
 
+def test_readme_documents_reference_dataset_for_integration_tests():
+    readme = " ".join(Path(__file__).with_name("README.md").read_text(encoding="utf-8").split())
+    setup = readme.split("python policies.py", 1)[0]
+    assert "`data/oracle_load.sql`" in setup
+    assert "`data/*.csv`" in setup
+    assert "fresh Oracle schema" in setup
+    assert "python load.py" in setup
+    test_instructions = readme.split("python -m pytest -q test_app.py", 1)[1]
+    assert "West metric ranges" in test_instructions
+    assert "`13.36`" in test_instructions
+    assert "depend on the unmodified reference dataset" in test_instructions
+
+
 def test_readme_documents_required_oracle_configuration():
     root = Path(__file__).parent
     readme = (root / "README.md").read_text(encoding="utf-8")
