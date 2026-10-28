@@ -43,7 +43,8 @@ def ensure_policies():
         sources = [(p.name, p.read_text(encoding="utf-8")) for p in sorted(DOCS.glob("*.md"))]
         if not sources:
             raise RuntimeError("No policy documents found")
-        fingerprint = hashlib.sha256(repr(sources).encode()).hexdigest()
+        # Refresh cached chunks when the chunking algorithm changes.
+        fingerprint = hashlib.sha256(repr(("chunk-v2", sources)).encode()).hexdigest()
         with connect() as con:
             cur = con.cursor()
             if not cur.execute("SELECT table_name FROM user_tables WHERE table_name='POLICY_CHUNKS'").fetchone():
@@ -82,11 +83,13 @@ def ensure_policies():
                     # At most four UTF-8 bytes per character; each part fits VARCHAR2(4000 BYTE).
                     for offset in range(0, len(paragraph), 1000):
                         part = paragraph[offset:offset + 1000]
-                        if chunk and (len(chunk) + len(part) + 2 > 1800
-                                      or len((chunk + "\n\n" + part).encode("utf-8")) > 4000):
+                        separator = "\n\n" if chunk and offset == 0 else ""
+                        if chunk and (len(chunk) + len(separator) + len(part) > 1800
+                                      or len((chunk + separator + part).encode("utf-8")) > 4000):
                             chunks.append((name, chunk))
                             chunk = ""
-                        chunk = (chunk + "\n\n" + part).strip()
+                            separator = ""
+                        chunk += separator + part
                 if chunk:
                     chunks.append((name, chunk))
             if not chunks:
