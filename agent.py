@@ -4,7 +4,7 @@ from hashlib import sha256
 import re
 
 from critic import critique
-from policies import DOCS
+from policies import DOCS, source_fingerprint
 from tools import run_sql, search_policies
 
 
@@ -194,15 +194,18 @@ def answer_question(question):
 
     # An unchanged document can be superseded by any other policy in the corpus.
     try:
-        corpus_hashes = {
-            path.name: sha256(path.read_text(encoding="utf-8").strip().encode("utf-8")).hexdigest()
-            for path in DOCS.glob("*.md")
-        }
+        sources = [(path.name, path.read_text(encoding="utf-8")) for path in sorted(DOCS.glob("*.md"))]
+        corpus_hashes = {name: sha256(content.strip().encode("utf-8")).hexdigest()
+                         for name, content in sources}
+        corpus_fingerprint = source_fingerprint(sources)
     except (OSError, UnicodeError):
         corpus_hashes = {}
+        corpus_fingerprint = None
 
     def policy_ids(filename):
-        if corpus_hashes != POLICY_SHA256:
+        # The first half of source_hash identifies the model, the second the source files.
+        if (corpus_hashes != POLICY_SHA256
+                or (policies.get("source_hash") or "")[32:] != corpus_fingerprint):
             return []
         # These reviewed documents each fit in one chunk; partial text is not proof.
         citations = []
