@@ -1236,6 +1236,31 @@ def test_evidence_dialog_preserves_exact_integers(monkeypatch):
     assert check.returncode == 0, check.stderr
 
 
+def test_evidence_rows_are_a_focusable_named_region(monkeypatch):
+    monkeypatch.setattr("app.answer_question", lambda _: {
+        "region": "West", "claims": [], "evidence": {},
+    })
+
+    class RowsParser(HTMLParser):
+        rows = None
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if attrs.get("id") == "evidence-rows":
+                self.rows = (tag, attrs)
+
+    response = app.test_client().post("/", data={"question": "West"})
+    assert response.status_code == 200
+    parser = RowsParser()
+    parser.feed(response.get_data(as_text=True))
+    assert parser.rows is not None
+    tag, attrs = parser.rows
+    assert tag == "div" and "table-wrap" in attrs.get("class", "").split()
+    assert attrs.get("tabindex") == "0"
+    assert attrs.get("role") == "region"
+    assert attrs.get("aria-label") == "Returned rows"
+
+
 def test_evidence_dialog_identifies_cited_cell(monkeypatch):
     monkeypatch.setattr("app.answer_question", lambda _: {
         "region": "West", "claims": [], "evidence": {},
