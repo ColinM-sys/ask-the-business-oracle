@@ -363,12 +363,84 @@ def test_question_scope():
         parse_question("West and East")
 
 
+@pytest.fixture
+def mock_evidence_transaction(monkeypatch):
+    monkeypatch.setattr("agent.read_only_transaction", lambda: nullcontext(object()))
+
+
+def test_evidence_queries_share_read_only_snapshot(monkeypatch):
+    committed = {"margin": 40}
+    connections = []
+    operations = []
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def execute(self, sql, params=None):
+            if sql == "SET TRANSACTION READ ONLY":
+                operations.append("begin")
+                self.snapshot = committed["margin"]
+                return
+            if params and "cutoff" in params:
+                operations.append("summary")
+                row = {
+                    "region_name": "West", "first_month": "2025-06", "last_month": "2025-07",
+                    "before_last_month": "2025-06", "after_first_month": "2025-07",
+                    "before_margin_pct": self.snapshot, "after_margin_pct": 25,
+                    "margin_drop_pts": self.snapshot - 25,
+                    "margin_direction": "fell" if self.snapshot > 25 else "rose",
+                    "before_discount_pct": 3, "after_discount_pct": 18,
+                    "before_freight_per_unit": 5, "after_freight_per_unit": 8,
+                    "freight_increase_pct": 60, "missing_cost_count": 0,
+                }
+            else:
+                operations.append("monthly")
+                row = {"region_name": "West", "margin_pct": self.snapshot, "missing_cost_count": 0}
+                # Simulate another connection committing before the summary query.
+                committed["margin"] = 20
+            self.description = [(column.upper(),) for column in row]
+            self.row = tuple(row.values())
+
+        def fetchmany(self, size):
+            assert size == 1001
+            return [self.row]
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def cursor(self):
+            return Cursor()
+
+    def connect():
+        connection = Connection()
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(tools, "connect", connect)
+    monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
+
+    result = answer_question("West since July 2025")
+
+    assert result["evidence"]["E1"]["rows"][0]["margin_pct"] == 40
+    assert result["evidence"]["E2"]["rows"][0]["before_margin_pct"] == 40
+    assert len(connections) == 1
+    assert operations == ["begin", "monthly", "summary"]
+
+
 @pytest.mark.parametrize("region_id", [1, 2])
 @pytest.mark.parametrize("cost", [None, (None, 5.0), (60.0, None), (None, None)])
 @pytest.mark.parametrize("month,product_id", [
     ("2025-05", 1), ("2025-06", 2), ("2025-08", 1),
 ])
-def test_missing_monthly_costs_reject_incomplete_analysis(region_id, month, product_id, cost, monkeypatch):
+def test_missing_monthly_costs_reject_incomplete_analysis(region_id, month, product_id, cost, monkeypatch, mock_evidence_transaction):
     # Missing costs must not hide boundary months or sales within a covered month,
     # including sales in a comparison region.
     with sqlite3.connect(":memory:") as con:
@@ -392,7 +464,7 @@ def test_missing_monthly_costs_reject_incomplete_analysis(region_id, month, prod
             con.execute("INSERT INTO costs VALUES (?, ?, ?, ?, ?)",
                         (region_id, product_id, month, *cost))
 
-        def run_sql(sql, params=None):
+        def run_sql(sql, params=None, *, cursor=None):
             return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
                 con.execute(tools.validate_select(sql), params or {})]}
 
@@ -420,7 +492,7 @@ def test_missing_monthly_costs_reject_incomplete_analysis(region_id, month, prod
     (None, 5.0), (60.0, None), (None, None),
 ])
 def test_monthly_evidence_rejects_null_costs_repaired_before_summary(
-        unit_cogs, freight_per_unit, monkeypatch):
+        unit_cogs, freight_per_unit, monkeypatch, mock_evidence_transaction):
     with sqlite3.connect(":memory:") as con:
         con.row_factory = sqlite3.Row
         con.executescript("""
@@ -439,7 +511,7 @@ def test_monthly_evidence_rejects_null_costs_repaired_before_summary(
 
         calls = 0
 
-        def run_sql(sql, params=None):
+        def run_sql(sql, params=None, *, cursor=None):
             nonlocal calls
             rows = [dict(row) for row in con.execute(tools.validate_select(sql), params or {})]
             calls += 1
@@ -460,7 +532,7 @@ def test_monthly_evidence_rejects_null_costs_repaired_before_summary(
 @pytest.mark.parametrize("region_id", [1, 2])
 @pytest.mark.parametrize("unit_cogs", [60.0, 80.0])
 @pytest.mark.parametrize("duplicate_when", ["both", "monthly", "summary"])
-def test_duplicate_monthly_costs_reject_analysis(region_id, unit_cogs, duplicate_when, monkeypatch):
+def test_duplicate_monthly_costs_reject_analysis(region_id, unit_cogs, duplicate_when, monkeypatch, mock_evidence_transaction):
     with sqlite3.connect(":memory:") as con:
         con.row_factory = sqlite3.Row
         con.executescript("""
@@ -481,7 +553,7 @@ def test_duplicate_monthly_costs_reject_analysis(region_id, unit_cogs, duplicate
         con.execute("INSERT INTO costs VALUES (1, 2, '2025-06', 60.0, 5.0)")
         con.execute("INSERT INTO costs VALUES (1, 2, '2025-06', 80.0, 5.0)")
 
-        def execute(sql, params=None):
+        def execute(sql, params=None, *, cursor=None):
             return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
                 con.execute(tools.validate_select(sql), params or {})]}
 
@@ -502,7 +574,7 @@ def test_duplicate_monthly_costs_reject_analysis(region_id, unit_cogs, duplicate
             insert_duplicate()
         calls = 0
 
-        def run_sql(sql, params=None):
+        def run_sql(sql, params=None, *, cursor=None):
             nonlocal calls
             rows = execute(sql, params)
             calls += 1
@@ -519,8 +591,8 @@ def test_duplicate_monthly_costs_reject_analysis(region_id, unit_cogs, duplicate
 
 
 @pytest.mark.parametrize("rows", [[], [{"region_name": "East"}]])
-def test_missing_region_has_descriptive_validation_error(monkeypatch, rows):
-    monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
+def test_missing_region_has_descriptive_validation_error(monkeypatch, rows, mock_evidence_transaction):
+    monkeypatch.setattr("agent.run_sql", lambda sql, params=None, *, cursor=None: {
         "sql": sql, "params": params or {}, "rows": rows})
     with pytest.raises(ValueError, match="No sales/cost data found for West"):
         answer_question("Why did West margin fall since July 2025?")
@@ -552,7 +624,7 @@ def test_margin_direction_uses_unrounded_sql(before, after, direction, below_pre
         tools.validate_select(sql)
         rows = [dict(row) for row in con.execute(sql, {"cutoff": "2025-07"})]
 
-    monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
+    monkeypatch.setattr("agent.run_sql", lambda sql, params=None, *, cursor=None: {
         "sql": sql, "params": params or {}, "rows": rows})
     result = answer_question("West since July 2025")
     finding = next(c for c in result["claims"] if c["kind"] == "finding")
@@ -573,7 +645,7 @@ def test_margin_direction_uses_unrounded_sql(before, after, direction, below_pre
     assert result["dropped_count"] == 0
 
 
-def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
+def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch, mock_evidence_transaction):
     row = {
         "region_name": "West", "first_month": "2025-01", "last_month": "2025-09",
         "before_last_month": "2025-06", "after_first_month": "2025-07",
@@ -584,7 +656,7 @@ def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
         "freight_increase_pct": None,
         "missing_cost_count": 0,
     }
-    monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
+    monkeypatch.setattr("agent.run_sql", lambda sql, params=None, *, cursor=None: {
         "sql": sql, "params": params or {}, "rows": [row]})
     monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
 
@@ -602,7 +674,7 @@ def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
 
 
 @pytest.fixture
-def policy_rows(monkeypatch):
+def policy_rows(monkeypatch, mock_evidence_transaction):
     row = {
         "region_name": "West", "first_month": "2025-01", "last_month": "2025-09",
         "before_last_month": "2025-06", "after_first_month": "2025-07",
@@ -614,7 +686,7 @@ def policy_rows(monkeypatch):
     }
     policies = [{"id": i, "doc": path.name, "chunk": path.read_text(encoding="utf-8").strip()}
                 for i, path in enumerate(sorted(Path(__file__).with_name("docs").glob("*.md")), 1)]
-    monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
+    monkeypatch.setattr("agent.run_sql", lambda sql, params=None, *, cursor=None: {
         "sql": sql, "params": params or {}, "rows": [row]})
     monkeypatch.setattr("agent.search_policies", lambda _: {
         "sql": "SELECT policy evidence", "params": {}, "rows": policies})
@@ -706,7 +778,7 @@ def west_answer():
 
 
 @pytest.fixture
-def retrieved_policy_rows(monkeypatch):
+def retrieved_policy_rows(monkeypatch, mock_evidence_transaction):
     summary = {
         "region_name": "West", "first_month": "2025-01", "last_month": "2025-09",
         "before_last_month": "2025-06", "after_first_month": "2025-07",
@@ -716,7 +788,7 @@ def retrieved_policy_rows(monkeypatch):
         "freight_increase_pct": 60,
         "missing_cost_count": 0,
     }
-    monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
+    monkeypatch.setattr("agent.run_sql", lambda sql, params=None, *, cursor=None: {
         "sql": sql, "params": params or {}, "rows": [summary]})
     rows = [{"id": index, "doc": path.name, "chunk": path.read_text(encoding="utf-8")}
             for index, path in enumerate(sorted(Path(__file__).with_name("docs").glob("*.md")), 1)]
@@ -1074,12 +1146,12 @@ def test_ui_validation_and_safe_error(monkeypatch):
     assert b"secret-driver-settings" not in response.data
 
 
-def test_ui_sanitizes_invalid_policy_encoding(tmp_path, monkeypatch):
+def test_ui_sanitizes_invalid_policy_encoding(tmp_path, monkeypatch, mock_evidence_transaction):
     (tmp_path / "policy.md").write_bytes(b"\xff")
     monkeypatch.setattr("policies.DOCS", tmp_path)
     row = {"region_name": "West", "missing_cost_count": 0,
            "before_margin_pct": 40, "after_margin_pct": 25}
-    monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
+    monkeypatch.setattr("agent.run_sql", lambda sql, params=None, *, cursor=None: {
         "sql": sql, "params": params or {}, "rows": [row]})
 
     response = app.test_client().post("/", data={"question": "West since July 2025"})
@@ -1089,7 +1161,7 @@ def test_ui_sanitizes_invalid_policy_encoding(tmp_path, monkeypatch):
     assert b"codec" not in response.data
 
 
-def test_ui_sanitizes_downstream_value_error(monkeypatch):
+def test_ui_sanitizes_downstream_value_error(monkeypatch, mock_evidence_transaction):
     def failure(*args, **kwargs):
         raise ValueError("private-internal-details")
 
