@@ -417,6 +417,86 @@ def test_question_scope():
         parse_question("West and East")
 
 
+def test_product_margin_breakdown_cites_revenue_weighted_results(monkeypatch):
+    # Product A's two months have different revenues and margins, so a simple
+    # average of monthly margins would produce the wrong answer.
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West'), (2, 'East');
+            CREATE TABLE products (product_id, product_name);
+            INSERT INTO products VALUES (1, 'Pump P100'), (2, 'Valve V20'),
+                                        (3, 'Sensor S1'), (4, 'Hose H5');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+            INSERT INTO sales VALUES
+                (1, 1, '2025-05', 300.0, 1, 300.0, 0),
+                (1, 1, '2025-06', 100.0, 1, 100.0, 0),
+                (1, 1, '2025-07', 200.0, 1, 200.0, 0),
+                (1, 1, '2025-08', 100.0, 1, 100.0, 0),
+                (1, 2, '2025-06', 100.0, 1, 100.0, 0),
+                (1, 2, '2025-07', 400.0, 1, 400.0, 0),
+                (1, 3, '2025-07', 200.0, 1, 200.0, 0),
+                (1, 4, '2025-06', 100.0, 1, 100.0, 0),
+                (1, 4, '2025-07', 100.0, 1, 100.0, 0),
+                (1, 4, '2025-07', -100.0, -1, 100.0, 0),
+                (2, 1, '2025-06', 1000.0, 1, 1000.0, 0),
+                (2, 1, '2025-07', 1000.0, 1, 1000.0, 0);
+            INSERT INTO costs VALUES
+                (1, 1, '2025-05', 90.0, 10.0),
+                (1, 1, '2025-06', 40.0, 10.0),
+                (1, 1, '2025-07', 120.0, 10.0),
+                (1, 1, '2025-08', 70.0, 10.0),
+                (1, 2, '2025-06', 40.0, 10.0),
+                (1, 2, '2025-07', 30.0, 10.0),
+                (1, 3, '2025-07', 90.0, 10.0),
+                (1, 4, '2025-06', 40.0, 10.0),
+                (1, 4, '2025-07', 40.0, 10.0),
+                (2, 1, '2025-06', 10.0, 0),
+                (2, 1, '2025-07', 10.0, 0);
+        """)
+
+        def run_sql(sql, params=None):
+            return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
+                con.execute(tools.validate_select(sql), params or {})]}
+
+        monkeypatch.setattr("agent.run_sql", run_sql)
+        monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
+        result = answer_question("West since July 2025")
+
+    expected = {
+        "Pump P100": {"before_revenue": 400, "after_revenue": 300,
+                      "before_margin_pct": 62.5, "after_margin_pct": 30},
+        "Valve V20": {"before_revenue": 100, "after_revenue": 400,
+                      "before_margin_pct": 50, "after_margin_pct": 90},
+    }
+    for product, values in expected.items():
+        claim = next(claim for claim in result["claims"] if any(
+            part.get("value") == product for part in claim["parts"]))
+        cited = {part["column"]: part for part in claim["parts"] if "value" in part}
+        assert cited["product_name"]["value"] == product
+        for column, value in values.items():
+            assert cited[column]["value"] == value
+        assert all(supported(part, result["evidence"]) for part in cited.values())
+        assert len({(part["evidence"], part["row"]) for part in cited.values()}) == 1
+    for product, undefined_column in (("Sensor S1", "before_margin_pct"),
+                                      ("Hose H5", "after_margin_pct")):
+        claim = next(claim for claim in result["claims"] if any(
+            part.get("value") == product for part in claim["parts"]))
+        product_part = next(part for part in claim["parts"] if part.get("value") == product)
+        row = result["evidence"][product_part["evidence"]]["rows"][product_part["row"]]
+        assert row[undefined_column] is None
+        revenue_column = undefined_column.replace("margin_pct", "revenue")
+        revenue_part = next(part for part in claim["parts"] if part.get("column") == revenue_column)
+        assert row[revenue_column] == revenue_part["value"] == 0
+        assert supported(revenue_part, result["evidence"])
+        assert not any(part.get("column") == undefined_column for part in claim["parts"])
+        assert "unavailable" in "".join(part.get("text", "") for part in claim["parts"]).lower()
+    assert result["dropped_count"] == 0
+
+
 @pytest.mark.parametrize("column", ["discount_pct", "quantity", "unit_price"])
 @pytest.mark.parametrize("region_id", [1, 2])
 @pytest.mark.parametrize("month", ["2025-06", "2025-07"])
@@ -426,6 +506,8 @@ def test_missing_discount_inputs_reject_analysis(column, region_id, month, incom
         con.row_factory = sqlite3.Row
         con.executescript("""
             CREATE TABLE regions (region_id, region_name);
+            CREATE TABLE products (product_id, product_name);
+            INSERT INTO products VALUES (1, 'Product A'), (2, 'Product B');
             INSERT INTO regions VALUES (1, 'West'), (2, 'East');
             CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
                                 quantity, unit_price, discount_pct);
@@ -500,6 +582,8 @@ def test_missing_monthly_costs_reject_incomplete_analysis(region_id, month, prod
         con.row_factory = sqlite3.Row
         con.executescript("""
             CREATE TABLE regions (region_id, region_name);
+            CREATE TABLE products (product_id, product_name);
+            INSERT INTO products VALUES (1, 'Product A'), (2, 'Product B');
             INSERT INTO regions VALUES (1, 'West'), (2, 'East');
             CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
                                 quantity, unit_price, discount_pct);
@@ -590,6 +674,8 @@ def test_duplicate_monthly_costs_reject_analysis(region_id, unit_cogs, duplicate
         con.row_factory = sqlite3.Row
         con.executescript("""
             CREATE TABLE regions (region_id, region_name);
+            CREATE TABLE products (product_id, product_name);
+            INSERT INTO products VALUES (1, 'Product A'), (2, 'Product B');
             INSERT INTO regions VALUES (1, 'West'), (2, 'East');
             CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
                                 quantity, unit_price, discount_pct);
@@ -678,7 +764,7 @@ def test_margin_direction_uses_unrounded_sql(before, after, direction, below_pre
         rows = [dict(row) for row in con.execute(sql, {"cutoff": "2025-07"})]
 
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
-        "sql": sql, "params": params or {}, "rows": rows})
+        "sql": sql, "params": params or {}, "rows": [] if params and "region" in params else rows})
     result = answer_question("West since July 2025")
     finding = next(c for c in result["claims"] if c["kind"] == "finding")
     rendered = "".join(p.get("text", str(p.get("value", "")) + p.get("suffix", ""))
@@ -710,7 +796,7 @@ def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
         "missing_cost_count": 0, "missing_discount_count": 0,
     }
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
-        "sql": sql, "params": params or {}, "rows": [row]})
+        "sql": sql, "params": params or {}, "rows": [] if params and "region" in params else [row]})
     monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
 
     result = answer_question("Why did West margin fall since July 2025?")
@@ -738,6 +824,8 @@ def test_undefined_metric_preserves_other_metric(unavailable_metric, unavailable
         con.row_factory = sqlite3.Row
         con.executescript("""
             CREATE TABLE regions (region_id, region_name);
+            CREATE TABLE products (product_id, product_name);
+            INSERT INTO products VALUES (1, 'Product A'), (2, 'Product B');
             INSERT INTO regions VALUES (1, 'West');
             CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
                                 quantity, unit_price, discount_pct);
@@ -800,7 +888,7 @@ def policy_rows(monkeypatch):
     policies = [{"id": i, "doc": path.name, "chunk": path.read_text(encoding="utf-8").strip()}
                 for i, path in enumerate(sorted(Path(__file__).with_name("docs").glob("*.md")), 1)]
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
-        "sql": sql, "params": params or {}, "rows": [row]})
+        "sql": sql, "params": params or {}, "rows": [] if params and "region" in params else [row]})
     monkeypatch.setattr("agent.search_policies", lambda _: {
         "sql": "SELECT policy evidence", "params": {}, "rows": policies})
     return policies
@@ -902,7 +990,7 @@ def retrieved_policy_rows(monkeypatch):
         "missing_cost_count": 0, "missing_discount_count": 0,
     }
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
-        "sql": sql, "params": params or {}, "rows": [summary]})
+        "sql": sql, "params": params or {}, "rows": [] if params and "region" in params else [summary]})
     rows = [{"id": index, "doc": path.name, "chunk": path.read_text(encoding="utf-8")}
             for index, path in enumerate(sorted(Path(__file__).with_name("docs").glob("*.md")), 1)]
     monkeypatch.setattr("agent.search_policies", lambda _: {
@@ -1356,7 +1444,7 @@ def test_ui_sanitizes_invalid_policy_encoding(tmp_path, monkeypatch):
     row = {"region_name": "West", "missing_cost_count": 0, "missing_discount_count": 0,
            "before_margin_pct": 40, "after_margin_pct": 25}
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
-        "sql": sql, "params": params or {}, "rows": [row]})
+        "sql": sql, "params": params or {}, "rows": [] if params and "region" in params else [row]})
 
     response = app.test_client().post("/", data={"question": "West since July 2025"})
 
@@ -1415,3 +1503,69 @@ def test_ui_escapes_question():
     response = app.test_client().post("/", data={"question": '<script>alert("x")</script> West'})
     assert response.status_code == 200
     assert b'<script>alert("x")</script>' not in response.data
+
+
+@pytest.fixture
+def product_breakdown_database():
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West');
+            CREATE TABLE products (product_id, product_name);
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+            INSERT INTO sales VALUES (1, 1, '2025-06', 100.0, 1, 100.0, 0),
+                                     (1, 1, '2025-07', 300.0, 1, 300.0, 0);
+            INSERT INTO costs VALUES (1, 1, '2025-06', 40.0, 10.0),
+                                     (1, 1, '2025-07', 40.0, 10.0);
+        """)
+        yield con
+
+
+@pytest.mark.parametrize("product_rows", [[], [(1, 'Pump A'), (1, 'Pump B')]])
+def test_product_breakdown_preserves_sales_when_product_name_is_ambiguous(
+        product_breakdown_database, monkeypatch, product_rows):
+    con = product_breakdown_database
+    con.executemany("INSERT INTO products VALUES (?, ?)", product_rows)
+
+    def run_sql(sql, params=None):
+        return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
+            con.execute(tools.validate_select(sql), params or {})]}
+
+    monkeypatch.setattr("agent.run_sql", run_sql)
+    monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
+    result = answer_question("West since July 2025")
+
+    rows = result["evidence"]["E3"]["rows"]
+    assert len(rows) == 1
+    assert rows[0]["product_id"] == 1 and rows[0]["product_name"] is None
+    assert (rows[0]["before_revenue"], rows[0]["after_revenue"]) == (100, 300)
+    claim = next(claim for claim in result["claims"] if claim["kind"] == "product")
+    cells = {part["column"]: part for part in claim["parts"] if "value" in part}
+    assert cells["product_id"]["value"] == 1
+    assert all(supported(part, result["evidence"]) for part in cells.values())
+    assert result["dropped_count"] == 0
+
+
+def test_product_breakdown_rejects_cost_missing_after_summary(product_breakdown_database, monkeypatch):
+    con = product_breakdown_database
+    con.execute("INSERT INTO products VALUES (1, 'Pump A')")
+    calls = 0
+
+    def run_sql(sql, params=None):
+        nonlocal calls
+        rows = [dict(row) for row in con.execute(tools.validate_select(sql), params or {})]
+        calls += 1
+        if calls == 2:
+            con.execute("UPDATE costs SET unit_cogs=NULL WHERE cost_month='2025-07'")
+        return {"sql": sql, "params": params or {}, "rows": rows}
+
+    policies = MagicMock(return_value={"rows": []})
+    monkeypatch.setattr("agent.run_sql", run_sql)
+    monkeypatch.setattr("agent.search_policies", policies)
+    with pytest.raises(ValueError, match="Missing monthly costs"):
+        answer_question("West since July 2025")
+    assert calls == 3
+    policies.assert_not_called()

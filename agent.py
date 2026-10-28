@@ -81,6 +81,23 @@ def summary_sql():
     return f"SELECT r.region_name, {', '.join(columns)} {JOIN} GROUP BY r.region_name ORDER BY r.region_name"
 
 
+def product_sql():
+    columns = []
+    for period, condition in (("before", "s.sale_month < :cutoff"), ("after", "s.sale_month >= :cutoff")):
+        revenue = f"SUM(CASE WHEN {condition} THEN s.net_revenue ELSE 0 END)"
+        profit = f"SUM(CASE WHEN {condition} THEN s.net_revenue-s.quantity*(c.unit_cogs+c.freight_per_unit) ELSE 0 END)"
+        columns.extend([f"ROUND({revenue},2) AS {period}_revenue",
+                        f"ROUND(100*{profit}/NULLIF({revenue},0),2) AS {period}_margin_pct"])
+    return f"""SELECT s.product_id, p.product_name, {', '.join(columns)},
+        SUM(CASE WHEN c.unit_cogs IS NULL OR c.freight_per_unit IS NULL THEN 1 ELSE 0 END) AS missing_cost_count,
+        {MISSING_DISCOUNT_COUNT} AS missing_discount_count
+        {JOIN}
+        LEFT JOIN (SELECT product_id, MIN(product_name) AS product_name FROM products
+            GROUP BY product_id HAVING COUNT(*)=1) p ON p.product_id=s.product_id
+        WHERE r.region_name=:region
+        GROUP BY s.product_id,p.product_name ORDER BY s.product_id,p.product_name"""
+
+
 MONTHS = {name: f"{index:02}" for index, name in enumerate(
     ("january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"), 1)}
 MONTHS.update({name[:3]: value for name, value in list(MONTHS.items())})
@@ -132,6 +149,11 @@ def answer_question(question):
     row = rows[index]
     if row["before_margin_pct"] is None or row["after_margin_pct"] is None:
         raise QuestionValidationError("The comparison date must have sales both before and after it.")
+    evidence["E3"] = {"kind": "sql", **run_sql(product_sql(), {"cutoff": cutoff, "region": region})}
+    if any(product["missing_cost_count"] for product in evidence["E3"]["rows"]):
+        raise ValueError("Missing monthly costs or duplicate cost rows for some sales; cannot analyze incomplete or ambiguous data.")
+    if any(product["missing_discount_count"] for product in evidence["E3"]["rows"]):
+        raise ValueError("Missing discount inputs for some sales; cannot analyze incomplete data.")
     policies = search_policies(f"{region} margin discount freight policy " + question)
     for policy in policies["rows"]:
         evidence[f"P{policy['id']}"] = {"kind": "policy",
@@ -189,6 +211,23 @@ def answer_question(question):
     claim("finding", [text("Freight per unit: before ")] + metric("before_freight_per_unit", prefix="$")
         + [text("; after ")] + metric("after_freight_per_unit", prefix="$")
         + [text("; change: ")] + metric("freight_increase_pct", suffix="%") + [text(".")])
+    for product_index, product in enumerate(evidence["E3"]["rows"]):
+        def product_cell(column, suffix=""):
+            return {"value": product[column], "evidence": "E3", "row": product_index,
+                    "column": column, "suffix": suffix}
+
+        name_column = "product_name" if product["product_name"] is not None else "product_id"
+        label = [product_cell(name_column)] if product[name_column] is not None else [text("unknown")]
+        parts = [text("Product ")] + label + [text(": ")]
+        for period in ("before", "after"):
+            parts.append(text(f"{period} revenue "))
+            parts.extend([text("$"), product_cell(f"{period}_revenue")]
+                         if product[f"{period}_revenue"] is not None else [text("unavailable")])
+            parts.append(text(", margin "))
+            parts.append(product_cell(f"{period}_margin_pct", "%")
+                         if product[f"{period}_margin_pct"] is not None else text("unavailable"))
+            parts.append(text("; " if period == "before" else "."))
+        claim("product", parts)
     for other_index, other in enumerate(rows):
         if other_index != index:
             claim("comparison", [text(f"{other['region_name']} margin: "),
@@ -212,7 +251,7 @@ def answer_question(question):
     kept, dropped = critique(claims, evidence)
     return {"question": question, "region": region, "cutoff": cutoff, "claims": kept,
             "evidence": evidence, "dropped_count": len(dropped),
-            "plan": ["Compare region and month margin", "Compare discount and freight", "Retrieve policy reasons", "Verify every numerical claim"]}
+            "plan": ["Compare region and month margin", "Compare product revenue and margin", "Compare discount and freight", "Retrieve policy reasons", "Verify every numerical claim"]}
 
 
 if __name__ == "__main__":
