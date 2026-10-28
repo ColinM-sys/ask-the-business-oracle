@@ -176,6 +176,15 @@ def test_critic_rejects_units_and_magnitudes_in_adjacent_text(sample_evidence, m
     assert critique([claim], sample_evidence) == ([], [claim])
 
 
+def test_critic_documents_limit_of_adjacent_modifier_check(sample_evidence):
+    claim = {"parts": [
+        {"value": 25.53, "evidence": "E1", "row": 0, "column": "margin"},
+        {"text": " (in millions)"}]}
+    assert critique([claim], sample_evidence) == ([claim], [])
+    doc = " ".join(critique.__doc__.split())
+    assert "does not catch other wording such as ' (in millions)'" in doc
+
+
 def test_hashing_is_stable_and_normalized():
     first = hash_embedding("West freight contract")
     assert first == hash_embedding("West freight contract")

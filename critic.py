@@ -25,8 +25,11 @@ def critique(claims, evidence):
 
     Plain text cannot carry digits (including dates); numerical segments must
     name the evidence, row, column and exact value. Policy text is evidence for
-    qualitative reasons only, never an authority for business numbers. Units
-    and magnitudes cannot be appended as plain text; use validated suffixes.
+    qualitative reasons only, never an authority for business numbers. The
+    adjacent-text check rejects certain unit and magnitude tokens only at the
+    start of the text after a number, after whitespace and joining adjacent
+    text parts; it does not catch other wording such as ' (in millions)'. Only
+    '', '%' and ' percentage points' are valid suffixes.
     """
     kept, dropped = [], []
     for claim in claims:
