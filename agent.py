@@ -7,6 +7,10 @@ from tools import run_sql, search_policies
 JOIN = """FROM sales s JOIN costs c ON c.region_id=s.region_id
     AND c.product_id=s.product_id AND c.cost_month=s.sale_month
     JOIN regions r ON r.region_id=s.region_id"""
+MISSING_COSTS_SQL = """SELECT COUNT(*) AS missing_cost_count
+    FROM sales s LEFT JOIN costs c ON c.region_id=s.region_id
+    AND c.product_id=s.product_id AND c.cost_month=s.sale_month
+    WHERE c.region_id IS NULL"""
 MONTHLY_SQL = f"""SELECT r.region_name, s.sale_month,
     ROUND(SUM(s.net_revenue),2) AS revenue,
     SUM(s.quantity) AS units,
@@ -80,6 +84,9 @@ def answer_question(question):
     if not isinstance(question, str) or not question.strip() or len(question) > 1000:
         raise ValueError("Enter a business question of up to one thousand characters.")
     region, cutoff = parse_question(question)
+    # Evidence includes every region, so check comparison sales as well.
+    if run_sql(MISSING_COSTS_SQL)["rows"][0]["missing_cost_count"]:
+        raise ValueError("Incomplete cost data: sales without matching region, product, and month costs. Load the missing costs and retry.")
     evidence = {
         "E1": {"kind": "sql", **run_sql(MONTHLY_SQL)},
         "E2": {"kind": "sql", **run_sql(summary_sql(), {"cutoff": cutoff})},

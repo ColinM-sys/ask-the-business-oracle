@@ -2,6 +2,7 @@
 import copy
 import json
 import runpy
+import sqlite3
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -9,7 +10,7 @@ import pytest
 
 import tools
 from db import connect
-from agent import answer_question, parse_question
+from agent import MONTHLY_SQL, answer_question, parse_question
 from app import app
 from critic import critique, supported
 from policies import ensure_policies, hash_embedding
@@ -135,6 +136,35 @@ def test_question_scope():
         parse_question("West and East")
 
 
+@pytest.mark.parametrize("cost_key", [(2, 10, "2025-07"), (1, 20, "2025-07"),
+                                     (1, 10, "2025-06")])
+def test_missing_costs_rejected_before_evidence(monkeypatch, cost_key):
+    with sqlite3.connect(":memory:") as con:
+        con.execute("CREATE TABLE sales (region_id, product_id, sale_month)")
+        con.execute("CREATE TABLE costs (region_id, product_id, cost_month)")
+        con.execute("INSERT INTO sales VALUES (1, 10, '2025-07')")
+        con.execute("INSERT INTO costs VALUES (?, ?, ?)", cost_key)
+        calls = []
+
+        def run_sql(sql, params=None):
+            calls.append(sql)
+            assert sql != MONTHLY_SQL, "Missing costs must be checked before aggregating sales"
+            tools.validate_select(sql)
+            cursor = con.execute(sql, params or {})
+            return {"rows": [dict(zip((d[0] for d in cursor.description), row))
+                             for row in cursor.fetchall()]}
+
+        def unexpected_policies(_):
+            pytest.fail("Incomplete costs must be rejected before policy retrieval")
+
+        monkeypatch.setattr("agent.run_sql", run_sql)
+        monkeypatch.setattr("agent.search_policies", unexpected_policies)
+        # Check all regions: these sales may appear in the comparison evidence.
+        with pytest.raises(ValueError, match="Incomplete cost data"):
+            answer_question("Why did West margin fall since July 2025?")
+        assert len(calls) == 1
+
+
 def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
     row = {
         "region_name": "West", "first_month": "2025-01", "last_month": "2025-09",
@@ -145,7 +175,8 @@ def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
         "freight_increase_pct": None,
     }
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
-        "sql": sql, "params": params or {}, "rows": [row]})
+        "sql": sql, "params": params or {},
+        "rows": [{"missing_cost_count": 0}] if "missing_cost_count" in sql else [row]})
     monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
 
     result = answer_question("Why did West margin fall since July 2025?")
