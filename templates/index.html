@@ -50,11 +50,11 @@
   <p class="intro">Understand what changed, explore the evidence, and decide what to do next. Every number opens the SQL and rows behind it.</p>
   <form method="post" id="question-form">
     <label for="question">Your business question</label>
-    <input id="question" name="question" maxlength="1000" value="{{ question }}" required>
+    <input id="question" name="question" maxlength="1000" value="{{ question }}" required{% if question_error %} aria-invalid="true" aria-describedby="question-error" autofocus{% endif %}>
     <button class="submit" type="submit">Analyze question</button>
   </form>
   <p class="hint">Fixed analysis of margin, discounts and freight. Name a region and comparison month; defaults are West and July 2025. Uses all available sales on each side of that month.</p>
-  {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+  {% if error %}<p class="error" role="alert" id="question-error">{{ error }}</p>{% endif %}
   {% if result %}
   <article class="card" aria-live="polite">
     <div class="eyebrow">Business brief · {{ result.region }}</div>
