@@ -15,6 +15,7 @@ DOCS = Path(__file__).parent / "docs"
 _lock = threading.Lock()
 _logger = logging.getLogger(__name__)
 _model_identifier = re.compile(r"[A-Z][A-Z0-9_$#]*")
+_model_cache = None
 
 
 def hash_embedding(text, dimensions=512):
@@ -39,6 +40,7 @@ def embed(cursor, text, backend):
 
 def ensure_policies():
     """Refresh only on source/model changes; never modify the business tables."""
+    global _model_cache
     with _lock:
         sources = [(p.name, p.read_text(encoding="utf-8")) for p in sorted(DOCS.glob("*.md"))]
         if not sources:
@@ -50,26 +52,39 @@ def ensure_policies():
                 cur.execute("""CREATE TABLE policy_chunks (
                     id NUMBER PRIMARY KEY, doc VARCHAR2(255), chunk VARCHAR2(4000),
                     embedding VECTOR(*, FLOAT32), backend VARCHAR2(128), source_hash VARCHAR2(64))""")
-            backend = "hash-v1-512"
-            for (model,) in cur.execute(
-                "SELECT model_name FROM user_mining_models WHERE mining_function='EMBEDDING' ORDER BY model_name"
-            ).fetchall():
-                if not _model_identifier.fullmatch(model):
-                    _logger.warning("Skipping unsupported embedding model %r", model)
-                    continue
-                try:
-                    embed(cur, "Business policy", model)
-                    backend = model
-                    break
-                except oracledb.DatabaseError as exc:
-                    code = getattr(exc.args[0], "code", None) if exc.args else None
-                    # ORA-40290: the model is incompatible with this SQL operator.
-                    # Other failures indicate broken operations and must stop ingestion.
-                    if code != 40290:
-                        raise
-                    _logger.warning("Embedding model %r incompatible (ORA-%05d)", model, code)
+            # Object identity and DDL time also detect replacement under the same name.
+            models = tuple(cur.execute("""SELECT model_name, object_id, last_ddl_time
+                FROM user_mining_models m JOIN user_objects o
+                  ON o.object_name=m.model_name AND o.object_type='MINING MODEL'
+                  AND o.subobject_name IS NULL
+                WHERE mining_function='EMBEDDING' ORDER BY model_name""").fetchall())
+            cache_key = (con.username, con.dsn, models)
+            if _model_cache is not None and _model_cache[0] == cache_key:
+                backend = _model_cache[1]
             else:
-                _logger.warning("Using hash-v1-512 fallback: no compatible embedding models available")
+                backend = "hash-v1-512"
+                for model, _, _ in models:
+                    if not _model_identifier.fullmatch(model):
+                        _logger.warning("Skipping unsupported embedding model %r", model)
+                        continue
+                    try:
+                        embed(cur, "Business policy", model)
+                        backend = model
+                        break
+                    except oracledb.DatabaseError as exc:
+                        code = getattr(exc.args[0], "code", None) if exc.args else None
+                        # ORA-40290: the model is incompatible with this SQL operator.
+                        # Other failures indicate broken operations and must stop ingestion.
+                        if code != 40290:
+                            raise
+                        _logger.warning("Embedding model %r incompatible (ORA-%05d)", model, code)
+                else:
+                    _logger.warning("Using hash-v1-512 fallback: no compatible embedding models available")
+                _model_cache = (cache_key, backend)
+            if backend != "hash-v1-512":
+                # Vectors from an older version of this model cannot be reused.
+                model_version = next(model for model in models if model[0] == backend)
+                fingerprint = hashlib.sha256(repr((sources, model_version)).encode()).hexdigest()
             existing = cur.execute("SELECT DISTINCT backend, source_hash FROM policy_chunks").fetchall()
             if existing == [(backend, fingerprint)]:
                 return backend

@@ -211,6 +211,80 @@ def test_hashing_is_stable_and_normalized():
     assert abs(sum(v*v for v in first) - 1) < 0.000001
 
 
+def test_policy_model_probes_are_cached_until_models_change(tmp_path, monkeypatch):
+    document = tmp_path / "policy.md"
+    document.write_text("First policy", encoding="utf-8")
+    models = [("BAD_MODEL", 1, "v1"), ("GOOD_MODEL", 2, "v1")]
+    rows = []
+    probes = []
+    incompatible = {"BAD_MODEL"}
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.fetchone.return_value = ("POLICY_CHUNKS",)
+
+    def execute(sql, **params):
+        if sql.startswith("SELECT model_name"):
+            cursor.fetchall.return_value = [
+                model if "object_id" in sql.lower() else (model[0],) for model in models
+            ]
+        elif sql.startswith("SELECT DISTINCT backend, source_hash"):
+            cursor.fetchall.return_value = [(row["backend"], row["fingerprint"]) for row in rows]
+        elif sql.startswith("DELETE FROM policy_chunks"):
+            rows.clear()
+        elif sql.lstrip().startswith("INSERT INTO policy_chunks"):
+            rows.append(params)
+        return cursor
+
+    def embedding(cur, text, backend):
+        if text == "Business policy":
+            probes.append(backend)
+            if backend in incompatible:
+                raise oracledb.DatabaseError(SimpleNamespace(code=40290))
+        return hash_embedding(text)
+
+    cursor.execute.side_effect = execute
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+    monkeypatch.setattr("policies.embed", embedding)
+
+    assert ensure_policies() == "GOOD_MODEL"
+    assert ensure_policies() == "GOOD_MODEL"
+    assert probes == ["BAD_MODEL", "GOOD_MODEL"]
+    assert connection.commit.call_count == 1
+
+    document.write_text("Updated policy", encoding="utf-8")
+    assert ensure_policies() == "GOOD_MODEL"
+    assert probes == ["BAD_MODEL", "GOOD_MODEL"]
+    assert [row["chunk"] for row in rows] == ["Updated policy"]
+    assert connection.commit.call_count == 2
+
+    models.append(("LATER_MODEL", 3, "v1"))
+    assert ensure_policies() == "GOOD_MODEL"
+    assert probes == ["BAD_MODEL", "GOOD_MODEL"] * 2
+    assert connection.commit.call_count == 2
+
+    # Replacing the selected model under the same name requires new vectors too.
+    models[1] = ("GOOD_MODEL", 4, "v2")
+    assert ensure_policies() == "GOOD_MODEL"
+    assert ensure_policies() == "GOOD_MODEL"
+    assert probes == ["BAD_MODEL", "GOOD_MODEL"] * 3
+    assert connection.commit.call_count == 3
+
+    models[:] = [models[0]]
+    assert ensure_policies() == "hash-v1-512"
+    assert ensure_policies() == "hash-v1-512"
+    assert probes == ["BAD_MODEL", "GOOD_MODEL"] * 3 + ["BAD_MODEL"]
+    assert connection.commit.call_count == 4
+
+    incompatible.clear()
+    models[0] = ("BAD_MODEL", 5, "v2")
+    assert ensure_policies() == "BAD_MODEL"
+    assert ensure_policies() == "BAD_MODEL"
+    assert probes == ["BAD_MODEL", "GOOD_MODEL"] * 3 + ["BAD_MODEL"] * 2
+    assert connection.commit.call_count == 5
+
+
 @pytest.mark.parametrize("failure", [
     RuntimeError("private-driver-details"),
     oracledb.DatabaseError(SimpleNamespace(code=3113, message="private-driver-details")),
@@ -222,7 +296,7 @@ def test_policy_probe_propagates_unexpected_failures(failure, tmp_path, monkeypa
     connection.__enter__.return_value = connection
     cursor = connection.cursor.return_value
     cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
-    cursor.execute.return_value.fetchall.side_effect = [[("BROKEN_MODEL",)], []]
+    cursor.execute.return_value.fetchall.return_value = [("BROKEN_MODEL", 1, "v1")]
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
 
@@ -233,10 +307,10 @@ def test_policy_probe_propagates_unexpected_failures(failure, tmp_path, monkeypa
 
     monkeypatch.setattr("policies.embed", embedding)
 
-    with pytest.raises(type(failure)) as caught:
-        ensure_policies()
-
-    assert caught.value is failure
+    for _ in range(2):
+        with pytest.raises(type(failure)) as caught:
+            ensure_policies()
+        assert caught.value is failure
     connection.commit.assert_not_called()
     assert not any(call.args[0].startswith("DELETE") for call in cursor.execute.call_args_list)
 
@@ -253,7 +327,9 @@ def test_policy_probe_fallback_is_explicit_and_sanitized(
     connection.__enter__.return_value = connection
     cursor = connection.cursor.return_value
     cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
-    cursor.execute.return_value.fetchall.side_effect = [models, []]
+    cursor.execute.return_value.fetchall.side_effect = [
+        [(model[0], index, "v1") for index, model in enumerate(models)], []
+    ]
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
 
@@ -283,7 +359,9 @@ def test_policy_probe_skips_unsupported_names(unsupported, later_model, tmp_path
     cursor = connection.cursor.return_value
     cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
     models = [(unsupported,)] + ([(later_model,)] if later_model else [])
-    cursor.execute.return_value.fetchall.side_effect = [models, []]
+    cursor.execute.return_value.fetchall.side_effect = [
+        [(model[0], index, "v1") for index, model in enumerate(models)], []
+    ]
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
 
