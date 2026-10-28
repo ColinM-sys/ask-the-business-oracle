@@ -3268,6 +3268,50 @@ def test_policy_citations_have_descriptive_accessible_names(monkeypatch):
         assert documents[evidence_id] in button["aria-label"]
 
 
+def test_successful_analysis_focuses_brief_heading(monkeypatch):
+    monkeypatch.setattr("app.answer_question", lambda _: {
+        "region": "West", "claims": [], "dropped_count": 0, "evidence": {},
+    })
+
+    class PageParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.focused = []
+            self.headings = []
+            self.current_heading = None
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if "autofocus" in attrs:
+                self.focused.append((tag, attrs))
+            if tag == "h2":
+                self.current_heading = [attrs, ""]
+                self.headings.append(self.current_heading)
+
+        def handle_data(self, data):
+            if self.current_heading is not None:
+                self.current_heading[1] += data
+
+        def handle_endtag(self, tag):
+            if tag == "h2":
+                self.current_heading = None
+
+    def parse(response):
+        page = PageParser()
+        page.feed(response.get_data(as_text=True))
+        return page
+
+    client = app.test_client()
+    assert not parse(client.get("/")).focused
+    response = client.post("/", data={"question": "West"})
+    assert response.status_code == 200
+    page = parse(response)
+    heading, = [attrs for attrs, text in page.headings
+                if text == "What changed, and what to do"]
+    assert heading.get("tabindex") == "-1"
+    assert page.focused == [("h2", heading)]
+
+
 def test_question_validation_errors_are_associated_and_focused(monkeypatch):
     class FormParser(HTMLParser):
         def __init__(self):
