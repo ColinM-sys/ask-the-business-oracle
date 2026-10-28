@@ -1,6 +1,7 @@
 """Unit checks and live integration against the existing local Oracle tables."""
 import copy
 import json
+import re
 import runpy
 import subprocess
 import sqlite3
@@ -255,6 +256,31 @@ def test_policy_probe_fallback_is_explicit_and_sanitized(
     assert ("Using hash-v1-512 fallback" in caplog.text) == (expected == "hash-v1-512")
     assert "private-driver-details" not in caplog.text
     assert "forged log entry" not in caplog.text
+
+
+@pytest.mark.parametrize("unsupported", ["my_model", 'EVIL") FROM dual; DELETE FROM sales--\nFORGED'])
+@pytest.mark.parametrize("later_model", [None, "GOOD_MODEL"])
+def test_policy_probe_skips_unsupported_names(unsupported, later_model, tmp_path, monkeypatch):
+    (tmp_path / "policy.md").write_text("Business policy", encoding="utf-8")
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
+    models = [(unsupported,)] + ([(later_model,)] if later_model else [])
+    cursor.execute.return_value.fetchall.side_effect = [models, []]
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+
+    expected = later_model or "hash-v1-512"
+    assert ensure_policies() == expected
+    embedding_sql = [call.args[0] for call in cursor.execute.call_args_list
+                     if "VECTOR_EMBEDDING" in call.args[0]]
+    assert embedding_sql == (["SELECT VECTOR_EMBEDDING(GOOD_MODEL USING :text AS DATA) FROM dual"] * 2
+                             if later_model else [])
+    inserted = [call.kwargs for call in cursor.execute.call_args_list
+                if call.args[0].lstrip().startswith("INSERT INTO policy_chunks")]
+    assert inserted and all(row["backend"] == expected for row in inserted)
+    connection.commit.assert_called_once()
 
 
 @pytest.mark.parametrize("character", ["界", "😀"])
@@ -957,6 +983,39 @@ def test_ui_discloses_dropped_claims_and_empty_brief(monkeypatch, has_claims, dr
     assert (b"No verified claims are available for this brief." in response.data) == (not has_claims)
     assert (b"Numbers in retained claims verified against cited SQL cells." in response.data) == has_claims
     assert (b"Retained finding." in response.data) == has_claims
+    assert b"Explanation unavailable" in response.data
+    assert b"Recommendations unavailable" in response.data
+
+
+@pytest.mark.parametrize("reason_available,actions_available", [
+    (True, True), (True, False), (False, True), (False, False),
+])
+@pytest.mark.parametrize("missing_policy", ["not retrieved", "changed"])
+def test_ui_discloses_missing_policy_backed_sections(
+    policy_rows, reason_available, actions_available, missing_policy
+):
+    missing_docs = set()
+    if not reason_available:
+        missing_docs.add("west_q3_volume_push.md")
+    if not actions_available:
+        missing_docs.add("pricing_policy.md")
+    if missing_policy == "not retrieved":
+        policy_rows[:] = [row for row in policy_rows if row["doc"] not in missing_docs]
+    else:
+        for row in policy_rows:
+            if row["doc"] in missing_docs:
+                row["chunk"] = "Changed policy content."
+
+    response = app.test_client().post("/", data={"question": "West since July 2025"})
+
+    assert response.status_code == 200
+    assert (b"Explanation unavailable" in response.data) == (not reason_available)
+    assert (b"Recommendations unavailable" in response.data) == (not actions_available)
+    assert (b"The policy documents identify" in response.data) == reason_available
+    assert (b"Review discount approvals" in response.data) == actions_available
+    assert b"omitted because they failed verification" not in response.data
+
+
 @pytest.mark.parametrize("data", [None, {}, {"unrelated": "value"}, {"question": ""}])
 def test_ui_missing_question_rejected_before_querying(monkeypatch, data):
     def forbidden_query(*args, **kwargs):
@@ -965,6 +1024,33 @@ def test_ui_missing_question_rejected_before_querying(monkeypatch, data):
     monkeypatch.setattr("agent.run_sql", forbidden_query)
     response = app.test_client().post("/", data=data)
     assert response.status_code == 400
+
+
+def test_focus_indicator_contrasts_with_page_and_cards():
+    html = app.test_client().get("/").get_data(as_text=True)
+
+    def declaration(selector, name):
+        rule = re.search(rf"{re.escape(selector)}\s*\{{([^}}]*)\}}", html)
+        assert rule, f"Missing {selector} rule"
+        value = re.search(rf"(?:^|;)\s*{re.escape(name)}\s*:\s*([^;]+)", rule.group(1))
+        assert value, f"Missing {name} in {selector}"
+        return value.group(1).strip()
+
+    def luminance(color):
+        color = {"white": "#ffffff"}.get(color.lower(), color)
+        assert re.fullmatch(r"#[0-9a-fA-F]{6}", color)
+        channels = [int(color[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+        linear = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+                  for c in channels]
+        return sum(weight * channel for weight, channel in zip((0.2126, 0.7152, 0.0722), linear))
+
+    outline = declaration(":focus-visible", "outline").split()[-1]
+    for surface in (declaration(":root", "background"), declaration(".card", "background")):
+        dark, light = sorted((luminance(outline), luminance(surface)))
+        contrast = (light + 0.05) / (dark + 0.05)
+        assert contrast >= 3, f"Focus outline {outline} has {contrast:.2f}:1 contrast against {surface}"
+
+
 def test_ui_restores_submit_button_on_pageshow():
     html = app.test_client().get("/").get_data(as_text=True)
     script = html.rsplit("<script>", 1)[1].split("</script>", 1)[0]
