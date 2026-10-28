@@ -19,10 +19,12 @@ use Oracle `VECTOR_DISTANCE` with cosine distance; the local hashing fallback is
 lexical retrieval rather than a semantic language model.
 
 The app runs fixed analysis for margin, discount and freight, regardless of
-question wording. It recognizes West, Central, East or South and a full month
-name plus year or `YYYY-MM`. Defaults are West and July 2025. It compares all
-available sales before the selected month with all available sales from that
-month onward, including later years. It displays those boundaries explicitly.
+question wording. It recognizes West, Central, East or South and a month name
+plus year or `YYYY-MM`. Defaults are West and July 2025. Without a bounded
+period it compares all available sales before the selected month with all
+available sales from that month onward, including later years. To limit the
+period, ask “Compare West margin April–June 2025 with July–September 2025”.
+It displays the actual sales boundaries explicitly.
 Margin includes COGS and freight and is weighted by net revenue; discounts use
 gross-sales weights; freight per unit uses quantity weights. Freight movement
 therefore includes product mix and can differ from the contract's rate change.

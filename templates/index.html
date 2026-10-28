@@ -53,7 +53,7 @@
     <input id="question" name="question" maxlength="1000" value="{{ question }}" required>
     <button class="submit" type="submit">Analyze question</button>
   </form>
-  <p class="hint">Fixed analysis of margin, discounts and freight. Name a region and comparison month; defaults are West and July 2025. Uses all available sales on each side of that month.</p>
+  <p class="hint">Fixed analysis of margin, discounts and freight. Name a region and comparison month; defaults are West and July 2025. By default, all available sales on each side of that month are included. For a bounded period, try “Compare West margin April–June 2025 with July–September 2025”.</p>
   {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
   {% if result %}
   <article class="card" aria-live="polite">

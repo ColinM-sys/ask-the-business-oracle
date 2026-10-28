@@ -28,7 +28,19 @@ POLICY_SHA256 = {
 JOIN = """FROM sales s LEFT JOIN costs c ON c.region_id=s.region_id
     AND c.product_id=s.product_id AND c.cost_month=s.sale_month
     JOIN regions r ON r.region_id=s.region_id"""
-MONTHLY_SQL = f"""SELECT r.region_name, s.sale_month,
+
+
+def period_filter(start, end):
+    conditions = []
+    if start is not None:
+        conditions.append("s.sale_month >= :start_month")
+    if end is not None:
+        conditions.append("s.sale_month <= :end_month")
+    return " WHERE " + " AND ".join(conditions) if conditions else ""
+
+
+def monthly_sql(start=None, end=None):
+    return f"""SELECT r.region_name, s.sale_month,
     ROUND(SUM(s.net_revenue),2) AS revenue,
     SUM(s.quantity) AS units,
     ROUND(100*SUM(s.net_revenue-s.quantity*(c.unit_cogs+c.freight_per_unit))
@@ -36,10 +48,10 @@ MONTHLY_SQL = f"""SELECT r.region_name, s.sale_month,
     ROUND(SUM(s.quantity*s.unit_price*s.discount_pct)
         /NULLIF(SUM(s.quantity*s.unit_price),0),2) AS discount_pct,
     ROUND(SUM(s.quantity*c.freight_per_unit)/NULLIF(SUM(s.quantity),0),2) AS freight_per_unit
-    {JOIN} GROUP BY r.region_name,s.sale_month ORDER BY r.region_name,s.sale_month"""
+    {JOIN}{period_filter(start, end)} GROUP BY r.region_name,s.sale_month ORDER BY r.region_name,s.sale_month"""
 
 
-def summary_sql():
+def summary_sql(start=None, end=None):
     # Compute changes in SQL too: a difference calculated in Python is not evidence.
     columns = []
     raw = {}
@@ -64,7 +76,7 @@ def summary_sql():
         "MIN(CASE WHEN s.sale_month >= :cutoff THEN s.sale_month END) AS after_first_month",
         "MAX(CASE WHEN s.sale_month < :cutoff THEN s.sale_month END) AS before_last_month",
     ])
-    return f"SELECT r.region_name, {', '.join(columns)} {JOIN} GROUP BY r.region_name ORDER BY r.region_name"
+    return f"SELECT r.region_name, {', '.join(columns)} {JOIN}{period_filter(start, end)} GROUP BY r.region_name ORDER BY r.region_name"
 
 
 MONTHS = {name: f"{index:02}" for index, name in enumerate(
@@ -82,30 +94,79 @@ def parse_question(question):
                       if re.search(rf"\b{r}\b", question, re.I)]
     if len(region_matches) > 1:
         raise ValueError("Ask about one region at a time; the evidence includes all regions for comparison.")
-    cutoff = "2025-07"
-    date = re.search(r"\b(20\d{2})-(0[1-9]|1[0-2])\b(?![-/\d])", question)
-    month_pattern = r"\b(" + "|".join(MONTHS) + r")\b"
-    named = re.search(month_pattern + r"\.?\s+(20\d{2})\b(?![-/\d])", question, re.I)
-    if date:
-        cutoff = date.group(0)
-    elif named:
-        cutoff = named[2] + "-" + MONTHS[named[1].lower()]
-    # A recognized date must not hide another unsupported date expression.
-    matched = date or named
-    remaining = question[:matched.start()] + question[matched.end():] if matched else question
-    if (re.search(r"\b\d{4}\b|\b\d+[-/]\d+\b", remaining)
-            or re.search(month_pattern, remaining, re.I)):
+    month_pattern = "|".join(MONTHS)
+    date_pattern = re.compile(
+        rf"(?P<iso>\b20\d{{2}}-(?:0[1-9]|1[0-2])\b(?![-/\d]))"
+        rf"|\b(?P<month>{month_pattern})\b\.?(?:\s+(?P<year>20\d{{2}})\b(?![-/]\d|\d))?", re.I)
+    matches = list(date_pattern.finditer(question))
+    remaining = date_pattern.sub(" ", question)
+    if re.search(r"\b\d{4}\b|\b\d+[-/]\d+\b", remaining):
         raise ValueError("Unsupported date; use YYYY-MM or a month name and four-digit year.")
-    return region_matches[0] if region_matches else "West", cutoff
+
+    range_separator = r"\s*(?:[-–—]|to|through)\s*"
+    dates = []
+    for i, match in enumerate(matches):
+        if match["iso"]:
+            dates.append(match["iso"])
+            continue
+        year = match["year"]
+        if not year and i + 1 < len(matches):
+            following = matches[i + 1]
+            if following["month"] and following["year"] and re.fullmatch(
+                    range_separator, question[match.end():following.start()], re.I):
+                year = following["year"]
+        if not year:
+            raise ValueError("Unsupported date; use YYYY-MM or a month name and four-digit year.")
+        dates.append(year + "-" + MONTHS[match["month"].lower()])
+
+    start = end = None
+    cutoff = "2025-07"
+    if len(dates) == 1:
+        cutoff = dates[0]
+    elif len(dates) == 4:
+        separators = [question[matches[i].end():matches[i + 1].start()] for i in range(3)]
+        if not (re.fullmatch(range_separator, separators[0], re.I)
+                and re.fullmatch(r"\s*(?:with|versus|vs\.?|compared\s+(?:to|with)|and)\s*", separators[1], re.I)
+                and re.fullmatch(range_separator, separators[2], re.I)):
+            raise ValueError("Unsupported date comparison; specify two consecutive month ranges.")
+        start, before_end, cutoff, end = dates
+        before_number = int(before_end[:4]) * 12 + int(before_end[5:])
+        cutoff_number = int(cutoff[:4]) * 12 + int(cutoff[5:])
+        if before_end < start or before_number + 1 != cutoff_number:
+            raise ValueError("Date ranges must be ordered and consecutive.")
+    elif dates:
+        # Identify the cutoff and optional bounds by their preceding words.
+        parts = {}
+        for i, match in enumerate(matches):
+            prefix = question[matches[i - 1].end() if i else 0:match.start()]
+            marker = re.search(r"\b(since|cutoff|from|through|until|to)\s*$", prefix, re.I)
+            if not marker:
+                raise ValueError("Unsupported date comparison; specify a cutoff and optional bounds.")
+            word = marker[1].lower()
+            role = "cutoff" if word in ("since", "cutoff") else "start" if word == "from" else "end"
+            if role in parts:
+                raise ValueError("Unsupported date comparison; specify each boundary once.")
+            parts[role] = dates[i]
+        if "cutoff" not in parts:
+            raise ValueError("Unsupported date comparison; specify a cutoff and optional bounds.")
+        cutoff, start, end = parts["cutoff"], parts.get("start"), parts.get("end")
+    if (start is not None and start >= cutoff) or (end is not None and end < cutoff):
+        raise ValueError("Date bounds must place the start before the cutoff and the end on or after it.")
+    return region_matches[0] if region_matches else "West", cutoff, start, end
 
 
 def answer_question(question):
     if not isinstance(question, str) or not question.strip() or len(question) > 1000:
         raise ValueError("Enter a business question of up to one thousand characters.")
-    region, cutoff = parse_question(question)
+    region, cutoff, start, end = parse_question(question)
+    bounds = {}
+    if start is not None:
+        bounds["start_month"] = start
+    if end is not None:
+        bounds["end_month"] = end
     evidence = {
-        "E1": {"kind": "sql", **run_sql(MONTHLY_SQL)},
-        "E2": {"kind": "sql", **run_sql(summary_sql(), {"cutoff": cutoff})},
+        "E1": {"kind": "sql", **run_sql(monthly_sql(start, end), bounds)},
+        "E2": {"kind": "sql", **run_sql(summary_sql(start, end), {"cutoff": cutoff, **bounds})},
     }
     rows = evidence["E2"]["rows"]
     index = next((i for i, row in enumerate(rows) if row["region_name"] == region), None)
@@ -174,7 +235,8 @@ def answer_question(question):
             claim("comparison", [text(f"{other['region_name']} margin: "),
                 number("before_margin_pct", "%", other_index), text(" before; "),
                 number("after_margin_pct", "%", other_index), text(" after.")])
-    if region == "West" and cutoff == "2025-07":
+    if (region == "West" and cutoff == "2025-07" and row["margin_direction"] == "fell"
+            and row["after_first_month"] <= "2025-09"):
         push, freight = policy_ids("west_q3_volume_push.md"), policy_ids("freight_contract_memo.md")
         if push and freight:
             claim("reason", [text("The policy documents identify a regional volume discount push and a replacement freight contract. The discount program bypassed senior sales approval and Finance review. These changes are consistent with the observed margin decline; this comparison does not isolate their individual causal effects.")], push + freight)

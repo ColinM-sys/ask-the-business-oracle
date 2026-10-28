@@ -357,10 +357,120 @@ def test_policy_search_handles_empty_table(monkeypatch):
 
 
 def test_question_scope():
-    assert parse_question("East since March 2025") == ("East", "2025-03")
-    assert parse_question("West since 2025-07") == ("West", "2025-07")
+    assert parse_question("East since March 2025") == ("East", "2025-03", None, None)
+    assert parse_question("West since 2025-07") == ("West", "2025-07", None, None)
     with pytest.raises(ValueError):
         parse_question("West and East")
+
+
+@pytest.mark.parametrize("question, expected", [
+    ("West from April 2025 since July 2025", ("West", "2025-07", "2025-04", None)),
+    ("West since July 2025 through September 2025", ("West", "2025-07", None, "2025-09")),
+    ("West from April 2025 since July 2025 through September 2025",
+     ("West", "2025-07", "2025-04", "2025-09")),
+    ("Compare West margin April–June 2025 with July–September 2025",
+     ("West", "2025-07", "2025-04", "2025-09")),
+    ("Compare West margin 2025-04 to 2025-06 with 2025-07 to 2025-09",
+     ("West", "2025-07", "2025-04", "2025-09")),
+    ("Compare West margin April 2025 through June 2025 with July 2025 through September 2025",
+     ("West", "2025-07", "2025-04", "2025-09")),
+    ("Compare West margin April 2025-June 2025 with July 2025-September 2025",
+     ("West", "2025-07", "2025-04", "2025-09")),
+])
+def test_question_bounded_periods(question, expected):
+    assert parse_question(question) == expected
+
+
+@pytest.mark.parametrize("question", [
+    "West from July 2025 since July 2025",
+    "West from August 2025 since July 2025",
+    "West since July 2025 through June 2025",
+    "Compare West April–May 2025 with July–September 2025",
+    "Compare West April–July 2025 with July–September 2025",
+    "Compare West April–June 2025 with July–June 2025",
+    "West from April 2025 since July 2025 through 2025-13",
+])
+def test_invalid_periods_rejected_before_querying(question, monkeypatch):
+    def forbidden_query(*args, **kwargs):
+        pytest.fail("Invalid periods must be rejected before querying")
+    monkeypatch.setattr("agent.run_sql", forbidden_query)
+    with pytest.raises(ValueError):
+        answer_question(question)
+
+
+def test_bounded_comparison_filters_evidence_and_displays_actual_boundaries(monkeypatch):
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+        """)
+        for month, cogs in (("2025-03", 5), ("2025-04", 55), ("2025-05", 55),
+                            ("2025-06", 55), ("2025-07", 75), ("2025-08", 75),
+                            ("2025-09", 75), ("2025-10", 95)):
+            con.execute("INSERT INTO sales VALUES (1, 1, ?, 100.0, 1, 100.0, 0)", (month,))
+            con.execute("INSERT INTO costs VALUES (1, 1, ?, ?, 5.0)", (month, cogs))
+        # Missing costs outside the selected period must not invalidate the report.
+        con.execute("INSERT INTO sales VALUES (1, 2, '2025-03', 100.0, 1, 100.0, 0)")
+        con.execute("INSERT INTO sales VALUES (1, 2, '2025-10', 100.0, 1, 100.0, 0)")
+
+        def run_sql(sql, params=None):
+            return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
+                con.execute(tools.validate_select(sql), params or {})]}
+
+        monkeypatch.setattr("agent.run_sql", run_sql)
+        monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
+        question = "Compare West margin April–June 2025 with July–September 2025"
+        result = answer_question(question)
+
+        monthly, summary = result["evidence"]["E1"], result["evidence"]["E2"]
+        for source in (monthly, summary):
+            assert source["params"]["start_month"] == "2025-04"
+            assert source["params"]["end_month"] == "2025-09"
+            assert ":start_month" in source["sql"] and ":end_month" in source["sql"]
+        assert summary["params"]["cutoff"] == "2025-07"
+        assert [row["sale_month"] for row in monthly["rows"]] == [
+            "2025-04", "2025-05", "2025-06", "2025-07", "2025-08", "2025-09"]
+        row = summary["rows"][0]
+        assert (row["before_margin_pct"], row["after_margin_pct"], row["margin_drop_pts"]) == (40, 20, 20)
+        assert row["missing_cost_count"] == 0
+        scope = next(claim for claim in result["claims"] if claim["kind"] == "scope")
+        assert [part["value"] for part in scope["parts"] if "value" in part] == [
+            "2025-04", "2025-06", "2025-07", "2025-09"]
+        assert result["dropped_count"] == 0
+
+        con.execute("DELETE FROM sales WHERE product_id = 2")
+        for question, params, months in [
+            ("West from April 2025 since July 2025", {"start_month": "2025-04"},
+             ["2025-04", "2025-05", "2025-06", "2025-07", "2025-08", "2025-09", "2025-10"]),
+            ("West since July 2025 through September 2025", {"end_month": "2025-09"},
+             ["2025-03", "2025-04", "2025-05", "2025-06", "2025-07", "2025-08", "2025-09"]),
+        ]:
+            one_sided = answer_question(question)["evidence"]
+            assert one_sided["E1"]["params"] == params
+            assert one_sided["E2"]["params"] == {"cutoff": "2025-07", **params}
+            assert [row["sale_month"] for row in one_sided["E1"]["rows"]] == months
+
+        # Report the actual months with sales, even when the requested endpoints lack rows.
+        con.execute("DELETE FROM sales WHERE sale_month IN ('2025-04', '2025-09')")
+        result = answer_question("Compare West margin April–June 2025 with July–September 2025")
+        scope = next(claim for claim in result["claims"] if claim["kind"] == "scope")
+        assert [part["value"] for part in scope["parts"] if "value" in part] == [
+            "2025-05", "2025-06", "2025-07", "2025-08"]
+
+        # A bounded comparison that rises must not claim an observed decline.
+        con.execute("UPDATE costs SET unit_cogs = 35 WHERE cost_month IN ('2025-07', '2025-08')")
+        docs = Path(__file__).with_name("docs")
+        policies = [{"id": i, "doc": name, "chunk": (docs / name).read_text(encoding="utf-8")}
+                    for i, name in enumerate(("west_q3_volume_push.md", "freight_contract_memo.md"), 1)]
+        monkeypatch.setattr("agent.search_policies", lambda _: {"sql": "SELECT ...", "params": {}, "rows": policies})
+        result = answer_question("Compare West margin April–June 2025 with July–September 2025")
+        reason = next(claim for claim in result["claims"] if claim["kind"] == "reason")
+        assert not reason["policy_ids"]
+        assert "do not establish a cause" in reason["parts"][0]["text"]
 
 
 @pytest.mark.parametrize("region_id", [1, 2])
@@ -554,7 +664,7 @@ def test_updated_policy_source_invalidates_unchanged_retrieved_chunk(policy_rows
 @pytest.mark.parametrize("month", ["Jul", "jul.", "Sept", "SEP"])
 def test_question_month_abbreviations(month):
     expected = "07" if month.lower().startswith("jul") else "09"
-    assert parse_question(f"West since {month} 2026") == ("West", f"2026-{expected}")
+    assert parse_question(f"West since {month} 2026") == ("West", f"2026-{expected}", None, None)
 
 
 @pytest.mark.parametrize("date", ["2026-13", "2026-00", "2026/07", "2026-07-15",
@@ -566,7 +676,7 @@ def test_question_rejects_unsupported_explicit_dates(date):
 
 
 def test_question_defaults_only_without_date():
-    assert parse_question("Why did West margin fall?") == ("West", "2025-07")
+    assert parse_question("Why did West margin fall?") == ("West", "2025-07", None, None)
 @pytest.mark.parametrize("region", ["North", "north", "Northeast", "Northwest", "Southeast", "Southwest", "West and North"])
 def test_unsupported_region_is_rejected_before_querying(monkeypatch, region):
     def forbidden_query(*args, **kwargs):
@@ -574,7 +684,7 @@ def test_unsupported_region_is_rejected_before_querying(monkeypatch, region):
     monkeypatch.setattr("agent.run_sql", forbidden_query)
     with pytest.raises(ValueError, match="Unsupported region"):
         answer_question(f"Why did {region} margin fall since July 2025?")
-    assert parse_question("Why did margin fall since July 2025?") == ("West", "2025-07")
+    assert parse_question("Why did margin fall since July 2025?") == ("West", "2025-07", None, None)
 
 
 @pytest.fixture(scope="module")
@@ -678,6 +788,16 @@ def test_live_evidence_replays(west_answer):
     for source in west_answer["evidence"].values():
         if source["kind"] == "sql":
             assert tools.run_sql(source["sql"], source["params"])["rows"] == source["rows"]
+
+
+def test_bounded_live_evidence_replays():
+    result = answer_question("Compare West margin April–June 2025 with July–September 2025")
+    for source in (result["evidence"]["E1"], result["evidence"]["E2"]):
+        assert source["params"]["start_month"] == "2025-04"
+        assert source["params"]["end_month"] == "2025-09"
+        assert tools.run_sql(source["sql"], source["params"])["rows"] == source["rows"]
+    assert all("2025-04" <= row["sale_month"] <= "2025-09"
+               for row in result["evidence"]["E1"]["rows"])
 
 
 def test_policy_vector_search_and_idempotent_setup():
