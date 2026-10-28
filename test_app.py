@@ -1451,6 +1451,7 @@ def test_comparison_keeps_available_margin_when_other_period_is_empty(available_
     assert parts[0]["column"] == f"{available_period}_margin_pct"
     assert parts[0]["evidence"] == "E2"
     assert result["evidence"]["E2"]["rows"][parts[0]["row"]]["region_name"] == "East"
+    assert result["evidence"]["E2"]["rows"][parts[0]["row"]]["margin_direction"] is None
     assert supported(parts[0], result["evidence"])
     assert result["dropped_count"] == 0
 
@@ -1520,6 +1521,8 @@ def test_zero_revenue_preserves_available_metrics(zero_period, monkeypatch):
         assert response.status_code == 200
 
         rows = {row["region_name"]: row for row in result["evidence"]["E2"]["rows"]}
+        assert rows["West"]["margin_direction"] is None
+        assert rows["East"]["margin_direction"] is None
         findings = [claim for claim in result["claims"] if claim["kind"] == "finding"]
         render = lambda claim: "".join(p.get("text", str(p.get("value", "")) + p.get("suffix", ""))
                                        for p in claim["parts"]).lower()
