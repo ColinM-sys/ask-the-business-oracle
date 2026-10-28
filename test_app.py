@@ -128,6 +128,40 @@ def test_policy_chunks_fit_byte_limit(character, tmp_path, monkeypatch):
     connection.commit.assert_called_once()
 
 
+def test_empty_policy_documents_preserve_existing_rows(tmp_path, monkeypatch):
+    (tmp_path / "empty.md").write_text(" \n\t\n ", encoding="utf-8")
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
+    cursor.execute.return_value.fetchall.side_effect = [[], [("hash-v1-512", "old-hash")]]
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+
+    with pytest.raises(RuntimeError, match="No policy content"):
+        ensure_policies()
+
+    assert not any(call.args[0].lstrip().startswith(("DELETE", "INSERT"))
+                   for call in cursor.execute.call_args_list)
+    connection.commit.assert_not_called()
+
+
+def test_policy_search_handles_empty_table(monkeypatch):
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value.__enter__.return_value
+    cursor.execute.return_value.fetchone.return_value = None
+    monkeypatch.setattr(tools, "ensure_policies", lambda: None)
+    monkeypatch.setattr(tools, "connect", lambda: connection)
+    embedding = MagicMock()
+    monkeypatch.setattr(tools, "embed", embedding)
+
+    with pytest.raises(RuntimeError, match="No policy chunks"):
+        tools.search_policies("West freight")
+
+    embedding.assert_not_called()
+
+
 def test_question_scope():
     assert parse_question("East since March 2025") == ("East", "2025-03")
     assert parse_question("West since 2025-07") == ("West", "2025-07")
