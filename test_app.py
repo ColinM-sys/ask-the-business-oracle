@@ -1870,16 +1870,25 @@ def test_question_validation_errors_are_associated_and_focused(monkeypatch):
         assert page.question.get("aria-describedby") == page.alert.get("id")
         assert page.question.get("aria-describedby")
         assert "autofocus" in page.question
+        assert "autofocus" not in page.alert
         assert message in page.alert_text
 
     def failure(_):
         raise RuntimeError("unavailable")
 
     monkeypatch.setattr("app.answer_question", failure)
-    for response in [client.get("/"), client.post("/", data={"question": "West"})]:
+    for response, status in [(client.get("/"), 200),
+                             (client.post("/", data={"question": "West"}), 503)]:
+        assert response.status_code == status
         page = parse(response)
         assert "aria-invalid" not in page.question
         assert "autofocus" not in page.question
+        if status == 503:
+            assert page.alert.get("tabindex") == "-1"
+            assert "autofocus" in page.alert
+            assert "Analysis unavailable" in page.alert_text
+        else:
+            assert page.alert is None
 
 
 def test_ui_validation_and_safe_error(monkeypatch):
