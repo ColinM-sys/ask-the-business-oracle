@@ -66,6 +66,9 @@ def summary_sql():
             "discount_pct": f"CASE WHEN {MISSING_DISCOUNT_COUNT}=0 THEN {total('s.quantity*s.unit_price*s.discount_pct')}/NULLIF({total('s.quantity*s.unit_price')},0) END",
             "freight_per_unit": f"{total('s.quantity*c.freight_per_unit')}/NULLIF({units},0)",
         }
+        # Do not present a partial sum as zero revenue when inputs are missing.
+        columns.append(f"CASE WHEN SUM(CASE WHEN {condition} AND s.net_revenue IS NULL THEN 1 ELSE 0 END)=0 "
+                       f"THEN {revenue} END AS {period}_revenue")
         for name, expression in raw[period].items():
             columns.append(f"ROUND({expression},2) AS {period}_{name}")
     columns.extend([
@@ -130,7 +133,7 @@ def answer_question(question):
     if any(row["missing_discount_count"] for key in ("E1", "E2") for row in evidence[key]["rows"]):
         raise ValueError("Missing discount inputs for some sales; cannot analyze incomplete data.")
     row = rows[index]
-    if row["before_margin_pct"] is None or row["after_margin_pct"] is None:
+    if row["before_last_month"] is None or row["after_first_month"] is None:
         raise QuestionValidationError("The comparison date must have sales both before and after it.")
     policies = search_policies(f"{region} margin discount freight policy " + question)
     for policy in policies["rows"]:
@@ -145,8 +148,8 @@ def answer_question(question):
         return {"value": rows[row_index][column], "evidence": "E2", "row": row_index,
                 "column": column, "suffix": suffix}
 
-    def metric(column, prefix="", suffix=""):
-        return ([text(prefix), number(column, suffix)] if row[column] is not None
+    def metric(column, prefix="", suffix="", row_index=index):
+        return ([text(prefix), number(column, suffix, row_index)] if rows[row_index][column] is not None
                 else [text("unavailable")])
 
     def policy_ids(filename):
@@ -178,12 +181,27 @@ def answer_question(question):
         number("before_last_month"), text(" with "), number("after_first_month"), text(" through "),
         number("last_month"), text(". Margin includes COGS and freight; percentages are revenue-weighted. Discounts are weighted by gross sales; freight is weighted by units.")])
     direction = row["margin_direction"]
-    precision_note = (" The change is below display precision."
-                      if row["margin_drop_pts"] == 0 and direction != "was unchanged" else "")
-    # The signed drop is kept intact, including for regions whose margin rose.
-    claim("finding", [text(f"{region} gross margin {direction} from "), number("before_margin_pct", "%"),
-        text(" to "), number("after_margin_pct", "%"), text("; the signed margin drop is "),
-        number("margin_drop_pts", " percentage points"), text("." + precision_note)])
+    margin_available = row["before_margin_pct"] is not None and row["after_margin_pct"] is not None
+    if margin_available:
+        precision_note = (" The change is below display precision."
+                          if row["margin_drop_pts"] == 0 and direction != "was unchanged" else "")
+        # The signed drop is kept intact, including for regions whose margin rose.
+        claim("finding", [text(f"{region} gross margin {direction} from "), number("before_margin_pct", "%"),
+            text(" to "), number("after_margin_pct", "%"), text("; the signed margin drop is "),
+            number("margin_drop_pts", " percentage points"), text("." + precision_note)])
+    else:
+        parts = [text(f"{region} gross margin: before ")] + metric("before_margin_pct", suffix="%")
+        parts += [text("; after ")] + metric("after_margin_pct", suffix="%")
+        parts += [text("; change unavailable. Zero revenue or missing revenue makes margin unavailable: ")]
+        periods = [period for period in ("before", "after") if row[f"{period}_margin_pct"] is None]
+        for i, period in enumerate(periods):
+            if i:
+                parts.append(text("; "))
+            if row[f"{period}_revenue"] is None:
+                parts.append(text(f"{period} revenue has missing values"))
+            else:
+                parts.extend([text(f"{period} revenue is "), number(f"{period}_revenue")])
+        claim("finding", parts + [text(".")])
     claim("finding", [text("Average discount: before ")] + metric("before_discount_pct", suffix="%")
         + [text("; after ")] + metric("after_discount_pct", suffix="%") + [text(".")])
     claim("finding", [text("Freight per unit: before ")] + metric("before_freight_per_unit", prefix="$")
@@ -191,18 +209,21 @@ def answer_question(question):
         + [text("; change: ")] + metric("freight_increase_pct", suffix="%") + [text(".")])
     for other_index, other in enumerate(rows):
         if other_index != index:
-            claim("comparison", [text(f"{other['region_name']} margin: "),
-                number("before_margin_pct", "%", other_index), text(" before; "),
-                number("after_margin_pct", "%", other_index), text(" after.")])
+            claim("comparison", [text(f"{other['region_name']} margin: ")]
+                + metric("before_margin_pct", suffix="%", row_index=other_index) + [text(" before; ")]
+                + metric("after_margin_pct", suffix="%", row_index=other_index) + [text(" after.")])
     if region == "West" and cutoff == "2025-07":
         push, freight = policy_ids("west_q3_volume_push.md"), policy_ids("freight_contract_memo.md")
         if push and freight:
-            impact = ("These changes are consistent with the observed margin decline"
+            impact = ("The margin change cannot be determined" if not margin_available else
+                      "These changes are consistent with the observed margin decline"
                       if direction == "fell" else f"The observed margin {direction}")
             claim("reason", [text("The policy documents identify a regional volume discount push and a replacement freight contract. The discount program bypassed senior sales approval and Finance review. "
                 f"{impact}; this comparison does not isolate their individual causal effects.")], push + freight)
     else:
-        claim("reason", [text("Use the discount and freight movements to investigate the margin change. The retrieved West-specific documents do not establish a cause for this region and comparison period.")])
+        claim("reason", [text(("Use the discount and freight movements to investigate the margin change. "
+            if margin_available else "Review the discount and freight movements alongside margin when available. ")
+            + "The retrieved West-specific documents do not establish a cause for this region and comparison period.")])
     pricing = policy_ids("pricing_policy.md")
     playbook = policy_ids("regional_playbook.md")
     if pricing and playbook:
