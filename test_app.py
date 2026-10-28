@@ -235,6 +235,17 @@ def test_critic_drops_unsupported_numbers_and_preserves_valid(sample_evidence):
     assert len(dropped) == 3
 
 
+def test_readme_documents_unchecked_spelled_out_numbers():
+    claim = {"parts": [{"text": "Sales were five million."}]}
+    assert critique([claim], {}) == ([claim], [])
+
+    readme = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
+    documentation = " ".join(readme.lower().split())
+    assert "numbers written as words" in documentation
+    assert "five million" in documentation
+    assert "can pass without a citation" in documentation
+
+
 @pytest.mark.parametrize("change", [
     {"row": -1}, {"row": 10}, {"column": "missing"}, {"evidence": "missing"},
     {"value": "NaN"}, {"value": "Infinity"}, {"evidence": "P1", "value": 99},
