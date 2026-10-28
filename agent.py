@@ -85,6 +85,7 @@ MONTHS = {name: f"{index:02}" for index, name in enumerate(
     ("january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"), 1)}
 MONTHS.update({name[:3]: value for name, value in list(MONTHS.items())})
 MONTHS["sept"] = "09"
+REGIONS = ("West", "Central", "East", "South")
 
 
 def parse_question(question):
@@ -92,7 +93,7 @@ def parse_question(question):
         r"\b(north|northwest|northeast|southwest|southeast)\b", question, re.I)
     if unsupported:
         raise QuestionValidationError(f"Unsupported region: {unsupported[0]}. Choose West, Central, East, or South.")
-    region_matches = [r for r in ("West", "Central", "East", "South")
+    region_matches = [r for r in REGIONS
                       if re.search(rf"\b{r}\b", question, re.I)]
     if len(region_matches) > 1:
         raise QuestionValidationError("Ask about one region at a time; the evidence includes all regions for comparison.")
@@ -121,6 +122,9 @@ def answer_question(question):
         "E1": {"kind": "sql", **run_sql(MONTHLY_SQL)},
         "E2": {"kind": "sql", **run_sql(summary_sql(), {"cutoff": cutoff})},
     }
+    if any(row.get("region_name") not in REGIONS
+           for key in ("E1", "E2") for row in evidence[key]["rows"]):
+        raise ValueError("Unsupported region name in sales data.")
     rows = evidence["E2"]["rows"]
     index = next((i for i, row in enumerate(rows) if row["region_name"] == region), None)
     if index is None:

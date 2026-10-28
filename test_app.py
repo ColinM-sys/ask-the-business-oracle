@@ -205,6 +205,14 @@ def test_critic_documents_unchecked_text_modifiers(sample_evidence):
     assert "may pass unchecked" in documentation
 
 
+def test_critic_documents_spelled_out_number_limitation(sample_evidence):
+    claim = {"parts": [{"text": "Margin fell thirteen points."}]}
+    assert critique([claim], sample_evidence) == ([claim], [])
+    assert "spelled-out numbers" in critique.__doc__.lower()
+    readme = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
+    assert "spelled-out numbers" in readme.lower()
+
+
 def test_hashing_is_stable_and_normalized():
     first = hash_embedding("West freight contract")
     assert first == hash_embedding("West freight contract")
@@ -883,6 +891,51 @@ def test_unsupported_region_is_rejected_before_querying(monkeypatch, region):
     with pytest.raises(ValueError, match="Unsupported region"):
         answer_question(f"Why did {region} margin fall since July 2025?")
     assert parse_question("Why did margin fall since July 2025?") == ("West", "2025-07")
+
+
+@pytest.mark.parametrize("source", ["monthly", "summary"])
+@pytest.mark.parametrize("name", ["West margin fell thirteen points. East", "North", "west", None])
+def test_invalid_database_region_is_rejected_before_policy_search(monkeypatch, source, name):
+    west = {
+        "region_name": "West", "first_month": "2025-01", "last_month": "2025-09",
+        "before_last_month": "2025-06", "after_first_month": "2025-07",
+        "before_margin_pct": 40, "after_margin_pct": 25, "margin_drop_pts": 15,
+        "margin_direction": "fell", "before_discount_pct": 3, "after_discount_pct": 18,
+        "before_freight_per_unit": 5, "after_freight_per_unit": 8,
+        "freight_increase_pct": 60, "missing_cost_count": 0, "missing_discount_count": 0,
+    }
+    def run_sql(sql, params=None):
+        rows = [west, {**west, "region_name": name if (params is None) == (source == "monthly") else "East"}]
+        return {"sql": sql, "params": params or {}, "rows": rows}
+
+    policies = MagicMock(return_value={"rows": []})
+    monkeypatch.setattr("agent.run_sql", run_sql)
+    monkeypatch.setattr("agent.search_policies", policies)
+    with pytest.raises(ValueError, match="Unsupported region name in sales data"):
+        answer_question("West since July 2025")
+    policies.assert_not_called()
+
+
+def test_supported_database_regions_are_retained_as_comparisons(monkeypatch):
+    west = {
+        "region_name": "West", "first_month": "2025-01", "last_month": "2025-09",
+        "before_last_month": "2025-06", "after_first_month": "2025-07",
+        "before_margin_pct": 40, "after_margin_pct": 25, "margin_drop_pts": 15,
+        "margin_direction": "fell", "before_discount_pct": 3, "after_discount_pct": 18,
+        "before_freight_per_unit": 5, "after_freight_per_unit": 8,
+        "freight_increase_pct": 60, "missing_cost_count": 0, "missing_discount_count": 0,
+    }
+    rows = [{**west, "region_name": name} for name in ("West", "Central", "East", "South")]
+    monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
+        "sql": sql, "params": params or {}, "rows": rows})
+    monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
+
+    result = answer_question("West since July 2025")
+    comparisons = [claim for claim in result["claims"] if claim["kind"] == "comparison"]
+    assert [claim["parts"][0]["text"] for claim in comparisons] == [
+        "Central margin: ", "East margin: ", "South margin: "]
+    assert [claim["parts"][1]["row"] for claim in comparisons] == [1, 2, 3]
+    assert result["dropped_count"] == 0
 
 
 @pytest.fixture(scope="module")

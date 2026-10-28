@@ -41,8 +41,11 @@ gross-sales weights; freight per unit uses quantity weights. Freight movement
 therefore includes product mix and can differ from the contract's rate change.
 The other regions provide context, not a causal decomposition.
 
-Every number in the brief, including dates and SQL-derived differences, names an
-exact SQL result cell. The critic drops entire claims with unsupported numbers.
+Numeric parts of the brief, including dates and SQL-derived differences, name an
+exact SQL result cell. The critic drops claims with digits in plain text or numeric
+parts that do not match their cited cells. It cannot detect spelled-out numbers in
+plain text; qualitative text is fixed, and database region names must exactly match
+West, Central, East or South.
 Click a number to view SQL, bound parameters and returned rows, with the cited
 cell highlighted. Policy citations open retrieved source text and vector SQL.
 Fixed qualitative explanations are included only when their policy documents
