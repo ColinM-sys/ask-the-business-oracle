@@ -22,7 +22,7 @@ from packaging.requirements import Requirement
 import db
 import tools
 from db import connect
-from agent import (DataQualityError, DiscountDataQualityError, RevenueDataQualityError,
+from agent import (DataQualityError, DiscountDataQualityError, RevenueDataQualityError, POLICY_SHA256,
                    answer_question, parse_question, summary_sql)
 from app import app
 from critic import critique, supported
@@ -950,20 +950,164 @@ def test_policy_table_creation_race(code, tmp_path, monkeypatch):
         connection.commit.assert_not_called()
 
 
-def test_policy_search_handles_empty_table(monkeypatch):
-    connection = MagicMock()
-    connection.__enter__.return_value = connection
-    cursor = connection.cursor.return_value.__enter__.return_value
-    cursor.execute.return_value.fetchone.return_value = None
-    monkeypatch.setattr(tools, "ensure_policies", lambda: None)
-    monkeypatch.setattr(tools, "connect", lambda: connection)
+def test_policy_search_propagates_refresh_failure(monkeypatch):
+    def fail_refresh(*args, **kwargs):
+        raise RuntimeError("No policy content found")
+
+    monkeypatch.setattr(tools, "ensure_policies", fail_refresh)
     embedding = MagicMock()
     monkeypatch.setattr(tools, "embed", embedding)
 
-    with pytest.raises(RuntimeError, match="No policy chunks"):
+    with pytest.raises(RuntimeError, match="No policy content"):
         tools.search_policies("West freight")
 
     embedding.assert_not_called()
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_policy_search_keeps_corpus_locked_through_retrieval(tmp_path, monkeypatch, cached):
+    reviewed = tmp_path / "reviewed"
+    superseding = tmp_path / "superseding"
+    reviewed.mkdir()
+    superseding.mkdir()
+    (reviewed / "shared.md").write_text("Reviewed policy", encoding="utf-8")
+    (superseding / "shared.md").write_text("Reviewed policy", encoding="utf-8")
+    (superseding / "new.md").write_text("This policy supersedes the reviewed policy", encoding="utf-8")
+    worker = threading.local()
+    database_lock = threading.Lock()
+    rows_lock = threading.Lock()
+    retrieving = threading.Event()
+    resume = threading.Event()
+    second_progress = threading.Event()
+    second_waiting = threading.Event()
+    second_read = threading.Event()
+    rows = []
+
+    class Sources:
+        def glob(self, pattern):
+            if worker.name == "second":
+                second_read.set()
+                return sorted(superseding.glob(pattern))
+            return sorted(reviewed.glob(pattern))
+
+    class Connection:
+        def __init__(self):
+            self.locked = False
+            self.pending = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.release()
+
+        def release(self):
+            if self.locked:
+                self.locked = False
+                database_lock.release()
+
+        def cursor(self):
+            return Cursor(self)
+
+        def commit(self):
+            if self.pending is not None:
+                with rows_lock:
+                    rows[:] = self.pending
+            self.release()
+
+    class Cursor:
+        def __init__(self, connection):
+            self.connection = connection
+            self.result = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def execute(self, sql, params=None, **kwargs):
+            params = {**(params or {}), **kwargs}
+            sql = " ".join(sql.upper().split())
+            if sql.startswith("SELECT TABLE_NAME FROM USER_TABLES"):
+                self.result = [("POLICY_CHUNKS",)]
+            elif sql == "LOCK TABLE POLICY_CHUNKS IN EXCLUSIVE MODE":
+                if worker.name == "second":
+                    if database_lock.locked():
+                        second_waiting.set()
+                    second_progress.set()
+                assert database_lock.acquire(timeout=10), "Database lock was not released"
+                self.connection.locked = True
+            elif sql.startswith("SELECT MODEL_NAME, CREATION_DATE,"):
+                self.result = []
+            elif sql.startswith("SELECT DISTINCT BACKEND, SOURCE_HASH FROM POLICY_CHUNKS"):
+                with rows_lock:
+                    current = self.connection.pending if self.connection.pending is not None else rows
+                    self.result = list({(row["backend"], row["fingerprint"]) for row in current})
+            elif sql.startswith("SELECT CHUNK, EMBEDDING FROM POLICY_CHUNKS"):
+                with rows_lock:
+                    self.result = [(row["chunk"], row["vector"]) for row in rows
+                                   if row["backend"] == params["backend"]
+                                   and row["fingerprint"].startswith(params["version"])]
+            elif sql.startswith("DELETE FROM POLICY_CHUNKS"):
+                self.connection.pending = []
+            elif sql.startswith("INSERT INTO POLICY_CHUNKS"):
+                self.connection.pending.append(params)
+            elif sql == "SET TRANSACTION READ ONLY":
+                pass
+            elif sql.startswith("SELECT BACKEND FROM POLICY_CHUNKS"):
+                with rows_lock:
+                    self.result = [(rows[0]["backend"],)] if rows else []
+            elif "VECTOR_DISTANCE(" in sql:
+                retrieving.set()
+                assert resume.wait(10), "Search was not released"
+                with rows_lock:
+                    current = self.connection.pending if self.connection.pending is not None else rows
+                    self.result = [(row["id"], row["doc"], row["chunk"], 0.0) for row in current]
+            else:
+                pytest.fail(f"Unexpected SQL: {sql}")
+            return self
+
+        def fetchone(self):
+            return self.result[0] if self.result else None
+
+        def fetchall(self):
+            return self.result
+
+    def search():
+        worker.name = "first"
+        return tools.search_policies("West freight")
+
+    def refresh():
+        worker.name = "second"
+        return ensure_policies()
+
+    monkeypatch.setattr("policies.DOCS", Sources())
+    monkeypatch.setattr("policies.connect", Connection)
+    monkeypatch.setattr(tools, "connect", Connection)
+    # Separate app processes have separate Python locks but share the database lock.
+    monkeypatch.setattr("policies._lock", nullcontext())
+    worker.name = "first"
+    if cached:
+        ensure_policies()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(search)
+        try:
+            assert retrieving.wait(10), "Search did not reach retrieval"
+            second = executor.submit(refresh)
+            assert second_progress.wait(10), "Second refresh did not reach the database lock"
+            assert second_waiting.is_set(), "Refresh replaced the corpus during retrieval"
+            assert not second_read.is_set()
+            assert not second.done()
+        finally:
+            resume.set()
+        result = first.result(timeout=10)
+        assert second.result(timeout=10) == "hash-v1-512"
+
+    assert [(row["doc"], row["chunk"]) for row in result["rows"]] == [("shared.md", "Reviewed policy")]
+    assert result["corpus_hashes"] == {"shared.md": hashlib.sha256(b"Reviewed policy").hexdigest()}
+    assert {row["doc"] for row in rows} == {"shared.md", "new.md"}
 
 
 def test_question_scope():
@@ -1513,7 +1657,8 @@ def test_zero_revenue_preserves_available_metrics(zero_period, monkeypatch):
         policies = [{"id": i, "doc": path.name, "chunk": path.read_text(encoding="utf-8").strip()}
                     for i, path in enumerate(sorted(Path(__file__).with_name("docs").glob("*.md")), 1)]
         monkeypatch.setattr("agent.search_policies", lambda _: {
-            "sql": "SELECT policy evidence", "params": {}, "rows": policies})
+            "sql": "SELECT policy evidence", "params": {}, "rows": policies,
+            "corpus_hashes": POLICY_SHA256.copy()})
         question = "West since July 2025"
         result = answer_question(question)
         response = app.test_client().post("/", data={"question": question})
@@ -1752,7 +1897,8 @@ def policy_rows(monkeypatch):
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
         "sql": sql, "params": params or {}, "rows": [row]})
     monkeypatch.setattr("agent.search_policies", lambda _: {
-        "sql": "SELECT policy evidence", "params": {}, "rows": policies})
+        "sql": "SELECT policy evidence", "params": {}, "rows": policies,
+        "corpus_hashes": POLICY_SHA256.copy()})
     return policies
 
 
@@ -1833,6 +1979,19 @@ def test_fixed_policy_claims_require_reviewed_complete_corpus(policy_rows, tmp_p
     assert result["dropped_count"] == 0
 
 
+@pytest.mark.parametrize("revision", ["missing", "superseding"])
+def test_policy_claims_require_the_searched_corpus_to_be_reviewed(policy_rows, monkeypatch, revision):
+    result = {"sql": "SELECT policy evidence", "params": {}, "rows": policy_rows}
+    if revision == "superseding":
+        result["corpus_hashes"] = {**POLICY_SHA256, "superseding.md": "new policy"}
+    monkeypatch.setattr("agent.search_policies", lambda _: result)
+
+    answer = answer_question("West since July 2025")
+
+    assert not any(claim["kind"] in {"reason", "action"} for claim in answer["claims"])
+    assert len([claim for claim in answer["claims"] if claim["kind"] == "finding"]) == 3
+
+
 @pytest.mark.parametrize("month", ["Jul", "jul.", "Sept", "SEP"])
 def test_question_month_abbreviations(month):
     expected = "07" if month.lower().startswith("jul") else "09"
@@ -1881,7 +2040,8 @@ def retrieved_policy_rows(monkeypatch):
     rows = [{"id": index, "doc": path.name, "chunk": path.read_text(encoding="utf-8")}
             for index, path in enumerate(sorted(Path(__file__).with_name("docs").glob("*.md")), 1)]
     monkeypatch.setattr("agent.search_policies", lambda _: {
-        "sql": "SELECT ...", "params": {}, "rows": rows})
+        "sql": "SELECT ...", "params": {}, "rows": rows,
+        "corpus_hashes": POLICY_SHA256.copy()})
     return rows
 
 

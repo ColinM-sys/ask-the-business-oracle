@@ -37,8 +37,8 @@ def embed(cursor, text, backend):
     ).fetchone()[0]
 
 
-def ensure_policies():
-    """Refresh only on source/model changes; never modify the business tables."""
+def ensure_policies(retrieve=None):
+    """Refresh on source/model changes and optionally retrieve under the same lock."""
     with _lock:
         with connect() as con:
             cur = con.cursor()
@@ -96,7 +96,7 @@ def ensure_policies():
             fingerprint = version + source_hash[:32]
             existing = cur.execute("SELECT DISTINCT backend, source_hash FROM policy_chunks").fetchall()
             if existing == [(backend, fingerprint)]:
-                return backend
+                return retrieve(cur, backend, sources) if retrieve else backend
             chunks = []
             for name, content in sources:
                 # Keep headings with their paragraphs; these short documents fit in one chunk.
@@ -139,8 +139,9 @@ def ensure_policies():
                 cur.execute("""INSERT INTO policy_chunks (id,doc,chunk,embedding,backend,source_hash)
                     VALUES (:id,:doc,:chunk,:vector,:backend,:fingerprint)""",
                     id=index, doc=doc, chunk=chunk, vector=vector, backend=backend, fingerprint=fingerprint)
+            result = retrieve(cur, backend, sources) if retrieve else backend
             con.commit()
-            return backend
+            return result
 
 
 if __name__ == "__main__":

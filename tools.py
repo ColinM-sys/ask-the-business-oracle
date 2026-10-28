@@ -1,6 +1,7 @@
 """Constrained, read-only business SQL and Oracle vector policy retrieval."""
 import json
 from decimal import Decimal
+from hashlib import sha256
 
 import oracledb
 import sqlglot
@@ -71,13 +72,7 @@ def search_policies(text, k=5):
         raise ValueError("k must be between one and twenty")
     if not isinstance(text, str) or not text.strip():
         raise ValueError("Search text is required")
-    ensure_policies()
-    with connect() as con, con.cursor() as cur:
-        cur.execute("SET TRANSACTION READ ONLY")
-        row = cur.execute("SELECT backend FROM policy_chunks FETCH FIRST 1 ROW ONLY").fetchone()
-        if row is None:
-            raise RuntimeError("No policy chunks available")
-        backend = row[0]
+    def retrieve(cur, backend, sources):
         vector = embed(cur, text, backend)
         # Store the exact vector as JSON; SQL converts it back on execution/replay.
         params = {"query_vector": json.dumps(vector.tolist()), "k": k}
@@ -85,4 +80,7 @@ def search_policies(text, k=5):
             FROM policy_chunks ORDER BY distance, id FETCH FIRST :k ROWS ONLY"""
         rows = cur.execute(sql, params).fetchall()
         return {"sql": sql, "params": params,
+                "corpus_hashes": {name: sha256(content.strip().encode("utf-8")).hexdigest()
+                                  for name, content in sources},
                 "rows": [dict(zip(("id", "doc", "chunk", "distance"), row)) for row in rows]}
+    return ensure_policies(retrieve)

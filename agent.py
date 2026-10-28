@@ -199,7 +199,7 @@ def answer_question(question):
         corpus_hashes = {}
 
     def policy_ids(filename):
-        if corpus_hashes != POLICY_SHA256:
+        if corpus_hashes != POLICY_SHA256 or policies.get("corpus_hashes") != POLICY_SHA256:
             return []
         # These reviewed documents each fit in one chunk; partial text is not proof.
         citations = []
