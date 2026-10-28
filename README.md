@@ -44,6 +44,10 @@ month onward, including later years. It displays those boundaries explicitly.
 Margin includes COGS and freight and is weighted by net revenue; discounts use
 gross-sales weights; freight per unit uses quantity weights. Freight movement
 therefore includes product mix and can differ from the contract's rate change.
+Changes and margin direction use unrounded aggregates. SQL rounds period metrics
+and changes independently to two decimal places, so subtracting displayed
+endpoints may give a different result. For example, margins of 25.004% and
+24.996% both round to 25%, but the drop is 0.01 percentage points.
 The other regions provide context, not a causal decomposition.
 
 Every number in the brief, including dates and SQL-derived differences, names an
@@ -56,8 +60,20 @@ were retrieved; West's explanation applies to the default change point.
 `run_sql` parses one SELECT, limits tables and functions to an allowlist, rejects
 writes/locks/sequences/procedural calls, and executes in a read-only transaction.
 It refuses evidence over the row limit instead of silently truncating it.
-Policy setup is the separate write path. The Flask server binds only to localhost
-and runs without debug mode; this demo has no production authentication layer.
+`search_policies()` calls `ensure_policies()` on every policy search, including
+normal POST requests. It creates `policy_chunks` if absent and transactionally
+deletes and replaces all rows and commits when the table is empty or the source
+documents or selected embedding backend change. The runtime database user needs
+`CREATE TABLE` when the table is missing, tablespace quota (or
+`UNLIMITED TABLESPACE`) for storage, and `SELECT`, `DELETE`, and `INSERT` access
+to `policy_chunks` (the table owner has these privileges). Running
+`python policies.py` once does not make SELECT-only runtime permissions sufficient.
+The table is shared by requests and other app instances using the same schema,
+so refreshes change their policy state too. Instances with different documents
+or embedding backends can overwrite each other's policy state.
+
+The Flask server binds only to localhost and runs without debug mode; this demo
+has no production authentication layer.
 
 ```powershell
 python -m pytest -q test_app.py
