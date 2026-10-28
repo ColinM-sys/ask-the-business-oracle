@@ -95,6 +95,22 @@ def test_readme_documents_required_oracle_configuration():
         assert is_empty, f"{name} must be blank in .env.example"
 
 
+def test_readme_documents_first_time_oracle_provisioning():
+    readme = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
+    setup = " ".join(readme.split("python policies.py", 1)[0].lower().split())
+    for instruction in (
+        "docker run", "--name oracle-free", "127.0.0.1:1521:1521",
+        "container-registry.oracle.com/database/free:latest",
+        "docker logs", "database is ready to use!", "sqlplus / as sysdba",
+        "alter session set container=freepdb1", "create user atb",
+        "create session", "create table", "quota unlimited on users",
+        "localhost:1521/freepdb1", "python load.py",
+    ):
+        assert instruction in setup
+    steps = ("docker run", "docker logs", "alter session", "create user", "python load.py")
+    assert [setup.index(step) for step in steps] == sorted(setup.index(step) for step in steps)
+
+
 @pytest.mark.parametrize("sql", [
     "DELETE FROM sales", "DROP TABLE sales", "UPDATE sales SET quantity=0",
     "INSERT INTO sales (sale_id) VALUES (0)", "ALTER TABLE sales ADD x NUMBER",

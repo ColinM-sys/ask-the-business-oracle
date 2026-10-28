@@ -10,19 +10,55 @@
 A local Flask app that explains regional margin changes with Oracle SQL evidence
 and policy retrieval. No API key or language model is required.
 
+For a first-time local setup, start Docker Desktop and create an Oracle AI Database
+26ai Free container (which supports `VECTOR`). The named volume persists database
+files; the listener is exposed only on localhost. See [Oracle's container guide](https://docs.oracle.com/en/database/oracle/agent-memory/26.6/guide/run-locally.html).
+
+```powershell
+$env:ORACLE_PWD = [System.Net.NetworkCredential]::new('', (Read-Host 'Choose an Oracle admin password' -AsSecureString)).Password
+docker run -d --name oracle-free -p 127.0.0.1:1521:1521 -e ORACLE_PWD -v oracle-free-data:/opt/oracle/oradata container-registry.oracle.com/database/free:latest
+Remove-Item Env:ORACLE_PWD
+docker logs -f oracle-free
+```
+
+Wait for `DATABASE IS READY TO USE!`, then press Ctrl+C to stop following the
+log. The listener and `FREEPDB1` service are ready at `localhost:1521/FREEPDB1`.
+Create an application user in that pluggable database:
+
+```powershell
+docker exec -it oracle-free sqlplus / as sysdba
+```
+
+In SQL*Plus, choose a strong alphanumeric application password when prompted:
+
+```sql
+ALTER SESSION SET CONTAINER=FREEPDB1;
+SET VERIFY OFF
+SET ECHO OFF
+ACCEPT app_password CHAR PROMPT 'Application password: ' HIDE
+CREATE USER atb IDENTIFIED BY "&app_password" DEFAULT TABLESPACE USERS QUOTA UNLIMITED ON USERS;
+GRANT CREATE SESSION, CREATE TABLE TO atb;
+UNDEFINE app_password
+EXIT
+```
+
 If `.env` does not exist, copy `.env.example` to `.env`. Set `ORACLE_USER`
 (database user), `ORACLE_PASSWORD` (database password), and `ORACLE_DSN`
 (connection string, such as `host:port/service_name`) in `.env` before running
-`policies.py`. Business tables must already be loaded.
+`policies.py`. For the container above, use `atb`, the application password,
+and `localhost:1521/FREEPDB1`, respectively. Leave wallet settings blank.
 
 ```powershell
 python -m pip install -r requirements.txt
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 # Fill in the required Oracle settings in .env before continuing.
-docker start oracle-free
+python load.py  # Once per fresh schema; skip if business tables are already loaded.
 python policies.py
 python app.py
 ```
+
+On later runs, start the existing container with `docker start oracle-free` and
+wait for it to be ready before starting the app.
 
 Open http://127.0.0.1:5055 and ask “Why did West margin fall since July 2025?”.
 `.env` is read by `db.py`; do not commit credentials. `policies.py` creates only
