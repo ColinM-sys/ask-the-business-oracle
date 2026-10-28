@@ -9,6 +9,7 @@ from contextlib import nullcontext
 from decimal import Decimal
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from decimal import Decimal
 from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,7 +22,7 @@ from packaging.requirements import Requirement
 import db
 import tools
 from db import connect
-from agent import answer_question, parse_question, summary_sql
+from agent import DataQualityError, DiscountDataQualityError, answer_question, parse_question, summary_sql
 from app import app
 from critic import critique, supported
 from policies import ensure_policies, hash_embedding
@@ -246,6 +247,13 @@ def test_critic_rejects_units_and_magnitudes_in_adjacent_text(sample_evidence, m
     assert critique([claim], sample_evidence) == ([], [claim])
 
 
+def test_critic_documents_limit_of_adjacent_modifier_check(sample_evidence):
+    claim = {"parts": [
+        {"value": 25.53, "evidence": "E1", "row": 0, "column": "margin"},
+        {"text": " (in millions)"}]}
+    assert critique([claim], sample_evidence) == ([claim], [])
+    doc = " ".join(critique.__doc__.split())
+    assert "does not catch other wording such as ' (in millions)'" in doc
 def test_critic_documents_unchecked_text_modifiers(sample_evidence):
     claim = {"parts": [
         {"value": 25.53, "evidence": "E1", "row": 0, "column": "margin"},
@@ -529,7 +537,7 @@ def test_missing_discount_inputs_reject_analysis(column, region_id, month, incom
             return result
 
         monkeypatch.setattr("agent.run_sql", run_sql)
-        with pytest.raises(ValueError, match="Missing discount inputs"):
+        with pytest.raises(DiscountDataQualityError, match="Missing discount inputs"):
             answer_question("West since July 2025")
         policies.assert_not_called()
         for snapshot in snapshots:
@@ -539,6 +547,13 @@ def test_missing_discount_inputs_reject_analysis(column, region_id, month, incom
                         assert row["discount_pct"] is None
                     else:
                         assert row[f"{period}_discount_pct"] is None
+
+        set_input(None)
+        monkeypatch.setattr("agent.run_sql", execute)
+        response = app.test_client().post("/", data={"question": "West since July 2025"})
+        assert response.status_code == 503
+        assert b"Correct missing discount, quantity, or unit price inputs, then retry." in response.data
+        policies.assert_not_called()
 
 
 @pytest.mark.parametrize("region_id", [1, 2])
@@ -577,12 +592,12 @@ def test_missing_monthly_costs_reject_incomplete_analysis(region_id, month, prod
         policies = MagicMock(return_value={"rows": []})
         monkeypatch.setattr("agent.run_sql", run_sql)
         monkeypatch.setattr("agent.search_policies", policies)
-        with pytest.raises(ValueError, match="Missing monthly costs"):
+        with pytest.raises(DataQualityError, match="Missing monthly costs"):
             answer_question("West since July 2025")
         policies.assert_not_called()
         response = app.test_client().post("/", data={"question": "West since July 2025"})
         assert response.status_code == 503
-        assert b"Missing monthly costs" not in response.data
+        assert b"Correct missing, incomplete, or duplicate monthly cost records, then retry." in response.data
 
         if cost is None:
             con.execute("INSERT INTO costs VALUES (?, ?, ?, 60.0, 5.0)",
@@ -629,7 +644,7 @@ def test_monthly_evidence_rejects_null_costs_repaired_before_summary(
         policies = MagicMock(return_value={"rows": []})
         monkeypatch.setattr("agent.run_sql", run_sql)
         monkeypatch.setattr("agent.search_policies", policies)
-        with pytest.raises(ValueError, match="Missing monthly costs"):
+        with pytest.raises(DataQualityError, match="Missing monthly costs"):
             answer_question("West since July 2025")
         assert calls == 2
         policies.assert_not_called()
@@ -691,9 +706,15 @@ def test_duplicate_monthly_costs_reject_analysis(region_id, unit_cogs, duplicate
             return rows
 
         monkeypatch.setattr("agent.run_sql", run_sql)
-        with pytest.raises(ValueError, match="duplicate"):
+        with pytest.raises(DataQualityError, match="duplicate"):
             answer_question("West since July 2025")
         policies.assert_not_called()
+        if duplicate_when == "monthly":
+            insert_duplicate()
+        monkeypatch.setattr("agent.run_sql", execute)
+        response = app.test_client().post("/", data={"question": "West since July 2025"})
+        assert response.status_code == 503
+        assert b"Correct missing, incomplete, or duplicate monthly cost records, then retry." in response.data
 
 
 @pytest.mark.parametrize("rows", [[], [{"region_name": "East"}]])
@@ -705,6 +726,42 @@ def test_missing_region_has_descriptive_validation_error(monkeypatch, rows):
     response = app.test_client().post("/", data={"question": "West"})
     assert response.status_code == 400
     assert b"No sales/cost data found for West" in response.data
+
+
+@pytest.mark.parametrize("cutoff,valid", [
+    ("2025-02", False), ("2025-03", False), ("2025-08", True), ("2025-09", False),
+])
+def test_cutoff_error_shows_selected_region_coverage(monkeypatch, cutoff, valid):
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'East'), (2, 'West');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+        """)
+        for region_id, months in ((1, ("2025-01", "2025-12")), (2, ("2025-03", "2025-08"))):
+            for month in months:
+                con.execute("INSERT INTO sales VALUES (?, 1, ?, 100.0, 1, 100.0, 0)", (region_id, month))
+                con.execute("INSERT INTO costs VALUES (?, 1, ?, 60.0, 5.0)", (region_id, month))
+
+        def run_sql(sql, params=None):
+            return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
+                con.execute(tools.validate_select(sql), params or {})]}
+
+        policies = MagicMock(return_value={"rows": []})
+        monkeypatch.setattr("agent.run_sql", run_sql)
+        monkeypatch.setattr("agent.search_policies", policies)
+        response = app.test_client().post("/", data={"question": f"West since {cutoff}"})
+
+        assert response.status_code == (200 if valid else 400)
+        if not valid:
+            assert b"West sales are available from 2025-03 through 2025-08" in response.data
+            assert b"cutoff must be after the first month and no later than the last month" in response.data
+            policies.assert_not_called()
+
+
 @pytest.mark.parametrize("before,after,direction,below_precision", [
     (25.001, 25.004, "rose", True),
     (25.004, 25.001, "fell", True),
@@ -748,6 +805,49 @@ def test_margin_direction_uses_unrounded_sql(before, after, direction, below_pre
     assert set(reason["policy_ids"]) == {
         f"P{p['id']}" for p in policy_rows
         if p["doc"] in {"west_q3_volume_push.md", "freight_contract_memo.md"}}
+    assert result["dropped_count"] == 0
+
+
+@pytest.mark.parametrize("available_period,margin", [
+    ("before", 35), ("after", 35), ("before", 0), ("after", 0),
+])
+def test_comparison_keeps_available_margin_when_other_period_is_empty(available_period, margin, monkeypatch):
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West'), (2, 'East');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+        """)
+        for region_id, month, value in (
+            (1, "2025-06", 40), (1, "2025-07", 25),
+            (2, "2025-06" if available_period == "before" else "2025-07", margin),
+        ):
+            con.execute("INSERT INTO sales VALUES (?, 1, ?, 100.0, 1, 100.0, 0)", (region_id, month))
+            con.execute("INSERT INTO costs VALUES (?, 1, ?, ?, 5)", (region_id, month, 95 - value))
+
+        def run_sql(sql, params=None):
+            return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
+                con.execute(tools.validate_select(sql), params or {})]}
+
+        monkeypatch.setattr("agent.run_sql", run_sql)
+        monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
+        result = answer_question("West since July 2025")
+
+    comparison = next(claim for claim in result["claims"] if claim["kind"] == "comparison")
+    rendered = "".join(part.get("text", str(part.get("value", "")) + part.get("suffix", ""))
+                       for part in comparison["parts"])
+    missing_period = "after" if available_period == "before" else "before"
+    assert f"{margin}.0% {available_period}" in rendered
+    assert f"unavailable {missing_period}" in rendered
+    parts = [part for part in comparison["parts"] if "value" in part]
+    assert len(parts) == 1
+    assert parts[0]["column"] == f"{available_period}_margin_pct"
+    assert parts[0]["evidence"] == "E2"
+    assert result["evidence"]["E2"]["rows"][parts[0]["row"]]["region_name"] == "East"
+    assert supported(parts[0], result["evidence"])
     assert result["dropped_count"] == 0
 
 
@@ -836,6 +936,64 @@ def test_undefined_metric_preserves_other_metric(unavailable_metric, unavailable
                 assert f"{period}_{column}" in cited_columns
         if metric == "freight" and unavailable_metric == "freight":
             assert "change: unavailable" in rendered
+    assert result["dropped_count"] == 0
+
+
+@pytest.mark.parametrize("missing_metric", ["discount", "freight"])
+@pytest.mark.parametrize("missing_period", ["before", "after"])
+def test_undefined_metric_does_not_hide_other_movement(missing_metric, missing_period, monkeypatch):
+    # Returns can make gross sales or units sum to zero while revenue remains nonzero.
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+        """)
+        for period, month, freight in (("before", "2025-06", 5.0), ("after", "2025-07", 8.0)):
+            sales = [(2, 10, 18, 10)]
+            if period == missing_period:
+                sales.append((-1, 20, -10, 50) if missing_metric == "discount"
+                             else (-2, 5, -9, 10))
+            for quantity, price, revenue, discount in sales:
+                con.execute("INSERT INTO sales VALUES (1, 1, ?, ?, ?, ?, ?)",
+                            (month, revenue, quantity, price, discount))
+            con.execute("INSERT INTO costs VALUES (1, 1, ?, 1, ?)", (month, freight))
+
+        def run_sql(sql, params=None):
+            return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
+                con.execute(tools.validate_select(sql), params or {})]}
+
+        monkeypatch.setattr("agent.run_sql", run_sql)
+        monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
+        result = answer_question("West since July 2025")
+
+    row = result["evidence"]["E2"]["rows"][0]
+    missing_column = "discount_pct" if missing_metric == "discount" else "freight_per_unit"
+    assert row[f"{missing_period}_{missing_column}"] is None
+    findings = [claim for claim in result["claims"] if claim["kind"] == "finding"]
+    missing = next(claim for claim in findings if missing_metric in claim["parts"][0]["text"].lower())
+    available_metric = "freight" if missing_metric == "discount" else "discount"
+    available = next(claim for claim in findings if available_metric in claim["parts"][0]["text"].lower())
+
+    def render(claim):
+        return "".join(part.get("text", str(part.get("value", "")) + part.get("suffix", ""))
+                       for part in claim["parts"])
+
+    assert f"{missing_period} unavailable" in render(missing).lower()
+    available_period = "after" if missing_period == "before" else "before"
+    available_column = f"{available_period}_{missing_column}"
+    assert any(part.get("column") == available_column and supported(part, result["evidence"])
+               for part in missing["parts"] if "value" in part)
+    if missing_metric == "freight":
+        assert "change: unavailable" in render(missing).lower()
+        assert render(available) == "Average discount: before 10.0%; after 10.0%."
+    else:
+        assert render(available) == "Freight per unit: before $5.0; after $8.0; change: 60.0%."
+    assert all(supported(part, result["evidence"]) for claim in (missing, available)
+               for part in claim["parts"] if "value" in part)
     assert result["dropped_count"] == 0
 
 
@@ -1107,6 +1265,26 @@ def test_fractional_oracle_numbers_remain_exact_in_evidence(monkeypatch):
         "amount": "9007199254740993.25", "negative_amount": "-9007199254740993.25",
         "tiny": "1E-28", "whole": "42", "missing": None,
     }
+def test_sql_decimal_amount_is_exact_in_critic_and_browser(monkeypatch):
+    source = {"kind": "sql", **tools.run_sql(
+        "SELECT SUM(100000000000000.01) AS total FROM regions WHERE region_name=:name",
+        {"name": "West"})}
+    evidence = {"E1": source}
+    amount = source["rows"][0]["total"]
+    assert isinstance(amount, Decimal)
+    assert amount == Decimal("100000000000000.01")
+
+    part = {"value": "100000000000000.01", "evidence": "E1", "row": 0, "column": "total"}
+    assert supported(part, evidence)
+    assert not supported({**part, "value": "100000000000000.02"}, evidence)
+
+    monkeypatch.setattr("app.answer_question", lambda _: {
+        "region": "West", "claims": [{"kind": "finding", "parts": [part]}], "evidence": evidence})
+    response = app.test_client().post("/", data={"question": "West"})
+    assert response.status_code == 200
+    serialized = response.get_data(as_text=True).split("const evidence = ", 1)[1].split(";", 1)[0]
+    assert json.loads(serialized)["E1"]["rows"][0]["total"] == "100000000000000.01"
+    assert source["rows"][0]["total"] == amount
 
 
 def test_select_preserves_semicolon_in_string():
@@ -1160,6 +1338,23 @@ def test_flask_live_brief_and_evidence():
     assert b"evidence-dialog" in response.data
 
 
+@pytest.mark.parametrize("missing_reason,missing_actions", [
+    (False, False), (True, False), (False, True), (True, True),
+])
+def test_ui_discloses_missing_explanation_and_actions(policy_rows, missing_reason, missing_actions):
+    for policy in policy_rows:
+        if ((missing_reason and policy["doc"] == "west_q3_volume_push.md") or
+                (missing_actions and policy["doc"] == "pricing_policy.md")):
+            policy["chunk"] = ""
+
+    response = app.test_client().post("/", data={"question": "West since July 2025"})
+
+    assert response.status_code == 200
+    assert b"West gross margin" in response.data
+    assert (b"No verified explanation is available for this brief." in response.data) == missing_reason
+    assert (b"No verified actions are available for this brief." in response.data) == missing_actions
+    assert (b"The policy documents identify a regional volume discount push" in response.data) == (not missing_reason)
+    assert (b"Review discount approvals with Sales and Finance" in response.data) == (not missing_actions)
 def test_brief_shows_selected_region_monthly_trend_with_cell_citations(monkeypatch):
     rows = [
         {"region_name": "East", "sale_month": "2025-06", "margin_pct": 70,
@@ -1260,6 +1455,8 @@ def test_ui_discloses_dropped_claims_and_empty_brief(monkeypatch, has_claims, dr
     assert (b"No verified claims are available for this brief." in response.data) == (not has_claims)
     assert (b"Numbers in retained claims verified against cited SQL cells." in response.data) == has_claims
     assert (b"Retained finding." in response.data) == has_claims
+    assert b"No verified explanation is available for this brief." in response.data
+    assert b"No verified actions are available for this brief." in response.data
     assert b"Policy-backed explanation is unavailable for this brief." in response.data
     assert b"Policy-backed recommendations are unavailable for this brief." in response.data
     assert b"Explanation unavailable" in response.data
@@ -1603,6 +1800,32 @@ def test_ui_sanitizes_invalid_policy_encoding(tmp_path, monkeypatch):
     assert response.status_code == 503
     assert b"Analysis unavailable. Check the local Oracle connection and policy setup, then retry." in response.data
     assert b"codec" not in response.data
+
+
+def test_ui_sanitizes_data_quality_error(monkeypatch):
+    def failure(_):
+        raise DataQualityError("private-data-quality-details")
+
+    monkeypatch.setattr("app.answer_question", failure)
+    response = app.test_client().post("/", data={"question": "West"})
+
+    assert response.status_code == 503
+    assert b"Correct missing, incomplete, or duplicate monthly cost records, then retry." in response.data
+    assert b"private-data-quality-details" not in response.data
+    assert b"Oracle connection" not in response.data
+
+
+def test_ui_sanitizes_discount_data_quality_error(monkeypatch):
+    def failure(_):
+        raise DiscountDataQualityError("private-data-quality-details")
+
+    monkeypatch.setattr("app.answer_question", failure)
+    response = app.test_client().post("/", data={"question": "West"})
+
+    assert response.status_code == 503
+    assert b"Correct missing discount, quantity, or unit price inputs, then retry." in response.data
+    assert b"private-data-quality-details" not in response.data
+    assert b"Oracle connection" not in response.data
 
 
 def test_ui_sanitizes_downstream_value_error(monkeypatch):
