@@ -1,4 +1,5 @@
 """Fixed, auditable business analysis; no language model or API key needed."""
+from decimal import Decimal
 from hashlib import sha256
 import re
 
@@ -104,7 +105,8 @@ def summary_sql():
         "SUM(CASE WHEN c.unit_cogs IS NULL OR c.freight_per_unit IS NULL THEN 1 ELSE 0 END) AS missing_cost_count",
         f"{MISSING_REVENUE_COUNT} AS missing_revenue_count",
         f"{MISSING_DISCOUNT_COUNT} AS missing_discount_count",
-        f"CASE WHEN ({raw['before']['margin_pct']}) > ({raw['after']['margin_pct']}) THEN 'fell' WHEN ({raw['before']['margin_pct']}) < ({raw['after']['margin_pct']}) THEN 'rose' ELSE 'was unchanged' END AS margin_direction",
+        f"CASE WHEN ({raw['before']['margin_pct']}) IS NULL OR ({raw['after']['margin_pct']}) IS NULL THEN NULL "
+        f"WHEN ({raw['before']['margin_pct']}) > ({raw['after']['margin_pct']}) THEN 'fell' WHEN ({raw['before']['margin_pct']}) < ({raw['after']['margin_pct']}) THEN 'rose' ELSE 'was unchanged' END AS margin_direction",
         f"ROUND(({raw['before']['margin_pct']})-({raw['after']['margin_pct']}),2) AS margin_drop_pts",
         f"CASE WHEN ({raw['before']['freight_per_unit']}) > 0 THEN "
         f"ROUND(100*(({raw['after']['freight_per_unit']})/NULLIF(({raw['before']['freight_per_unit']}),0)-1),2) END AS freight_increase_pct",
@@ -227,6 +229,9 @@ def answer_question(question):
     if margin_available:
         precision_note = (" The change is below display precision."
                           if row["margin_drop_pts"] == 0 and direction != "was unchanged" else "")
+        if (Decimal(str(row["before_margin_pct"])) - Decimal(str(row["after_margin_pct"]))
+                != Decimal(str(row["margin_drop_pts"]))):
+            precision_note += " The displayed margins and change are independently rounded from unrounded aggregates."
         # The signed drop is kept intact, including for regions whose margin rose.
         claim("finding", [text(f"{region} gross margin {direction} from "), number("before_margin_pct", "%"),
             text(" to "), number("after_margin_pct", "%"), text("; the signed margin drop is "),
