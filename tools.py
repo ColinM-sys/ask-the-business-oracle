@@ -1,5 +1,4 @@
 """Constrained, read-only business SQL and Oracle vector policy retrieval."""
-from decimal import Decimal
 import json
 from decimal import Decimal
 
@@ -52,16 +51,10 @@ def validate_select(sql):
     return tree.sql(dialect="oracle", comments=False)
 
 
-def _decimal_output_type_handler(cursor, metadata):
-    if metadata.type_code is oracledb.DB_TYPE_NUMBER:
-        return cursor.var(Decimal, arraysize=cursor.arraysize)
-
-
 def run_sql(select, params=None):
     executable = validate_select(select)
     with connect() as con:
         with con.cursor() as cur:
-            cur.outputtypehandler = _decimal_output_type_handler
             cur.execute("SET TRANSACTION READ ONLY")
             cur.outputtypehandler = _number_to_decimal
             cur.execute(executable, params or {})

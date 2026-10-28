@@ -54,8 +54,9 @@ MISSING_REVENUE_COUNT = "SUM(CASE WHEN s.net_revenue IS NULL THEN 1 ELSE 0 END)"
 MONTHLY_SQL = f"""SELECT r.region_name, s.sale_month,
     ROUND(SUM(s.net_revenue),2) AS revenue,
     SUM(s.quantity) AS units,
-    ROUND(100*SUM(s.net_revenue-s.quantity*(c.unit_cogs+c.freight_per_unit))
-        /NULLIF(SUM(s.net_revenue),0),2) AS margin_pct,
+    CASE WHEN {MISSING_REVENUE_COUNT}=0 THEN
+        ROUND(100*SUM(s.net_revenue-s.quantity*(c.unit_cogs+c.freight_per_unit))
+            /NULLIF(SUM(s.net_revenue),0),2) END AS margin_pct,
     CASE WHEN {MISSING_DISCOUNT_COUNT}=0 THEN
         ROUND(SUM(s.quantity*s.unit_price*s.discount_pct)
             /NULLIF(SUM(s.quantity*s.unit_price),0),2) END AS discount_pct,
@@ -76,7 +77,7 @@ def summary_sql():
         revenue = total("s.net_revenue")
         units = total("s.quantity")
         raw[period] = {
-            "margin_pct": f"100*{total('s.net_revenue-s.quantity*(c.unit_cogs+c.freight_per_unit)')}/NULLIF({revenue},0)",
+            "margin_pct": f"CASE WHEN {MISSING_REVENUE_COUNT}=0 THEN 100*{total('s.net_revenue-s.quantity*(c.unit_cogs+c.freight_per_unit)')}/NULLIF({revenue},0) END",
             "discount_pct": f"CASE WHEN {MISSING_DISCOUNT_COUNT}=0 THEN {total('s.quantity*s.unit_price*s.discount_pct')}/NULLIF({total('s.quantity*s.unit_price')},0) END",
             "freight_per_unit": f"{total('s.quantity*c.freight_per_unit')}/NULLIF({units},0)",
         }

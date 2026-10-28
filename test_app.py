@@ -9,7 +9,6 @@ from contextlib import nullcontext
 from decimal import Decimal
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from decimal import Decimal
 from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
@@ -229,6 +228,9 @@ def test_critic_preserves_cited_negative_value(sample_evidence):
     sample_evidence["E1"]["rows"][0]["margin"] = -25.53
     claim = {"parts": [{"text": "Margin: "},
         {"value": -25.53, "suffix": "%", "evidence": "E1", "row": 0, "column": "margin"}]}
+    assert critique([claim], sample_evidence) == ([claim], [])
+
+
 @pytest.mark.parametrize("suffix", [" million", " billion", "k", "M", "e6", "0", " percent", None])
 def test_critic_rejects_unsupported_suffixes(sample_evidence, suffix):
     claim = {"parts": [{"value": 25.53, "suffix": suffix,
@@ -492,7 +494,7 @@ def test_question_scope():
 @pytest.mark.parametrize("region_id", [1, 2])
 @pytest.mark.parametrize("month", ["2025-06", "2025-07"])
 @pytest.mark.parametrize("incomplete_when", ["both", "monthly", "summary"])
-def test_missing_revenue_rejects_analysis(region_id, month, incomplete_when, monkeypatch):
+def test_missing_net_revenue_rejects_analysis(region_id, month, incomplete_when, monkeypatch):
     with sqlite3.connect(":memory:") as con:
         con.row_factory = sqlite3.Row
         con.executescript("""
@@ -508,7 +510,7 @@ def test_missing_revenue_rejects_analysis(region_id, month, incomplete_when, mon
                             (current_region, current_month))
                 con.execute("INSERT INTO costs VALUES (?, 1, ?, 60.0, 5.0)",
                             (current_region, current_month))
-        sale_id = con.execute("INSERT INTO sales VALUES (?, 1, ?, 100.0, 1, 100.0, 0)",
+        sale_id = con.execute("INSERT INTO sales VALUES (?, 1, ?, 0, 1, 100.0, 0)",
                               (region_id, month)).lastrowid
 
         def set_revenue(value):
@@ -517,6 +519,12 @@ def test_missing_revenue_rejects_analysis(region_id, month, incomplete_when, mon
         def execute(sql, params=None):
             return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
                 con.execute(tools.validate_select(sql), params or {})]}
+
+        policies = MagicMock(return_value={"rows": []})
+        monkeypatch.setattr("agent.run_sql", execute)
+        monkeypatch.setattr("agent.search_policies", policies)
+        answer_question("West since July 2025")  # Zero revenue is present, not missing.
+        policies.reset_mock()
 
         if incomplete_when != "summary":
             set_revenue(None)
@@ -527,18 +535,25 @@ def test_missing_revenue_rejects_analysis(region_id, month, incomplete_when, mon
             snapshots.append(result)
             if len(snapshots) == 1:
                 if incomplete_when == "monthly":
-                    set_revenue(100.0)
+                    set_revenue(0)
                 elif incomplete_when == "summary":
                     set_revenue(None)
             return result
 
-        policies = MagicMock(return_value={"rows": []})
         monkeypatch.setattr("agent.run_sql", run_sql)
-        monkeypatch.setattr("agent.search_policies", policies)
         with pytest.raises(RevenueDataQualityError, match="Missing net revenue"):
             answer_question("West since July 2025")
         policies.assert_not_called()
         region = "West" if region_id == 1 else "East"
+        for index, snapshot in enumerate(snapshots):
+            row = next(row for row in snapshot["rows"] if row["region_name"] == region
+                       and (index == 1 or row["sale_month"] == month))
+            missing = incomplete_when == "both" or (index == 0) == (incomplete_when == "monthly")
+            assert row["missing_revenue_count"] == int(missing)
+            if missing and index == 0:
+                assert row["margin_pct"] is None
+            elif missing:
+                assert row["before_margin_pct"] is row["after_margin_pct"] is None
         monthly = next(row for row in snapshots[0]["rows"]
                        if row["region_name"] == region and row["sale_month"] == month)
         summary = next(row for row in snapshots[1]["rows"] if row["region_name"] == region)
