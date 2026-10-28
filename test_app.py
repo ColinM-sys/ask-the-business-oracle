@@ -417,11 +417,11 @@ def test_question_scope():
         parse_question("West and East")
 
 
-@pytest.mark.parametrize("column", ["discount_pct", "quantity", "unit_price"])
+@pytest.mark.parametrize("column", ["discount_pct", "quantity", "unit_price", "net_revenue"])
 @pytest.mark.parametrize("region_id", [1, 2])
 @pytest.mark.parametrize("month", ["2025-06", "2025-07"])
 @pytest.mark.parametrize("incomplete_when", ["both", "monthly", "summary"])
-def test_missing_discount_inputs_reject_analysis(column, region_id, month, incomplete_when, monkeypatch):
+def test_missing_sales_inputs_reject_analysis(column, region_id, month, incomplete_when, monkeypatch):
     with sqlite3.connect(":memory:") as con:
         con.row_factory = sqlite3.Row
         con.executescript("""
@@ -439,6 +439,8 @@ def test_missing_discount_inputs_reject_analysis(column, region_id, month, incom
                             (current_region, current_month))
         sale_id = con.execute("INSERT INTO sales VALUES (?, 1, ?, 100.0, 1, 100.0, 0)",
                               (region_id, month)).lastrowid
+        if column == "net_revenue":
+            con.execute("UPDATE sales SET net_revenue=0 WHERE rowid=?", (sale_id,))
 
         def execute(sql, params=None):
             return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
@@ -460,7 +462,7 @@ def test_missing_discount_inputs_reject_analysis(column, region_id, month, incom
         def set_input(value):
             con.execute(f"UPDATE sales SET {column}=? WHERE rowid=?", (value, sale_id))
 
-        valid_value = {"discount_pct": 0, "quantity": 1, "unit_price": 100.0}[column]
+        valid_value = {"discount_pct": 0, "quantity": 1, "unit_price": 100.0, "net_revenue": 0}[column]
         if incomplete_when != "summary":
             set_input(None)
         snapshots = []
@@ -476,12 +478,20 @@ def test_missing_discount_inputs_reject_analysis(column, region_id, month, incom
             return result
 
         monkeypatch.setattr("agent.run_sql", run_sql)
-        with pytest.raises(ValueError, match="Missing discount inputs"):
+        message = "Missing net revenue" if column == "net_revenue" else "Missing discount inputs"
+        with pytest.raises(ValueError, match=message):
             answer_question("West since July 2025")
         policies.assert_not_called()
-        for snapshot in snapshots:
+        assert len(snapshots) == 2
+        for index, snapshot in enumerate(snapshots):
             for row in snapshot["rows"]:
-                if row["missing_discount_count"]:
+                if column == "net_revenue":
+                    incomplete = incomplete_when == "both" or incomplete_when == (
+                        "monthly" if index == 0 else "summary")
+                    affected = row["region_name"] == region and (
+                        "sale_month" not in row or row["sale_month"] == month)
+                    assert row["missing_revenue_count"] == int(incomplete and affected)
+                elif row["missing_discount_count"]:
                     if "sale_month" in row:
                         assert row["discount_pct"] is None
                     else:
@@ -707,7 +717,7 @@ def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
         "before_discount_pct": 3, "after_discount_pct": 18,
         "before_freight_per_unit": 0, "after_freight_per_unit": 5,
         "freight_increase_pct": None,
-        "missing_cost_count": 0, "missing_discount_count": 0,
+        "missing_cost_count": 0, "missing_discount_count": 0, "missing_revenue_count": 0,
     }
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
         "sql": sql, "params": params or {}, "rows": [row]})
@@ -795,7 +805,7 @@ def policy_rows(monkeypatch):
         "margin_direction": "fell", "before_discount_pct": 3, "after_discount_pct": 18,
         "before_freight_per_unit": 5, "after_freight_per_unit": 8,
         "freight_increase_pct": 60,
-        "missing_cost_count": 0, "missing_discount_count": 0,
+        "missing_cost_count": 0, "missing_discount_count": 0, "missing_revenue_count": 0,
     }
     policies = [{"id": i, "doc": path.name, "chunk": path.read_text(encoding="utf-8").strip()}
                 for i, path in enumerate(sorted(Path(__file__).with_name("docs").glob("*.md")), 1)]
@@ -899,7 +909,7 @@ def retrieved_policy_rows(monkeypatch):
         "margin_direction": "fell", "before_discount_pct": 3, "after_discount_pct": 18,
         "before_freight_per_unit": 5, "after_freight_per_unit": 8,
         "freight_increase_pct": 60,
-        "missing_cost_count": 0, "missing_discount_count": 0,
+        "missing_cost_count": 0, "missing_discount_count": 0, "missing_revenue_count": 0,
     }
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
         "sql": sql, "params": params or {}, "rows": [summary]})
@@ -1354,6 +1364,7 @@ def test_ui_sanitizes_invalid_policy_encoding(tmp_path, monkeypatch):
     (tmp_path / "policy.md").write_bytes(b"\xff")
     monkeypatch.setattr("policies.DOCS", tmp_path)
     row = {"region_name": "West", "missing_cost_count": 0, "missing_discount_count": 0,
+           "missing_revenue_count": 0,
            "before_margin_pct": 40, "after_margin_pct": 25}
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
         "sql": sql, "params": params or {}, "rows": [row]})
