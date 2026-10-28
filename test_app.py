@@ -529,7 +529,7 @@ def test_missing_monthly_costs_reject_incomplete_analysis(region_id, month, prod
         policies.assert_not_called()
         response = app.test_client().post("/", data={"question": "West since July 2025"})
         assert response.status_code == 503
-        assert b"Missing monthly costs" not in response.data
+        assert b"Missing monthly costs or duplicate cost rows" in response.data
 
         if cost is None:
             con.execute("INSERT INTO costs VALUES (?, ?, ?, 60.0, 5.0)",
@@ -1348,6 +1348,100 @@ def test_ui_validation_and_safe_error(monkeypatch):
     response = client.post("/", data={"question": "West"})
     assert response.status_code == 503
     assert b"secret-driver-settings" not in response.data
+
+
+@pytest.mark.parametrize("column, message", [
+    ("missing_cost_count", b"Missing monthly costs or duplicate cost rows"),
+    ("missing_discount_count", b"Missing discount inputs"),
+])
+@pytest.mark.parametrize("incomplete_when", ["monthly", "summary"])
+def test_ui_reports_data_quality_errors(column, message, incomplete_when, monkeypatch):
+    def run_sql(sql, params=None):
+        row = {"region_name": "West", "missing_cost_count": 0, "missing_discount_count": 0}
+        if (params is None) == (incomplete_when == "monthly"):
+            row[column] = 1
+        return {"sql": sql, "params": params or {}, "rows": [row]}
+
+    policies = MagicMock()
+    monkeypatch.setattr("agent.run_sql", run_sql)
+    monkeypatch.setattr("agent.search_policies", policies)
+
+    response = app.test_client().post("/", data={"question": "West"})
+
+    assert response.status_code == 503
+    assert message in response.data
+    assert b"Oracle connection and policy setup" not in response.data
+    policies.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", [
+    RuntimeError("secret-driver-settings\nforged log entry"),
+    ValueError("Missing discount inputs: secret-driver-settings\nforged log entry"),
+    oracledb.DatabaseError(SimpleNamespace(code=3113, message="secret-driver-settings\nforged log entry")),
+])
+def test_ui_logs_sanitized_unexpected_failures(failure, monkeypatch, caplog):
+    def fail(_):
+        raise failure
+
+    monkeypatch.setattr("app.answer_question", fail)
+    with caplog.at_level("ERROR", logger=app.logger.name):
+        response = app.test_client().post("/", data={"question": "West private-question"})
+
+    assert response.status_code == 503
+    assert b"Analysis unavailable." in response.data
+    assert b"secret-driver-settings" not in response.data
+    records = [record for record in caplog.records if record.name == app.logger.name]
+    assert records
+    assert any(type(failure).__name__ in record.getMessage() for record in records)
+    assert all(record.exc_info is None for record in records)
+    assert "secret-driver-settings" not in caplog.text
+    assert "forged log entry" not in caplog.text
+    assert "private-question" not in caplog.text
+
+
+@pytest.mark.parametrize("error_type", ["MissingCostsError", "MissingDiscountInputsError"])
+def test_ui_data_quality_message_does_not_expose_exception_details(error_type, monkeypatch):
+    import agent
+
+    def fail(_):
+        raise getattr(agent, error_type)("secret-driver-settings")
+
+    monkeypatch.setattr("app.answer_question", fail)
+    response = app.test_client().post("/", data={"question": "West"})
+
+    assert response.status_code == 503
+    assert b"Check" in response.data
+    assert b"secret-driver-settings" not in response.data
+
+
+def test_ui_logs_oracle_code_and_owned_failure_location(monkeypatch, caplog):
+    def fail(*args, **kwargs):
+        raise oracledb.DatabaseError(SimpleNamespace(code=3113, message="secret-driver-settings"))
+
+    monkeypatch.setattr("agent.run_sql", fail)
+    with caplog.at_level("ERROR", logger=app.logger.name):
+        response = app.test_client().post("/", data={"question": "West"})
+
+    assert response.status_code == 503
+    assert "DatabaseError" in caplog.text
+    assert "ORA-03113" in caplog.text
+    assert "agent.py:" in caplog.text
+    assert "secret-driver-settings" not in caplog.text
+
+
+def test_ui_does_not_log_untrusted_exception_class_name(monkeypatch, caplog):
+    failure = type("secret_driver_settings", (Exception,), {})()
+
+    def fail(_):
+        raise failure
+
+    monkeypatch.setattr("app.answer_question", fail)
+    with caplog.at_level("ERROR", logger=app.logger.name):
+        response = app.test_client().post("/", data={"question": "West"})
+
+    assert response.status_code == 503
+    assert "Analysis failed" in caplog.text
+    assert "secret_driver_settings" not in caplog.text
 
 
 def test_ui_sanitizes_invalid_policy_encoding(tmp_path, monkeypatch):

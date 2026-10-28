@@ -1,7 +1,11 @@
 """Local Flask UI: python app.py, then http://127.0.0.1:5055."""
-from flask import Flask, render_template, request
+import builtins
+from pathlib import Path
 
-from agent import QuestionValidationError, answer_question
+from flask import Flask, render_template, request
+import oracledb
+
+from agent import MissingCostsError, MissingDiscountInputsError, QuestionValidationError, answer_question
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024
@@ -38,8 +42,30 @@ def index():
             result = answer_question(question)
         except QuestionValidationError as exc:
             error, status = str(exc), 400
-        except Exception:
+        except MissingCostsError:
+            error, status = MissingCostsError.message, 503
+        except MissingDiscountInputsError:
+            error, status = MissingDiscountInputsError.message, 503
+        except Exception as exc:
             # Do not expose connection settings, driver errors or credentials.
+            error_type = type(exc)
+            name = error_type.__name__
+            if (getattr(builtins, name, None) is not error_type
+                    and getattr(oracledb, name, None) is not error_type):
+                name = "OtherError"
+            location = "unknown"
+            tb = exc.__traceback__
+            while tb:
+                filename = Path(tb.tb_frame.f_code.co_filename)
+                if (filename.parent == Path(__file__).resolve().parent
+                        and filename.name in {"app.py", "agent.py", "tools.py", "policies.py", "db.py", "critic.py"}):
+                    location = f"{filename.name}:{tb.tb_lineno}"
+                tb = tb.tb_next
+            code = getattr(exc.args[0], "code", None) if isinstance(exc, oracledb.DatabaseError) and exc.args else None
+            if type(code) is int and 0 < code < 100000:
+                app.logger.error("Analysis failed: %s at %s (ORA-%05d)", name, location, code)
+            else:
+                app.logger.error("Analysis failed: %s at %s", name, location)
             error, status = "Analysis unavailable. Check the local Oracle connection and policy setup, then retry.", 503
     return render_template("index.html", result=result, error=error, question=question,
                            question_error=status == 400), status
