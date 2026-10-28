@@ -895,6 +895,64 @@ def test_undefined_metric_preserves_other_metric(unavailable_metric, unavailable
     assert result["dropped_count"] == 0
 
 
+@pytest.mark.parametrize("missing_metric", ["discount", "freight"])
+@pytest.mark.parametrize("missing_period", ["before", "after"])
+def test_undefined_metric_does_not_hide_other_movement(missing_metric, missing_period, monkeypatch):
+    # Returns can make gross sales or units sum to zero while revenue remains nonzero.
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+        """)
+        for period, month, freight in (("before", "2025-06", 5.0), ("after", "2025-07", 8.0)):
+            sales = [(2, 10, 18, 10)]
+            if period == missing_period:
+                sales.append((-1, 20, -10, 50) if missing_metric == "discount"
+                             else (-2, 5, -9, 10))
+            for quantity, price, revenue, discount in sales:
+                con.execute("INSERT INTO sales VALUES (1, 1, ?, ?, ?, ?, ?)",
+                            (month, revenue, quantity, price, discount))
+            con.execute("INSERT INTO costs VALUES (1, 1, ?, 1, ?)", (month, freight))
+
+        def run_sql(sql, params=None):
+            return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
+                con.execute(tools.validate_select(sql), params or {})]}
+
+        monkeypatch.setattr("agent.run_sql", run_sql)
+        monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
+        result = answer_question("West since July 2025")
+
+    row = result["evidence"]["E2"]["rows"][0]
+    missing_column = "discount_pct" if missing_metric == "discount" else "freight_per_unit"
+    assert row[f"{missing_period}_{missing_column}"] is None
+    findings = [claim for claim in result["claims"] if claim["kind"] == "finding"]
+    missing = next(claim for claim in findings if missing_metric in claim["parts"][0]["text"].lower())
+    available_metric = "freight" if missing_metric == "discount" else "discount"
+    available = next(claim for claim in findings if available_metric in claim["parts"][0]["text"].lower())
+
+    def render(claim):
+        return "".join(part.get("text", str(part.get("value", "")) + part.get("suffix", ""))
+                       for part in claim["parts"])
+
+    assert f"{missing_period} unavailable" in render(missing).lower()
+    available_period = "after" if missing_period == "before" else "before"
+    available_column = f"{available_period}_{missing_column}"
+    assert any(part.get("column") == available_column and supported(part, result["evidence"])
+               for part in missing["parts"] if "value" in part)
+    if missing_metric == "freight":
+        assert "change: unavailable" in render(missing).lower()
+        assert render(available) == "Average discount: before 10.0%; after 10.0%."
+    else:
+        assert render(available) == "Freight per unit: before $5.0; after $8.0; change: 60.0%."
+    assert all(supported(part, result["evidence"]) for claim in (missing, available)
+               for part in claim["parts"] if "value" in part)
+    assert result["dropped_count"] == 0
+
+
 @pytest.fixture
 def policy_rows(monkeypatch):
     row = {
