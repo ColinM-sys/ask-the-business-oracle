@@ -35,7 +35,8 @@ def critique(claims, evidence):
                 valid &= not bool(re.search(r"\d", part["text"]))
             else:
                 valid &= supported(part, evidence)
-                valid &= not bool(re.search(r"\d", part.get("suffix", "")))
+                # Cells are matched without conversion; scaling suffixes are unsupported.
+                valid &= part.get("suffix", "") in ("", "%", " percentage points")
         valid &= all(p in evidence and evidence[p].get("kind") == "policy"
                      for p in claim.get("policy_ids", []))
         (kept if valid else dropped).append(claim)

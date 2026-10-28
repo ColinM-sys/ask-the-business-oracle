@@ -64,6 +64,13 @@ def test_critic_refuses_invalid_cell_references(sample_evidence, change):
     assert not supported(part, sample_evidence)
 
 
+@pytest.mark.parametrize("suffix", [" million", " billion", "k", "e6", "0", "% million"])
+def test_critic_refuses_magnitude_changing_suffixes(sample_evidence, suffix):
+    claim = {"parts": [{"value": 25.53, "suffix": suffix,
+                        "evidence": "E1", "row": 0, "column": "margin"}]}
+    assert critique([claim], sample_evidence) == ([], [claim])
+
+
 def test_hashing_is_stable_and_normalized():
     first = hash_embedding("West freight contract")
     assert first == hash_embedding("West freight contract")
