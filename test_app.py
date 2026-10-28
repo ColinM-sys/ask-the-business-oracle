@@ -4,6 +4,9 @@ import json
 import runpy
 import subprocess
 import sqlite3
+import sys
+import time
+import uuid
 from contextlib import nullcontext
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -338,6 +341,117 @@ def test_delayed_policy_refresh_preserves_newer_content(tmp_path, monkeypatch):
 
     assert [row["chunk"] for row in rows] == ["Updated policy"]
     connection.commit.assert_called_once()
+
+
+def test_policy_refreshes_coordinate_between_processes(tmp_path):
+    document = tmp_path / "policy.md"
+    document.write_text("Old policy", encoding="utf-8")
+    table = "T_POLICY_" + uuid.uuid4().hex[:12].upper()
+    worker = r'''
+import re
+import sys
+import time
+from pathlib import Path
+import policies
+
+folder, table, role = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+policies.DOCS = folder
+real_connect, real_embed, real_read = policies.connect, policies.embed, Path.read_text
+
+class Cursor:
+    def __init__(self, cursor):
+        self.cursor = cursor
+
+    def execute(self, sql, *args, **kwargs):
+        if role == "new":
+            (folder / "new_database_access").touch()
+        sql = re.sub("policy_chunks", table, sql, flags=re.IGNORECASE)
+        self.cursor.execute(sql, *args, **kwargs)
+        return self
+
+    def __getattr__(self, name):
+        return getattr(self.cursor, name)
+
+class Connection:
+    def __enter__(self):
+        self.connection = real_connect()
+        return self
+
+    def __exit__(self, *args):
+        return self.connection.__exit__(*args)
+
+    def cursor(self):
+        return Cursor(self.connection.cursor())
+
+    def commit(self):
+        self.connection.commit()
+
+def read(path, *args, **kwargs):
+    text = real_read(path, *args, **kwargs)
+    if role == "new" and path == folder / "policy.md":
+        (folder / "new_captured").touch()
+    return text
+
+def embed(cursor, text, backend):
+    if role == "old" and text == "Old policy":
+        (folder / "old_captured").touch()
+        deadline = time.monotonic() + 30
+        while not (folder / "release_old").exists():
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Timed out waiting to release old refresh")
+            time.sleep(0.01)
+    return real_embed(cursor, text, backend)
+
+policies.connect, policies.embed, Path.read_text = Connection, embed, read
+policies.ensure_policies()
+'''
+
+    def wait_for(path, process):
+        deadline = time.monotonic() + 15
+        while not path.exists():
+            assert process.poll() is None, "Refresh exited before reaching the checkpoint"
+            assert time.monotonic() < deadline, "Refresh did not reach the checkpoint"
+            time.sleep(0.01)
+
+    processes = []
+    with connect() as con, con.cursor() as cur:
+        cur.execute(f"""CREATE TABLE {table} (
+            id NUMBER PRIMARY KEY, doc VARCHAR2(255), chunk VARCHAR2(4000),
+            embedding VECTOR(*, FLOAT32), backend VARCHAR2(128), source_hash VARCHAR2(64))""")
+        try:
+            def start(role):
+                process = subprocess.Popen(
+                    [sys.executable, "-c", worker, str(tmp_path), table, role],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+                processes.append(process)
+                return process
+
+            old = start("old")
+            wait_for(tmp_path / "old_captured", old)
+            document.write_text("Updated policy", encoding="utf-8")
+            new = start("new")
+            wait_for(tmp_path / "new_database_access", new)
+            try:
+                new.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass  # The newer refresh is waiting for the old transaction's lock.
+            captured_before_release = (tmp_path / "new_captured").exists()
+            (tmp_path / "release_old").touch()
+            assert old.wait(timeout=15) == 0
+            assert new.wait(timeout=15) == 0
+            rows = cur.execute(f"SELECT chunk FROM {table}").fetchall()
+            assert not captured_before_release
+            assert rows == [("Updated policy",)]
+        finally:
+            (tmp_path / "release_old").touch()
+            for process in processes:
+                try:
+                    process.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            cur.execute(f"DROP TABLE {table}")
 
 
 def test_policy_search_handles_empty_table(monkeypatch):
@@ -1139,3 +1253,39 @@ def test_ui_escapes_question():
     response = app.test_client().post("/", data={"question": '<script>alert("x")</script> West'})
     assert response.status_code == 200
     assert b'<script>alert("x")</script>' not in response.data
+
+
+@pytest.mark.parametrize("error_code, table_created", [(955, True), (955, False), (1031, True)])
+def test_policy_table_creation_race(error_code, table_created, tmp_path, monkeypatch):
+    (tmp_path / "policy.md").write_text("Business policy", encoding="utf-8")
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    failure = oracledb.DatabaseError(SimpleNamespace(code=error_code))
+    table_checks = iter([None, ("POLICY_CHUNKS",) if table_created else None])
+
+    def execute(sql, **params):
+        if sql.startswith("SELECT table_name FROM user_tables"):
+            cursor.fetchone.return_value = next(table_checks)
+        elif sql.startswith("CREATE TABLE policy_chunks"):
+            raise failure
+        elif sql.startswith(("SELECT model_name", "SELECT DISTINCT backend, source_hash")):
+            cursor.fetchall.return_value = []
+        return cursor
+
+    cursor.execute.side_effect = execute
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+
+    if error_code == 955 and table_created:
+        assert ensure_policies() == "hash-v1-512"
+        connection.commit.assert_called_once()
+        assert any(call.args[0] == "LOCK TABLE policy_chunks IN EXCLUSIVE MODE"
+                   for call in cursor.execute.call_args_list)
+    else:
+        with pytest.raises(oracledb.DatabaseError) as caught:
+            ensure_policies()
+        assert caught.value is failure
+        connection.commit.assert_not_called()
+        assert not any(call.args[0].startswith(("LOCK TABLE", "DELETE", "INSERT"))
+                       for call in cursor.execute.call_args_list)
