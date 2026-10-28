@@ -269,6 +269,25 @@ def test_flask_live_brief_and_evidence():
     assert b"evidence-dialog" in response.data
 
 
+@pytest.mark.parametrize("has_claims,dropped_count", [(True, 0), (True, 2), (False, 2), (False, 0)])
+def test_ui_discloses_dropped_claims_and_empty_brief(monkeypatch, has_claims, dropped_count):
+    result = {
+        "region": "West",
+        "claims": [{"kind": "finding", "parts": [{"text": "Retained finding."}]}] if has_claims else [],
+        "dropped_count": dropped_count,
+        "evidence": {},
+    }
+    monkeypatch.setattr("app.answer_question", lambda _: result)
+
+    response = app.test_client().post("/", data={"question": "West"})
+
+    assert response.status_code == 200
+    assert (b"2 claims were omitted because they failed verification." in response.data) == bool(dropped_count)
+    assert (b"No verified claims are available for this brief." in response.data) == (not has_claims)
+    assert (b"Numbers in retained claims verified against cited SQL cells." in response.data) == has_claims
+    assert (b"Retained finding." in response.data) == has_claims
+
+
 def test_ui_validation_and_safe_error(monkeypatch):
     client = app.test_client()
     assert client.post("/", data={"question": ""}).status_code == 400
