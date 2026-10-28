@@ -154,6 +154,27 @@ def test_readme_documents_required_oracle_configuration():
         assert is_empty, f"{name} must be blank in .env.example"
 
 
+def test_setup_files_are_present():
+    root = Path(__file__).parent
+    for name in (
+        "requirements.txt", ".env.example", "data/oracle_load.sql",
+        "docs/freight_contract_memo.md", "docs/pricing_policy.md",
+        "docs/regional_playbook.md", "docs/west_q3_volume_push.md",
+    ):
+        path = root / name
+        assert path.is_file(), f"Missing setup file: {name}"
+        assert path.read_text(encoding="utf-8").strip(), f"Empty setup file: {name}"
+
+
+def test_readme_includes_initial_business_data_load():
+    readme = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
+    setup = readme.split("```powershell", 1)[1].split("```", 1)[0]
+    assert setup.index("docker start oracle-free") < setup.index("python load.py")
+    assert setup.index("python load.py") < setup.index("python policies.py")
+    assert "only once" in readme.lower()
+    assert "skip" in readme.lower()
+
+
 @pytest.mark.parametrize("sql", [
     "DELETE FROM sales", "DROP TABLE sales", "UPDATE sales SET quantity=0",
     "INSERT INTO sales (sale_id) VALUES (0)", "ALTER TABLE sales ADD x NUMBER",
@@ -212,6 +233,17 @@ def test_critic_drops_unsupported_numbers_and_preserves_valid(sample_evidence):
     kept, dropped = critique([valid, invented, uncited, bad_policy], sample_evidence)
     assert kept == [valid]
     assert len(dropped) == 3
+
+
+def test_readme_documents_unchecked_spelled_out_numbers():
+    claim = {"parts": [{"text": "Sales were five million."}]}
+    assert critique([claim], {}) == ([claim], [])
+
+    readme = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
+    documentation = " ".join(readme.lower().split())
+    assert "numbers written as words" in documentation
+    assert "five million" in documentation
+    assert "can pass without a citation" in documentation
 
 
 @pytest.mark.parametrize("change", [

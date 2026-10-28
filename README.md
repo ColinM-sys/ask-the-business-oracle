@@ -16,13 +16,16 @@ and policy retrieval. No API key or language model is required.
 If `.env` does not exist, copy `.env.example` to `.env`. Set `ORACLE_USER`
 (database user), `ORACLE_PASSWORD` (database password), and `ORACLE_DSN`
 (connection string, such as `host:port/service_name`) in `.env` before running
-`policies.py`. Business tables must already be loaded.
+`policies.py` or `load.py`. The repository includes `requirements.txt`, `.env.example`, and
+the four policy documents in `docs/`. Run `python load.py` only once on an empty
+database; skip it if the business tables are already loaded.
 
 ```powershell
 python -m pip install -r requirements.txt
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 # Fill in the required Oracle settings in .env before continuing.
 docker start oracle-free
+python load.py  # Only for an empty database; skip if tables are already loaded.
 python policies.py
 python app.py
 ```
@@ -53,10 +56,12 @@ endpoints may give a different result. For example, margins of 25.004% and
 24.996% both round to 25%, but the drop is 0.01 percentage points.
 The other regions provide context, not a causal decomposition.
 
-Every number in the brief, including dates and SQL-derived differences, names an
-exact SQL result cell. The critic drops entire claims with unsupported numbers.
-Click a number to view SQL, bound parameters and returned rows, with the cited
-cell highlighted. Policy citations open retrieved source text and vector SQL.
+The fixed brief uses cited SQL result cells for dates and SQL-derived values. The
+critic checks numeric parts against the cited cells and drops claims with
+unsupported numeric parts or digits in plain text. Numbers written as words,
+such as "five million", are not checked and can pass without a citation. Click a
+number to view SQL, bound parameters and returned rows, with the cited cell
+highlighted. Policy citations open retrieved source text and vector SQL.
 Fixed qualitative explanations are included only when their policy documents
 were retrieved; West's explanation applies to the default change point.
 
