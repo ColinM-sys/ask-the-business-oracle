@@ -1576,12 +1576,103 @@ def test_comparison_keeps_available_margin_when_other_period_is_empty(available_
     assert f"{margin}.0% {available_period}" in rendered
     assert f"unavailable {missing_period}" in rendered
     parts = [part for part in comparison["parts"] if "value" in part]
-    assert len(parts) == 1
+    assert len(parts) == 3
     assert parts[0]["column"] == f"{available_period}_margin_pct"
-    assert parts[0]["evidence"] == "E2"
+    date_columns = ("first_month", "before_last_month") if available_period == "before" else (
+        "after_first_month", "last_month")
+    assert [part["column"] for part in parts[1:]] == list(date_columns)
+    month = "2025-06" if available_period == "before" else "2025-07"
+    assert f"{available_period} ({month} through {month})" in rendered
+    assert all(part["evidence"] == "E2" and part["row"] == parts[0]["row"]
+               and supported(part, result["evidence"]) for part in parts)
     assert result["evidence"]["E2"]["rows"][parts[0]["row"]]["region_name"] == "East"
     assert result["evidence"]["E2"]["rows"][parts[0]["row"]]["margin_direction"] is None
-    assert supported(parts[0], result["evidence"])
+    assert result["dropped_count"] == 0
+
+
+@pytest.mark.parametrize("zero_after_revenue", [False, True])
+def test_comparison_shows_each_regions_cited_periods(monkeypatch, zero_after_revenue):
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West'), (2, 'East'), (3, 'Central');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+        """)
+        regions = (
+            (1, ("2025-01", "2025-06", "2025-07", "2025-09"), (40, 25)),
+            (2, ("2025-02", "2025-05", "2025-08", "2025-10"), (35, 30)),
+            (3, ("2025-03", "2025-04", "2025-09", "2025-12"), (20, 10)),
+        )
+        for region_id, months, margins in regions:
+            for i, month in enumerate(months):
+                revenue = 0 if region_id == 2 and i >= 2 and zero_after_revenue else 100
+                con.execute("INSERT INTO sales VALUES (?, 1, ?, ?, 1, 100, 0)",
+                            (region_id, month, revenue))
+                con.execute("INSERT INTO costs VALUES (?, 1, ?, ?, 5)",
+                            (region_id, month, 95 - margins[i // 2]))
+
+        def run_sql(sql, params=None):
+            return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
+                con.execute(tools.validate_select(sql), params or {})]}
+
+        monkeypatch.setattr("agent.run_sql", run_sql)
+        monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
+        result = answer_question("West since July 2025")
+        response = app.test_client().post("/", data={"question": "West since July 2025"})
+
+    assert response.status_code == 200
+
+    class ComparisonParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.comparisons = []
+            self.current = None
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == "p" and attrs.get("data-claim-kind") == "comparison":
+                self.current = {"text": "", "buttons": []}
+                self.comparisons.append(self.current)
+            elif tag == "button" and self.current is not None:
+                self.current["buttons"].append(attrs)
+
+        def handle_data(self, data):
+            if self.current is not None:
+                self.current["text"] += data
+
+        def handle_endtag(self, tag):
+            if tag == "p":
+                self.current = None
+
+    page = ComparisonParser()
+    page.feed(response.get_data(as_text=True))
+    comparisons = [claim for claim in result["claims"] if claim["kind"] == "comparison"]
+    assert len(comparisons) == len(page.comparisons) == 2
+    expected = {
+        "East": ("2025-02", "2025-05", "2025-08", "2025-10", "35.0%",
+                 "unavailable" if zero_after_revenue else "30.0%"),
+        "Central": ("2025-03", "2025-04", "2025-09", "2025-12", "20.0%", "10.0%"),
+    }
+    date_columns = ("first_month", "before_last_month", "after_first_month", "last_month")
+    for claim, displayed in zip(comparisons, page.comparisons):
+        parts = [part for part in claim["parts"] if "value" in part]
+        row_index = parts[0]["row"]
+        row = result["evidence"]["E2"]["rows"][row_index]
+        first, before_last, after_first, last, before_margin, after_margin = expected[row["region_name"]]
+        assert displayed["text"].strip() == (
+            f"{row['region_name']} margin: {before_margin} before ({first} through {before_last}); "
+            f"{after_margin} after ({after_first} through {last}).")
+        dates = [part for part in parts if part["column"] in date_columns]
+        assert [part["column"] for part in dates] == list(date_columns)
+        assert [part["value"] for part in dates] == [first, before_last, after_first, last]
+        assert all(part["evidence"] == "E2" and part["row"] == row_index
+                   and supported(part, result["evidence"]) for part in parts)
+        date_buttons = [button for button in displayed["buttons"] if button["data-column"] in date_columns]
+        assert [(button["data-evidence"], button["data-row"], button["data-column"])
+                for button in date_buttons] == [("E2", str(row_index), column) for column in date_columns]
     assert result["dropped_count"] == 0
 
 

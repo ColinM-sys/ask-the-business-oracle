@@ -252,9 +252,17 @@ def answer_question(question):
         + [text("; change: ")] + metric("freight_increase_pct", suffix="%") + [text(".")])
     for other_index, other in enumerate(rows):
         if other_index != index:
+            before_dates = ([text(" ("), number("first_month", row_index=other_index), text(" through "),
+                             number("before_last_month", row_index=other_index), text(")")]
+                            if other["before_last_month"] is not None else [])
+            after_dates = ([text(" ("), number("after_first_month", row_index=other_index), text(" through "),
+                            number("last_month", row_index=other_index), text(")")]
+                           if other["after_first_month"] is not None else [])
             claim("comparison", [text(f"{other['region_name']} margin: ")]
-                + metric("before_margin_pct", suffix="%", row_index=other_index) + [text(" before; ")]
-                + metric("after_margin_pct", suffix="%", row_index=other_index) + [text(" after.")])
+                + metric("before_margin_pct", suffix="%", row_index=other_index) + [text(" before")]
+                + before_dates + [text("; ")]
+                + metric("after_margin_pct", suffix="%", row_index=other_index) + [text(" after")]
+                + after_dates + [text(".")])
     if region == "West" and cutoff == "2025-07":
         push, freight = policy_ids("west_q3_volume_push.md"), policy_ids("freight_contract_memo.md")
         if push and freight:
