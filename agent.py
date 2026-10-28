@@ -21,8 +21,8 @@ REVIEWED_POLICY_HASHES = {
     "west_q3_volume_push.md": "5dc8fd6cd5ce406fcd582abb8220e16d24dbf5fe7a133eb798c5bf871a3f8c1f",
 }
 
-# The fixed claims below were reviewed against these complete document versions.
-# Review the claims again before accepting any changed document digest.
+# The fixed claims below were reviewed against this complete policy corpus.
+# Review the claims again before accepting any added, removed, or changed document.
 POLICY_SHA256 = {
     "west_q3_volume_push.md": "f5c98d964fc1b7b6a872152b15fef8044ff7a30797a3a65e1b5891e152bf3b71",
     "freight_contract_memo.md": "8b73b6dbad7be9dcdc24759e02da963a465420d4a00f1c0c8b0940c4dd6da747",
@@ -131,6 +131,16 @@ def answer_question(question):
             "sql": f"SELECT * FROM (\n{policies['sql']}\n) WHERE id = :policy_id",
             "params": {**policies["params"], "policy_id": policy["id"]}, "rows": [policy]}
 
+    # A policy outside the search results can supersede any reviewed claim.
+    try:
+        sources = {path.name: path.read_text(encoding="utf-8").strip()
+                   for path in DOCS.glob("*.md")}
+        reviewed_corpus = (sources.keys() == POLICY_SHA256.keys() and all(
+            sha256(source.encode("utf-8")).hexdigest() == POLICY_SHA256[name]
+            for name, source in sources.items()))
+    except (OSError, UnicodeError):
+        reviewed_corpus = False
+
     def text(value):
         return {"text": value}
 
@@ -139,12 +149,7 @@ def answer_question(question):
                 "column": column, "suffix": suffix}
 
     def policy_ids(filename):
-        # Verify the whole source too: an old chunk may survive a contradictory addendum.
-        try:
-            source = (DOCS / filename).read_text(encoding="utf-8").strip()
-        except (OSError, UnicodeError):
-            return []
-        if sha256(source.encode("utf-8")).hexdigest() != POLICY_SHA256[filename]:
+        if not reviewed_corpus:
             return []
         # These reviewed documents each fit in one chunk; partial text is not proof.
         citations = []

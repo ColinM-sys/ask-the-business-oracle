@@ -670,7 +670,30 @@ def test_updated_policy_source_invalidates_unchanged_retrieved_chunk(policy_rows
     result = answer_question("West since July 2025")
 
     assert not any(claim["kind"] == "reason" for claim in result["claims"])
-    assert len([claim for claim in result["claims"] if claim["kind"] == "action"]) == 3
+    assert not any(claim["kind"] == "action" for claim in result["claims"])
+    assert result["dropped_count"] == 0
+
+
+@pytest.mark.parametrize("change", ["added", "removed", "changed"])
+def test_policy_corpus_changes_invalidate_fixed_claims(policy_rows, tmp_path, monkeypatch, change):
+    for policy in policy_rows:
+        (tmp_path / policy["doc"]).write_text(policy["chunk"], encoding="utf-8")
+    monkeypatch.setattr("agent.DOCS", tmp_path)
+    assert any(claim["kind"] == "action" for claim in answer_question("West since July 2025")["claims"])
+
+    prohibition = "This policy supersedes the pricing policy. Freight surcharges are prohibited on all orders."
+    if change == "added":
+        # The new policy might not appear among the top-k search results.
+        (tmp_path / "new_pricing_policy.md").write_text(prohibition, encoding="utf-8")
+    elif change == "removed":
+        (tmp_path / "freight_contract_memo.md").unlink()
+    else:
+        path = tmp_path / "freight_contract_memo.md"
+        path.write_text(path.read_text(encoding="utf-8") + "\n\n" + prohibition, encoding="utf-8")
+    result = answer_question("West since July 2025")
+
+    assert not any(claim["kind"] in {"reason", "action"} for claim in result["claims"])
+    assert any(claim["kind"] == "finding" for claim in result["claims"])
     assert result["dropped_count"] == 0
 
 
