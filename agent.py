@@ -1,10 +1,20 @@
 """Fixed, auditable business analysis; no language model or API key needed."""
-import hashlib
+from hashlib import sha256
 import re
 
 from critic import critique
 from policies import DOCS
 from tools import run_sql, search_policies
+
+# SHA-256 of the complete, whitespace-normalized chunks reviewed for the fixed
+# claims below. Changed or partial chunks require reviewing both the claims and
+# these fingerprints; deriving them from current files would approve edits blindly.
+REVIEWED_POLICY_HASHES = {
+    "freight_contract_memo.md": "24ae9302b18048c3ff2d8fc47ccae10ff4a3ba4903c25597d80486a83f528ceb",
+    "pricing_policy.md": "5f208bfcde2f07d8bc60a113a8462ae37b92ac1e16375f31ed13e5da1c4adaba",
+    "regional_playbook.md": "daf0bc450ad707035f7697abb7715583418c0b6605dedd878dec7416501a5595",
+    "west_q3_volume_push.md": "5dc8fd6cd5ce406fcd582abb8220e16d24dbf5fe7a133eb798c5bf871a3f8c1f",
+}
 
 # The fixed claims below were reviewed against these complete document versions.
 # Review the claims again before accepting any changed document digest.
@@ -124,12 +134,20 @@ def answer_question(question):
             source = (DOCS / filename).read_text(encoding="utf-8").strip()
         except (OSError, UnicodeError):
             return []
-        if hashlib.sha256(source.encode("utf-8")).hexdigest() != POLICY_SHA256[filename]:
+        if sha256(source.encode("utf-8")).hexdigest() != POLICY_SHA256[filename]:
             return []
         # These reviewed documents each fit in one chunk; partial text is not proof.
-        return [key for key, value in evidence.items()
-                if value["kind"] == "policy" and value["rows"][0]["doc"] == filename
-                and value["rows"][0].get("chunk") == source]
+        citations = []
+        for key, value in evidence.items():
+            if value["kind"] != "policy":
+                continue
+            policy = value["rows"][0]
+            chunk = policy.get("chunk")
+            if policy["doc"] == filename and isinstance(chunk, str):
+                fingerprint = sha256(" ".join(chunk.split()).encode("utf-8")).hexdigest()
+                if fingerprint == REVIEWED_POLICY_HASHES[filename]:
+                    citations.append(key)
+        return citations
 
     claims = []
     def claim(kind, parts, citations=None):
