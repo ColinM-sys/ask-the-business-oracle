@@ -105,6 +105,16 @@ def test_readme_documents_node_test_prerequisite():
     assert "Node.js installed and available as `node` on PATH" in " ".join(test_instructions.split())
 
 
+def test_readme_documents_policy_fingerprint_maintenance():
+    readme = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
+    text = " ".join(readme.split())
+    assert "review the fixed claims in `agent.py`" in text
+    assert "update both `POLICY_SHA256` (SHA-256 of the stripped full document)" in text
+    assert "`REVIEWED_POLICY_HASHES` (SHA-256 of its complete chunk with whitespace collapsed)" in text
+    assert "The revised document must still fit in one chunk" in text
+    assert "affected explanations and recommendations remain unavailable even after refresh and retrieval" in text
+
+
 def test_readme_documents_runtime_policy_refresh():
     readme = " ".join(Path(__file__).with_name("README.md").read_text(encoding="utf-8").split())
     assert "`search_policies()` calls `ensure_policies()` on every policy search" in readme

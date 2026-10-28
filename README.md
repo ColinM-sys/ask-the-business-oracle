@@ -28,8 +28,13 @@ Open http://127.0.0.1:5055 and ask â€œWhy did West margin fall since July 2025?â
 `.env` is read by `db.py`; do not commit credentials. `policies.py` creates only
 `policy_chunks`, probes registered Oracle embedding models, and otherwise uses
 deterministic normalized hashing vectors. Source changes trigger a transactional
-policy refresh. Queries use Oracle `VECTOR_DISTANCE` with cosine distance; the
-local hashing fallback is lexical retrieval rather than a semantic language model.
+policy refresh. To accept a revised policy, review the fixed claims in `agent.py`,
+then update both `POLICY_SHA256` (SHA-256 of the stripped full document) and
+`REVIEWED_POLICY_HASHES` (SHA-256 of its complete chunk with whitespace collapsed).
+The revised document must still fit in one chunk. Until both fingerprints match,
+affected explanations and recommendations remain unavailable even after refresh
+and retrieval. Queries use Oracle `VECTOR_DISTANCE` with cosine distance; the local
+hashing fallback is lexical retrieval rather than a semantic language model.
 
 The app runs fixed analysis for margin, discount and freight, regardless of
 question wording. It recognizes West, Central, East or South and a full month
