@@ -12,8 +12,9 @@ MONTHLY_SQL = f"""SELECT r.region_name, s.sale_month,
     SUM(s.quantity) AS units,
     ROUND(100*SUM(s.net_revenue-s.quantity*(c.unit_cogs+c.freight_per_unit))
         /NULLIF(SUM(s.net_revenue),0),2) AS margin_pct,
-    ROUND(SUM(s.quantity*s.unit_price*s.discount_pct)
-        /NULLIF(SUM(s.quantity*s.unit_price),0),2) AS discount_pct,
+    ROUND(CASE WHEN COUNT(*)=COUNT(s.quantity*s.unit_price*s.discount_pct)
+        THEN SUM(s.quantity*s.unit_price*s.discount_pct)
+        /NULLIF(SUM(s.quantity*s.unit_price),0) END,2) AS discount_pct,
     ROUND(SUM(s.quantity*c.freight_per_unit)/NULLIF(SUM(s.quantity),0),2) AS freight_per_unit
     {JOIN} GROUP BY r.region_name,s.sale_month ORDER BY r.region_name,s.sale_month"""
 
@@ -27,9 +28,12 @@ def summary_sql():
             return f"SUM(CASE WHEN {condition} THEN {expression} ELSE 0 END)"
         revenue = total("s.net_revenue")
         units = total("s.quantity")
+        # A missing discount or weight must not silently become zero or be omitted.
+        complete_discount = (f"COUNT(CASE WHEN {condition} THEN 1 END)="
+                             f"COUNT(CASE WHEN {condition} THEN s.quantity*s.unit_price*s.discount_pct END)")
         raw[period] = {
             "margin_pct": f"100*{total('s.net_revenue-s.quantity*(c.unit_cogs+c.freight_per_unit)')}/NULLIF({revenue},0)",
-            "discount_pct": f"{total('s.quantity*s.unit_price*s.discount_pct')}/NULLIF({total('s.quantity*s.unit_price')},0)",
+            "discount_pct": f"CASE WHEN {complete_discount} THEN {total('s.quantity*s.unit_price*s.discount_pct')}/NULLIF({total('s.quantity*s.unit_price')},0) END",
             "freight_per_unit": f"{total('s.quantity*c.freight_per_unit')}/NULLIF({units},0)",
         }
         for name, expression in raw[period].items():
@@ -122,8 +126,11 @@ def answer_question(question):
     claim("finding", [text(f"{region} gross margin {direction} from "), number("before_margin_pct", "%"),
         text(" to "), number("after_margin_pct", "%"), text("; the signed margin drop is "),
         number("margin_drop_pts", " percentage points"), text("." + precision_note)])
-    freight_parts = [text("Average discount moved from "), number("before_discount_pct", "%"),
-        text(" to "), number("after_discount_pct", "%"), text(". Freight per unit moved from $"),
+    freight_parts = [text("Average discount moved from "),
+        number("before_discount_pct", "%") if row["before_discount_pct"] is not None else text("unavailable"),
+        text(" to "),
+        number("after_discount_pct", "%") if row["after_discount_pct"] is not None else text("unavailable"),
+        text(". Freight per unit moved from $"),
         number("before_freight_per_unit"), text(" to $"), number("after_freight_per_unit")]
     if row["freight_increase_pct"] is not None:
         freight_parts.extend([text(" (change: "), number("freight_increase_pct", "%"), text(")")])

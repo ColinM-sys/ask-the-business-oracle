@@ -14,7 +14,7 @@ import pytest
 
 import tools
 from db import connect
-from agent import answer_question, parse_question, summary_sql
+from agent import MONTHLY_SQL, answer_question, parse_question, summary_sql
 from app import app
 from critic import critique, supported
 from policies import ensure_policies, hash_embedding
@@ -294,6 +294,58 @@ def test_margin_direction_uses_unrounded_sql(before, after, direction, below_pre
     assert rendered.startswith(f"West gross margin {direction} from ")
     assert ("below display precision" in rendered) == below_precision
     assert result["dropped_count"] == 0
+
+
+@pytest.mark.parametrize("period", ["before", "after"])
+@pytest.mark.parametrize("missing_rows", [(), (0,), (0, 1)])
+@pytest.mark.parametrize("field", ["quantity", "unit_price", "discount_pct"])
+def test_discount_requires_complete_inputs(period, missing_rows, field, monkeypatch):
+    # Real zeros remain valid; any missing input makes that period unavailable.
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+        """)
+        months = {"before": "2025-06", "after": "2025-07"}
+        for name, month in months.items():
+            con.execute("INSERT INTO costs VALUES (1, 1, ?, 40.0, 2.0)", (month,))
+            for index in range(2):
+                values = {"quantity": 1.0, "unit_price": 100.0,
+                          "discount_pct": 0.0 if name == "before" else 20.0}
+                if name == period and index in missing_rows:
+                    values[field] = None
+                con.execute("INSERT INTO sales VALUES (1, 1, ?, 80.0, ?, ?, ?)",
+                            (month, *values.values()))
+
+        def run_sql(sql, params=None):
+            executable = tools.validate_select(sql)
+            return {"sql": sql, "params": params or {},
+                    "rows": [dict(row) for row in con.execute(executable, params or {})]}
+
+        monthly = run_sql(MONTHLY_SQL)["rows"]
+        summary = run_sql(summary_sql(), {"cutoff": "2025-07"})["rows"][0]
+        for name, month in months.items():
+            expected = None if name == period and missing_rows else (0 if name == "before" else 20)
+            assert summary[f"{name}_discount_pct"] == expected
+            assert next(row for row in monthly if row["sale_month"] == month)["discount_pct"] == expected
+
+        if field == "discount_pct":
+            monkeypatch.setattr("agent.run_sql", run_sql)
+            monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
+            result = answer_question("West since July 2025")
+            finding = next(c for c in result["claims"]
+                           if c["parts"][0].get("text") == "Average discount moved from ")
+            rendered = "".join(p.get("text", str(p.get("value", "")) + p.get("suffix", ""))
+                               for p in finding["parts"])
+            before = "unavailable" if period == "before" and missing_rows else "0.0%"
+            after = "unavailable" if period == "after" and missing_rows else "20.0%"
+            assert rendered == (f"Average discount moved from {before} to {after}. "
+                                "Freight per unit moved from $2.0 to $2.0 (change: 0.0%).")
+            assert result["dropped_count"] == 0
 
 
 def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
