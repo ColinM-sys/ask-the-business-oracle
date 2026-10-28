@@ -163,12 +163,15 @@ def answer_question(question):
     claim("finding", [text(f"{region} gross margin {direction} from "), number("before_margin_pct", "%"),
         text(" to "), number("after_margin_pct", "%"), text("; the signed margin drop is "),
         number("margin_drop_pts", " percentage points"), text("." + precision_note)])
-    freight_parts = [text("Average discount moved from "), number("before_discount_pct", "%"),
-        text(" to "), number("after_discount_pct", "%"), text(". Freight per unit moved from $"),
-        number("before_freight_per_unit"), text(" to $"), number("after_freight_per_unit")]
-    if row["freight_increase_pct"] is not None:
-        freight_parts.extend([text(" (change: "), number("freight_increase_pct", "%"), text(")")])
-    claim("finding", freight_parts + [text(".")])
+    if row["before_discount_pct"] is not None and row["after_discount_pct"] is not None:
+        claim("finding", [text("Average discount moved from "), number("before_discount_pct", "%"),
+            text(" to "), number("after_discount_pct", "%"), text(".")])
+    if row["before_freight_per_unit"] is not None and row["after_freight_per_unit"] is not None:
+        freight_parts = [text("Freight per unit moved from $"), number("before_freight_per_unit"),
+            text(" to $"), number("after_freight_per_unit")]
+        if row["freight_increase_pct"] is not None:
+            freight_parts.extend([text(" (change: "), number("freight_increase_pct", "%"), text(")")])
+        claim("finding", freight_parts + [text(".")])
     for other_index, other in enumerate(rows):
         if other_index != index:
             claim("comparison", [text(f"{other['region_name']} margin: "),

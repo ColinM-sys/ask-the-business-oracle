@@ -467,15 +467,66 @@ def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
 
     result = answer_question("Why did West margin fall since July 2025?")
 
-    finding = next(c for c in result["claims"]
-                   if c["parts"][0].get("text") == "Average discount moved from ")
-    assert "".join(p.get("text", str(p.get("value", "")) + p.get("suffix", ""))
-                   for p in finding["parts"]) == (
-        "Average discount moved from 3% to 18%. Freight per unit moved from $0 to $5.")
+    for prefix, expected in [
+        ("Average discount moved from ", "Average discount moved from 3% to 18%."),
+        ("Freight per unit moved from $", "Freight per unit moved from $0 to $5."),
+    ]:
+        finding = next(c for c in result["claims"] if c["parts"][0].get("text") == prefix)
+        assert "".join(p.get("text", str(p.get("value", "")) + p.get("suffix", ""))
+                       for p in finding["parts"]) == expected
+        for part in finding["parts"]:
+            if "value" in part:
+                assert supported(part, result["evidence"])
     assert result["dropped_count"] == 0
-    for part in finding["parts"]:
-        if "value" in part:
-            assert supported(part, result["evidence"])
+
+
+@pytest.mark.parametrize("missing_metric", ["discount", "freight"])
+@pytest.mark.parametrize("missing_period", ["before", "after"])
+def test_undefined_metric_does_not_hide_other_movement(missing_metric, missing_period, monkeypatch):
+    # Returns can make gross sales or units sum to zero while revenue remains nonzero.
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+        """)
+        for period, month, freight in (("before", "2025-06", 5.0), ("after", "2025-07", 8.0)):
+            sales = [(2, 10, 18, 10)]
+            if period == missing_period:
+                sales.append((-1, 20, -10, 50) if missing_metric == "discount"
+                             else (-2, 5, -9, 10))
+            for quantity, price, revenue, discount in sales:
+                con.execute("INSERT INTO sales VALUES (1, 1, ?, ?, ?, ?, ?)",
+                            (month, revenue, quantity, price, discount))
+            con.execute("INSERT INTO costs VALUES (1, 1, ?, 1, ?)", (month, freight))
+
+        def run_sql(sql, params=None):
+            return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
+                con.execute(tools.validate_select(sql), params or {})]}
+
+        monkeypatch.setattr("agent.run_sql", run_sql)
+        monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
+        result = answer_question("West since July 2025")
+
+    row = result["evidence"]["E2"]["rows"][0]
+    missing_column = "discount_pct" if missing_metric == "discount" else "freight_per_unit"
+    assert row[f"{missing_period}_{missing_column}"] is None
+    available_prefix = ("Freight per unit moved from $" if missing_metric == "discount"
+                        else "Average discount moved from ")
+    missing_prefix = ("Average discount moved from " if missing_metric == "discount"
+                      else "Freight per unit moved from $")
+    assert not any(c["parts"][0].get("text") == missing_prefix for c in result["claims"])
+    finding = next(c for c in result["claims"] if c["parts"][0].get("text") == available_prefix)
+    rendered = "".join(p.get("text", str(p.get("value", "")) + p.get("suffix", ""))
+                       for p in finding["parts"])
+    assert rendered == ("Freight per unit moved from $5.0 to $8.0 (change: 60.0%)."
+                        if missing_metric == "discount"
+                        else "Average discount moved from 10.0% to 10.0%.")
+    assert all(supported(part, result["evidence"]) for part in finding["parts"] if "value" in part)
+    assert result["dropped_count"] == 0
 
 
 @pytest.fixture
@@ -532,7 +583,7 @@ def test_policy_filenames_do_not_prove_claims(policy_rows, filename, contradicti
         assert not any(claim["kind"] == "reason" for claim in result["claims"])
     else:
         assert not any(claim["kind"] == "action" for claim in result["claims"])
-    assert len([claim for claim in result["claims"] if claim["kind"] == "finding"]) == 2
+    assert len([claim for claim in result["claims"] if claim["kind"] == "finding"]) == 3
     assert result["dropped_count"] == 0
 
 
