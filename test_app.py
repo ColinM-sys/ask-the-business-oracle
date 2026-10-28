@@ -845,6 +845,39 @@ def test_select_preserves_semicolon_in_string():
     assert result["rows"] == [{"label": "West; -- report"}]
 
 
+@pytest.mark.parametrize("host", [
+    "rebind.example:5055", "localhost.rebind.example:5055",
+    "evil.localhost:5055", "127.0.0.1.rebind.example:5055",
+    "localhost@rebind.example:5055",
+])
+@pytest.mark.parametrize("method", ["get", "post"])
+def test_ui_rejects_untrusted_hosts_before_analysis(monkeypatch, host, method):
+    analysis = MagicMock()
+    monkeypatch.setattr("app.answer_question", analysis)
+
+    response = getattr(app.test_client(), method)(
+        "/", headers={"Host": host}, data={"question": "West"},
+    )
+
+    assert response.status_code == 400
+    analysis.assert_not_called()
+
+
+@pytest.mark.parametrize("host", ["localhost", "localhost:5055", "127.0.0.1", "127.0.0.1:5055"])
+def test_ui_accepts_local_hosts(monkeypatch, host):
+    monkeypatch.setattr("app.answer_question", lambda _: {
+        "region": "West", "claims": [], "dropped_count": 0,
+        "evidence": {"E1": {"kind": "sql", "sql": "SELECT revenue FROM sales",
+                            "params": {}, "rows": [{"revenue": 12345}]}},
+    })
+    client = app.test_client()
+
+    assert client.get("/", headers={"Host": host}).status_code == 200
+    response = client.post("/", headers={"Host": host}, data={"question": "West"})
+    assert response.status_code == 200
+    assert b"SELECT revenue FROM sales" in response.data
+
+
 def test_flask_live_brief_and_evidence():
     client = app.test_client()
     assert client.get("/").status_code == 200
