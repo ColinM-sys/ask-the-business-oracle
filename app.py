@@ -1,7 +1,7 @@
 """Local Flask UI: python app.py, then http://127.0.0.1:5055."""
 from flask import Flask, render_template, request
 
-from agent import answer_question
+from agent import QuestionValidationError, answer_question
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024
@@ -23,7 +23,7 @@ def index():
     if request.method == "POST":
         try:
             result = answer_question(question)
-        except ValueError as exc:
+        except QuestionValidationError as exc:
             error, status = str(exc), 400
         except Exception:
             # Do not expose connection settings, driver errors or credentials.

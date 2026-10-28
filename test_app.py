@@ -514,16 +514,23 @@ def test_policy_citations_have_descriptive_accessible_names(monkeypatch):
         assert documents[evidence_id] in button["aria-label"]
 
 
-def test_ui_validation_and_safe_error(monkeypatch):
+@pytest.mark.parametrize("error, detail", [
+    (RuntimeError("secret-driver-settings"), b"secret-driver-settings"),
+    (ValueError("private-driver-details"), b"private-driver-details"),
+    (ValueError("Evidence exceeds the row limit; aggregate the query"), b"aggregate the query"),
+    (UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"), b"invalid start byte"),
+])
+def test_ui_validation_and_safe_error(monkeypatch, error, detail):
     client = app.test_client()
     assert client.post("/", data={"question": ""}).status_code == 400
     assert client.post("/", data={"question": "West since July 2030"}).status_code == 400
     def failure(_):
-        raise RuntimeError("secret-driver-settings")
+        raise error
     monkeypatch.setattr("app.answer_question", failure)
     response = client.post("/", data={"question": "West"})
     assert response.status_code == 503
-    assert b"secret-driver-settings" not in response.data
+    assert b"Analysis unavailable. Check the local Oracle connection and policy setup, then retry." in response.data
+    assert detail not in response.data
 
 
 def test_script_starts_and_shows_unavailable_when_setup_fails(monkeypatch):
