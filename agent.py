@@ -4,7 +4,7 @@ import re
 from critic import critique
 from tools import run_sql, search_policies
 
-JOIN = """FROM sales s JOIN costs c ON c.region_id=s.region_id
+JOIN = """FROM sales s LEFT JOIN costs c ON c.region_id=s.region_id
     AND c.product_id=s.product_id AND c.cost_month=s.sale_month
     JOIN regions r ON r.region_id=s.region_id"""
 MONTHLY_SQL = f"""SELECT r.region_name, s.sale_month,
@@ -35,6 +35,7 @@ def summary_sql():
         for name, expression in raw[period].items():
             columns.append(f"ROUND({expression},2) AS {period}_{name}")
     columns.extend([
+        "COUNT(*)-COUNT(c.cost_month) AS missing_cost_count",
         f"CASE WHEN ({raw['before']['margin_pct']}) > ({raw['after']['margin_pct']}) THEN 'fell' WHEN ({raw['before']['margin_pct']}) < ({raw['after']['margin_pct']}) THEN 'rose' ELSE 'was unchanged' END AS margin_direction",
         f"ROUND(({raw['before']['margin_pct']})-({raw['after']['margin_pct']}),2) AS margin_drop_pts",
         f"ROUND(100*(({raw['after']['freight_per_unit']})/NULLIF(({raw['before']['freight_per_unit']}),0)-1),2) AS freight_increase_pct",
@@ -89,6 +90,8 @@ def answer_question(question):
     index = next((i for i, row in enumerate(rows) if row["region_name"] == region), None)
     if index is None:
         raise ValueError(f"No sales/cost data found for {region}.")
+    if any(row["missing_cost_count"] for row in rows):
+        raise ValueError("Missing monthly costs for some sales; cannot analyze incomplete data.")
     row = rows[index]
     if row["before_margin_pct"] is None or row["after_margin_pct"] is None:
         raise ValueError("The comparison date must have sales both before and after it.")

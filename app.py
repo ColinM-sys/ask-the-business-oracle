@@ -7,6 +7,19 @@ app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024
 
 
+@app.template_filter()
+def browser_evidence(evidence):
+    """Keep integer cells exact across JSON/JavaScript without changing SQL evidence."""
+    return {
+        key: {**item, "rows": [
+            {column: str(value) if isinstance(value, int) and not isinstance(value, bool) else value
+             for column, value in row.items()}
+            for row in item["rows"]
+        ]}
+        for key, item in evidence.items()
+    }
+
+
 @app.errorhandler(413)
 def submission_too_large(_):
     return render_template(
