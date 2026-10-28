@@ -122,6 +122,19 @@ def test_guard_accepts_comments_and_harmless_string():
     tools.validate_select("SELECT 'DROP TABLE sales' AS harmless FROM regions")
 
 
+@pytest.mark.parametrize("table", ["sales", "costs", "customers", "discounts", "products", "regions"])
+def test_guard_uses_oracle_table_name_case(table, monkeypatch):
+    for name in (table, table.upper(), table.capitalize(), f'"{table.upper()}"'):
+        tools.validate_select(f"SELECT * FROM {name}")
+
+    def forbidden_connection():
+        pytest.fail("Rejected SQL must never connect")
+    monkeypatch.setattr(tools, "connect", forbidden_connection)
+    for name in (f'"{table}"', f'"{table.capitalize()}"'):
+        with pytest.raises(ValueError, match="Only governed business tables"):
+            tools.run_sql(f"SELECT * FROM sales JOIN {name} ON 1=1")
+
+
 @pytest.fixture
 def sample_evidence():
     return {"E1": {"kind": "sql", "sql": "SELECT ...", "rows": [{"margin": 25.53}]},

@@ -28,7 +28,10 @@ def validate_select(sql):
                          exp.Delete, exp.Create, exp.Drop, exp.Alter, exp.With)):
         raise ValueError("SQL writes, locks and procedural statements are refused")
     for table in tree.find_all(exp.Table):
-        if table.name.lower() not in TABLES or table.db or table.catalog:
+        name = table.name
+        # Unquoted governed names are stored uppercase by Oracle; quotes preserve case.
+        if (name.lower() not in TABLES or table.db or table.catalog
+                or (table.this.args.get("quoted") and name != name.lower().upper())):
             raise ValueError("Only governed business tables are allowed")
     for function in tree.find_all(exp.Func):
         # CASE is represented as a function by the parser, but performs no calls.
