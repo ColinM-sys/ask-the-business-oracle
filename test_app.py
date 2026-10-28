@@ -29,6 +29,12 @@ from critic import critique, supported
 from policies import ensure_policies, hash_embedding
 
 
+def mock_agent_run_sql(monkeypatch, execute):
+    """Keep query stubs independent of the Oracle transaction."""
+    monkeypatch.setattr("agent.read_only_transaction", lambda: nullcontext())
+    monkeypatch.setattr("agent.run_sql", lambda sql, params=None, cursor=None: execute(sql, params))
+
+
 @pytest.mark.parametrize("wallet", [None, "test-wallet"])
 def test_connect_reuses_pool_and_preserves_settings(monkeypatch, wallet):
     monkeypatch.setattr(db, "_pool", None, raising=False)
@@ -77,6 +83,100 @@ def test_pooled_connection_cleans_up_transaction(monkeypatch, fail):
     finally:
         if db._pool is not None:
             db._pool.close(force=True)
+
+
+@pytest.mark.parametrize("update, check, monthly_column, summary_column, old, new", [
+    ("UPDATE sales SET net_revenue=120 WHERE sale_month='2025-07'",
+     "SELECT net_revenue FROM sales WHERE sale_month='2025-07'",
+     "revenue", "after_revenue", 90, 120),
+    ("UPDATE costs SET freight_per_unit=20 WHERE cost_month='2025-07'",
+     "SELECT freight_per_unit FROM costs WHERE cost_month='2025-07'",
+     "freight_per_unit", "after_freight_per_unit", 5, 20),
+])
+def test_monthly_and_summary_share_read_only_snapshot(
+        monkeypatch, update, check, monthly_column, summary_column, old, new):
+    # Simulate Oracle's transaction-level read consistency while running the
+    # actual evidence queries against a private SQLite copy of the source.
+    with sqlite3.connect(":memory:") as source:
+        source.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+            INSERT INTO sales VALUES (1, 1, '2025-06', 90, 1, 100, 10);
+            INSERT INTO sales VALUES (1, 1, '2025-07', 90, 1, 100, 10);
+            INSERT INTO costs VALUES (1, 1, '2025-06', 60, 5);
+            INSERT INTO costs VALUES (1, 1, '2025-07', 60, 5);
+        """)
+        state = {"connections": 0, "transactions": 0, "selects": 0,
+                 "cursors_closed": 0, "closed": 0}
+        policy_cleanup = []
+
+        class Connection:
+            def __init__(self):
+                state["connections"] += 1
+                self.snapshot = None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                if self.snapshot is not None:
+                    self.snapshot.close()
+                state["closed"] += 1
+
+            def cursor(self):
+                return Cursor(self)
+
+        class Cursor:
+            def __init__(self, connection):
+                self.connection = connection
+                self.result = None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                if self.result is not None:
+                    self.result.close()
+                state["cursors_closed"] += 1
+
+            def execute(self, sql, params=None):
+                if sql == "SET TRANSACTION READ ONLY":
+                    assert self.connection.snapshot is None
+                    self.connection.snapshot = sqlite3.connect(":memory:")
+                    source.backup(self.connection.snapshot)
+                    state["transactions"] += 1
+                else:
+                    assert self.connection.snapshot is not None
+                    self.result = self.connection.snapshot.execute(sql, params or {})
+                    self.description = self.result.description
+                    state["selects"] += 1
+                    if state["selects"] == 1:
+                        source.execute(update)
+                        source.commit()
+                return self
+
+            def fetchmany(self, size):
+                return self.result.fetchmany(size)
+
+        def search_policies(_):
+            policy_cleanup.append((state["cursors_closed"], state["closed"]))
+            return {"rows": []}
+
+        monkeypatch.setattr(tools, "connect", Connection)
+        monkeypatch.setattr("agent.search_policies", search_policies)
+        result = answer_question("West since July 2025")
+
+        monthly = next(row for row in result["evidence"]["E1"]["rows"]
+                       if row["sale_month"] == "2025-07")
+        summary = result["evidence"]["E2"]["rows"][0]
+        assert source.execute(check).fetchone()[0] == new
+        assert monthly[monthly_column] == summary[summary_column] == old
+        assert policy_cleanup == [(1, 1)]
+        assert state == {"connections": 1, "transactions": 1, "selects": 2,
+                         "cursors_closed": 1, "closed": 1}
 
 
 def test_readme_install_requirements_are_available():
@@ -1019,7 +1119,7 @@ def test_missing_net_revenue_rejects_analysis(region_id, month, incomplete_when,
                 con.execute(tools.validate_select(sql), params or {})]}
 
         policies = MagicMock(return_value={"rows": []})
-        monkeypatch.setattr("agent.run_sql", execute)
+        mock_agent_run_sql(monkeypatch, execute)
         monkeypatch.setattr("agent.search_policies", policies)
         answer_question("West since July 2025")  # Zero revenue is present, not missing.
         policies.reset_mock()
@@ -1038,7 +1138,7 @@ def test_missing_net_revenue_rejects_analysis(region_id, month, incomplete_when,
                     set_revenue(None)
             return result
 
-        monkeypatch.setattr("agent.run_sql", run_sql)
+        mock_agent_run_sql(monkeypatch, run_sql)
         with pytest.raises(RevenueDataQualityError, match="Missing net revenue"):
             answer_question("West since July 2025")
         policies.assert_not_called()
@@ -1060,7 +1160,7 @@ def test_missing_net_revenue_rejects_analysis(region_id, month, incomplete_when,
 
         # Zero revenue is a real value; its costs still contribute to the margin.
         set_revenue(0)
-        monkeypatch.setattr("agent.run_sql", execute)
+        mock_agent_run_sql(monkeypatch, execute)
         result = answer_question("West since July 2025")
         monthly = next(row for row in result["evidence"]["E1"]["rows"]
                        if row["region_name"] == region and row["sale_month"] == month)
@@ -1098,7 +1198,7 @@ def test_missing_sales_inputs_reject_analysis(column, region_id, month, incomple
                 con.execute(tools.validate_select(sql), params or {})]}
 
         policies = MagicMock(return_value={"rows": []})
-        monkeypatch.setattr("agent.run_sql", execute)
+        mock_agent_run_sql(monkeypatch, execute)
         monkeypatch.setattr("agent.search_policies", policies)
         result = answer_question("West since July 2025")
         region = "West" if region_id == 1 else "East"
@@ -1128,7 +1228,7 @@ def test_missing_sales_inputs_reject_analysis(column, region_id, month, incomple
                     set_input(None)
             return result
 
-        monkeypatch.setattr("agent.run_sql", run_sql)
+        mock_agent_run_sql(monkeypatch, run_sql)
         error = RevenueDataQualityError if column == "net_revenue" else DiscountDataQualityError
         message = "Missing net revenue" if column == "net_revenue" else "Missing discount inputs"
         with pytest.raises(error, match=message):
@@ -1150,7 +1250,7 @@ def test_missing_sales_inputs_reject_analysis(column, region_id, month, incomple
                         assert row[f"{period}_discount_pct"] is None
 
         set_input(None)
-        monkeypatch.setattr("agent.run_sql", execute)
+        mock_agent_run_sql(monkeypatch, execute)
         response = app.test_client().post("/", data={"question": "West since July 2025"})
         assert response.status_code == 503
         message = (b"Correct missing net revenue for sales, then retry." if column == "net_revenue"
@@ -1193,7 +1293,7 @@ def test_missing_monthly_costs_reject_incomplete_analysis(region_id, month, prod
                 con.execute(tools.validate_select(sql), params or {})]}
 
         policies = MagicMock(return_value={"rows": []})
-        monkeypatch.setattr("agent.run_sql", run_sql)
+        mock_agent_run_sql(monkeypatch, run_sql)
         monkeypatch.setattr("agent.search_policies", policies)
         with pytest.raises(DataQualityError, match="Missing monthly costs"):
             answer_question("West since July 2025")
@@ -1246,7 +1346,7 @@ def test_monthly_evidence_rejects_null_costs_repaired_before_summary(
             return {"sql": sql, "params": params or {}, "rows": rows}
 
         policies = MagicMock(return_value={"rows": []})
-        monkeypatch.setattr("agent.run_sql", run_sql)
+        mock_agent_run_sql(monkeypatch, run_sql)
         monkeypatch.setattr("agent.search_policies", policies)
         with pytest.raises(DataQualityError, match="Missing monthly costs"):
             answer_question("West since July 2025")
@@ -1283,7 +1383,7 @@ def test_duplicate_monthly_costs_reject_analysis(region_id, unit_cogs, duplicate
                 con.execute(tools.validate_select(sql), params or {})]}
 
         policies = MagicMock(return_value={"rows": []})
-        monkeypatch.setattr("agent.run_sql", execute)
+        mock_agent_run_sql(monkeypatch, execute)
         monkeypatch.setattr("agent.search_policies", policies)
         result = answer_question("West since July 2025")
         june = next(row for row in result["evidence"]["E1"]["rows"]
@@ -1309,13 +1409,13 @@ def test_duplicate_monthly_costs_reject_analysis(region_id, unit_cogs, duplicate
                 insert_duplicate()
             return rows
 
-        monkeypatch.setattr("agent.run_sql", run_sql)
+        mock_agent_run_sql(monkeypatch, run_sql)
         with pytest.raises(DataQualityError, match="duplicate"):
             answer_question("West since July 2025")
         policies.assert_not_called()
         if duplicate_when == "monthly":
             insert_duplicate()
-        monkeypatch.setattr("agent.run_sql", execute)
+        mock_agent_run_sql(monkeypatch, execute)
         response = app.test_client().post("/", data={"question": "West since July 2025"})
         assert response.status_code == 503
         assert b"Correct missing, incomplete, or duplicate monthly cost records, then retry." in response.data
@@ -1323,7 +1423,7 @@ def test_duplicate_monthly_costs_reject_analysis(region_id, unit_cogs, duplicate
 
 @pytest.mark.parametrize("rows", [[], [{"region_name": "East"}]])
 def test_missing_region_has_descriptive_validation_error(monkeypatch, rows):
-    monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
+    mock_agent_run_sql(monkeypatch, lambda sql, params=None: {
         "sql": sql, "params": params or {}, "rows": rows})
     with pytest.raises(ValueError, match="No sales/cost data found for West"):
         answer_question("Why did West margin fall since July 2025?")
@@ -1355,7 +1455,7 @@ def test_cutoff_error_shows_selected_region_coverage(monkeypatch, cutoff, valid)
                 con.execute(tools.validate_select(sql), params or {})]}
 
         policies = MagicMock(return_value={"rows": []})
-        monkeypatch.setattr("agent.run_sql", run_sql)
+        mock_agent_run_sql(monkeypatch, run_sql)
         monkeypatch.setattr("agent.search_policies", policies)
         response = app.test_client().post("/", data={"question": f"West since {cutoff}"})
 
@@ -1391,7 +1491,7 @@ def test_margin_direction_uses_unrounded_sql(before, after, direction, below_pre
         tools.validate_select(sql)
         rows = [dict(row) for row in con.execute(sql, {"cutoff": "2025-07"})]
 
-    monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
+    mock_agent_run_sql(monkeypatch, lambda sql, params=None: {
         "sql": sql, "params": params or {}, "rows": rows})
     result = answer_question("West since July 2025")
     finding = next(c for c in result["claims"] if c["kind"] == "finding")
@@ -1436,7 +1536,7 @@ def test_comparison_keeps_available_margin_when_other_period_is_empty(available_
             return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
                 con.execute(tools.validate_select(sql), params or {})]}
 
-        monkeypatch.setattr("agent.run_sql", run_sql)
+        mock_agent_run_sql(monkeypatch, run_sql)
         monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
         result = answer_question("West since July 2025")
 
@@ -1466,7 +1566,7 @@ def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
         "freight_increase_pct": None,
         "missing_cost_count": 0, "missing_discount_count": 0, "missing_revenue_count": 0,
     }
-    monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
+    mock_agent_run_sql(monkeypatch, lambda sql, params=None: {
         "sql": sql, "params": params or {}, "rows": [row]})
     monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
 
@@ -1509,7 +1609,7 @@ def test_zero_revenue_preserves_available_metrics(zero_period, monkeypatch):
             return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
                 con.execute(tools.validate_select(sql), params or {})]}
 
-        monkeypatch.setattr("agent.run_sql", run_sql)
+        mock_agent_run_sql(monkeypatch, run_sql)
         policies = [{"id": i, "doc": path.name, "chunk": path.read_text(encoding="utf-8").strip()}
                     for i, path in enumerate(sorted(Path(__file__).with_name("docs").glob("*.md")), 1)]
         monkeypatch.setattr("agent.search_policies", lambda _: {
@@ -1593,7 +1693,7 @@ def test_missing_revenue_is_not_reported_as_zero(missing_period, monkeypatch):
             return result
 
         policies = MagicMock(return_value={"rows": []})
-        monkeypatch.setattr("agent.run_sql", run_sql)
+        mock_agent_run_sql(monkeypatch, run_sql)
         monkeypatch.setattr("agent.search_policies", policies)
         with pytest.raises(RevenueDataQualityError, match="Missing net revenue"):
             answer_question("West since July 2025")
@@ -1650,7 +1750,7 @@ def test_undefined_metric_preserves_other_metric(unavailable_metric, unavailable
             return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
                 con.execute(tools.validate_select(sql), params or {})]}
 
-        monkeypatch.setattr("agent.run_sql", run_sql)
+        mock_agent_run_sql(monkeypatch, run_sql)
         monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
         result = answer_question("West since July 2025")
 
@@ -1705,7 +1805,7 @@ def test_undefined_metric_does_not_hide_other_movement(missing_metric, missing_p
             return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
                 con.execute(tools.validate_select(sql), params or {})]}
 
-        monkeypatch.setattr("agent.run_sql", run_sql)
+        mock_agent_run_sql(monkeypatch, run_sql)
         monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
         result = answer_question("West since July 2025")
 
@@ -1749,7 +1849,7 @@ def policy_rows(monkeypatch):
     }
     policies = [{"id": i, "doc": path.name, "chunk": path.read_text(encoding="utf-8").strip()}
                 for i, path in enumerate(sorted(Path(__file__).with_name("docs").glob("*.md")), 1)]
-    monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
+    mock_agent_run_sql(monkeypatch, lambda sql, params=None: {
         "sql": sql, "params": params or {}, "rows": [row]})
     monkeypatch.setattr("agent.search_policies", lambda _: {
         "sql": "SELECT policy evidence", "params": {}, "rows": policies})
@@ -1854,7 +1954,7 @@ def test_question_defaults_only_without_date():
 def test_unsupported_region_is_rejected_before_querying(monkeypatch, region):
     def forbidden_query(*args, **kwargs):
         pytest.fail("Unsupported regions must be rejected before querying")
-    monkeypatch.setattr("agent.run_sql", forbidden_query)
+    mock_agent_run_sql(monkeypatch, forbidden_query)
     with pytest.raises(ValueError, match="Unsupported region"):
         answer_question(f"Why did {region} margin fall since July 2025?")
     assert parse_question("Why did margin fall since July 2025?") == ("West", "2025-07")
@@ -1876,7 +1976,7 @@ def retrieved_policy_rows(monkeypatch):
         "freight_increase_pct": 60,
         "missing_cost_count": 0, "missing_discount_count": 0, "missing_revenue_count": 0,
     }
-    monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
+    mock_agent_run_sql(monkeypatch, lambda sql, params=None: {
         "sql": sql, "params": params or {}, "rows": [summary]})
     rows = [{"id": index, "doc": path.name, "chunk": path.read_text(encoding="utf-8")}
             for index, path in enumerate(sorted(Path(__file__).with_name("docs").glob("*.md")), 1)]
@@ -2290,7 +2390,7 @@ def test_ui_missing_question_rejected_before_querying(monkeypatch, data):
     def forbidden_query(*args, **kwargs):
         pytest.fail("Missing questions must be rejected before querying")
 
-    monkeypatch.setattr("agent.run_sql", forbidden_query)
+    mock_agent_run_sql(monkeypatch, forbidden_query)
     response = app.test_client().post("/", data=data)
     assert response.status_code == 400
 
@@ -2812,7 +2912,7 @@ def test_ui_reports_data_quality_errors(column, message, incomplete_when, monkey
         return {"sql": sql, "params": params or {}, "rows": [row]}
 
     policies = MagicMock()
-    monkeypatch.setattr("agent.run_sql", run_sql)
+    mock_agent_run_sql(monkeypatch, run_sql)
     monkeypatch.setattr("agent.search_policies", policies)
 
     response = app.test_client().post("/", data={"question": "West"})
@@ -2867,7 +2967,7 @@ def test_ui_logs_oracle_code_and_owned_failure_location(monkeypatch, caplog):
     def fail(*args, **kwargs):
         raise oracledb.DatabaseError(SimpleNamespace(code=3113, message="secret-driver-settings"))
 
-    monkeypatch.setattr("agent.run_sql", fail)
+    mock_agent_run_sql(monkeypatch, fail)
     with caplog.at_level("ERROR", logger=app.logger.name):
         response = app.test_client().post("/", data={"question": "West"})
 
@@ -2900,7 +3000,7 @@ def test_ui_sanitizes_invalid_policy_encoding(tmp_path, monkeypatch):
            "missing_revenue_count": 0,
            "before_last_month": "2025-06", "after_first_month": "2025-07",
            "before_margin_pct": 40, "after_margin_pct": 25}
-    monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
+    mock_agent_run_sql(monkeypatch, lambda sql, params=None: {
         "sql": sql, "params": params or {}, "rows": [row]})
 
     response = app.test_client().post("/", data={"question": "West since July 2025"})
@@ -2953,7 +3053,7 @@ def test_ui_sanitizes_downstream_value_error(monkeypatch):
     def failure(*args, **kwargs):
         raise ValueError("private-internal-details")
 
-    monkeypatch.setattr("agent.run_sql", failure)
+    mock_agent_run_sql(monkeypatch, failure)
     response = app.test_client().post("/", data={"question": "West"})
 
     assert response.status_code == 503

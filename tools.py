@@ -1,5 +1,6 @@
 """Constrained, read-only business SQL and Oracle vector policy retrieval."""
 import json
+from contextlib import contextmanager, nullcontext
 from decimal import Decimal
 
 import oracledb
@@ -51,19 +52,24 @@ def validate_select(sql):
     return tree.sql(dialect="oracle", comments=False)
 
 
-def run_sql(select, params=None):
+@contextmanager
+def read_only_transaction():
+    with connect() as con, con.cursor() as cur:
+        cur.execute("SET TRANSACTION READ ONLY")
+        yield cur
+
+
+def run_sql(select, params=None, *, cursor=None):
     executable = validate_select(select)
-    with connect() as con:
-        with con.cursor() as cur:
-            cur.execute("SET TRANSACTION READ ONLY")
-            cur.outputtypehandler = _number_to_decimal
-            cur.execute(executable, params or {})
-            columns = [d[0].lower() for d in cur.description]
-            rows = cur.fetchmany(1001)
-            if len(rows) > 1000:
-                raise ValueError("Evidence exceeds the row limit; aggregate the query")
-            return {"sql": select, "params": params or {},
-                    "rows": [dict(zip(columns, row)) for row in rows]}
+    with read_only_transaction() if cursor is None else nullcontext(cursor) as cur:
+        cur.outputtypehandler = _number_to_decimal
+        cur.execute(executable, params or {})
+        columns = [d[0].lower() for d in cur.description]
+        rows = cur.fetchmany(1001)
+        if len(rows) > 1000:
+            raise ValueError("Evidence exceeds the row limit; aggregate the query")
+        return {"sql": select, "params": params or {},
+                "rows": [dict(zip(columns, row)) for row in rows]}
 
 
 def search_policies(text, k=5):
