@@ -1096,6 +1096,78 @@ def test_question_scope():
         parse_question("West and East")
 
 
+@pytest.mark.parametrize("question, bounds, months, revenues", [
+    ("West since July 2025 from April 2025 through September 2025",
+     {"start_month": "2025-04", "end_month": "2025-09"},
+     ["2025-04", "2025-06", "2025-07", "2025-09"], (200, 200)),
+    ("West from 2025-04 to 2025-09 with cutoff 2025-07",
+     {"start_month": "2025-04", "end_month": "2025-09"},
+     ["2025-04", "2025-06", "2025-07", "2025-09"], (200, 200)),
+    ("West from April 2025 through September 2025",
+     {"start_month": "2025-04", "end_month": "2025-09"},
+     ["2025-04", "2025-06", "2025-07", "2025-09"], (200, 200)),
+    ("West since July 2025 from April 2025", {"start_month": "2025-04"},
+     ["2025-04", "2025-06", "2025-07", "2025-09", "2025-10"], (200, 300)),
+    ("West since July 2025 through September 2025", {"end_month": "2025-09"},
+     ["2025-03", "2025-04", "2025-06", "2025-07", "2025-09"], (300, 200)),
+    ("West since July 2025 through July 2025", {"end_month": "2025-07"},
+     ["2025-03", "2025-04", "2025-06", "2025-07"], (300, 100)),
+])
+def test_bounded_comparison_filters_both_evidence_queries(question, bounds, months, revenues, monkeypatch):
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue, quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+        """)
+        for month, cost in (("2025-03", 10), ("2025-04", 60), ("2025-06", 60),
+                            ("2025-07", 80), ("2025-09", 80), ("2025-10", 90)):
+            con.execute("INSERT INTO sales VALUES (1, 1, ?, 100.0, 1, 100.0, 0)", (month,))
+            con.execute("INSERT INTO costs VALUES (1, 1, ?, ?, 0)", (month, cost))
+        if len(bounds) == 2:
+            # Incomplete sales outside the requested period must not poison it.
+            con.execute("UPDATE sales SET net_revenue = NULL WHERE sale_month = '2025-03'")
+            con.execute("DELETE FROM costs WHERE cost_month = '2025-10'")
+
+        def run_sql(sql, params=None):
+            return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
+                con.execute(tools.validate_select(sql), params or {})]}
+
+        monkeypatch.setattr("agent.run_sql", run_sql)
+        monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
+        result = answer_question(question)
+        for evidence in result["evidence"].values():
+            assert run_sql(evidence["sql"], evidence["params"])["rows"] == evidence["rows"]
+
+    monthly, summary = result["evidence"]["E1"], result["evidence"]["E2"]
+    assert monthly["params"] == bounds
+    assert summary["params"] == {"cutoff": "2025-07", **bounds}
+    assert [row["sale_month"] for row in monthly["rows"]] == months
+    row = summary["rows"][0]
+    assert (row["before_revenue"], row["after_revenue"]) == revenues
+    assert (row["first_month"], row["before_last_month"], row["after_first_month"], row["last_month"]) == (
+        months[0], "2025-06", "2025-07", months[-1])
+    if len(bounds) == 2:
+        assert (row["before_margin_pct"], row["after_margin_pct"]) == (40, 20)
+
+
+@pytest.mark.parametrize("question", [
+    "West since July 2025 from July 2025",
+    "West since July 2025 from August 2025",
+    "West since July 2025 through June 2025",
+    "West since July 2025 from April 2025 through March 2025",
+    "West since July 2025 from April 2025 from May 2025",
+    "West since July 2025 and September 2025",
+    "West since July 2025 through 2025-13",
+])
+def test_invalid_comparison_bounds_are_rejected_before_queries(question, monkeypatch):
+    monkeypatch.setattr("agent.run_sql", lambda *args, **kwargs: pytest.fail("Unexpected query"))
+    with pytest.raises(ValueError):
+        answer_question(question)
+
+
 @pytest.mark.parametrize("name, expected", [
     ("Eastern", "East"), ("eAsTeRn", "East"),
     ("Western", "West"), ("Southern", "South"), ("Central", "Central"),
