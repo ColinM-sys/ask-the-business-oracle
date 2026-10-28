@@ -126,7 +126,7 @@
     </div>
     {% endif %}
     <details><summary>Explore all evidence</summary>
-      <p>{% for id in result.evidence %}<button type="button" class="citation" data-evidence="{{ id }}"{% if result.evidence[id].kind == 'policy' %} aria-label="{{ id }}: {{ result.evidence[id].rows[0].doc }}"{% endif %}>{{ id }}</button>{% endfor %}</p>
+      <p>{% for id in result.evidence %}<button type="button" class="citation" data-evidence="{{ id }}"{% if result.evidence[id].kind == 'policy' %} aria-label="{{ id }}: {{ result.evidence[id].rows[0].doc }}"{% elif id == 'E1' %} aria-label="{{ id }}: Monthly regional metrics"{% elif id == 'E2' %} aria-label="{{ id }}: Before and after comparison"{% endif %}>{{ id }}</button>{% endfor %}</p>
     </details>
   </article>
   <dialog id="evidence-dialog" aria-labelledby="evidence-title" aria-describedby="evidence-description">

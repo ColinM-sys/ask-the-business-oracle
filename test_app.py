@@ -3029,6 +3029,35 @@ def test_evidence_dialog_focuses_cited_cell(monkeypatch):
     assert check.returncode == 0, check.stderr
 
 
+def test_sql_evidence_buttons_have_descriptive_accessible_names(monkeypatch):
+    result = {
+        "region": "West", "claims": [], "evidence": {
+            id: {"kind": "sql", "sql": "SELECT ...", "params": {}, "rows": []}
+            for id in ("E1", "E2")
+        },
+    }
+    monkeypatch.setattr("app.answer_question", lambda _: result)
+
+    class CitationParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.buttons = {}
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == "button" and attrs.get("class") == "citation":
+                self.buttons[attrs["data-evidence"]] = attrs.get("aria-label")
+
+    response = app.test_client().post("/", data={"question": "West"})
+    assert response.status_code == 200
+    parser = CitationParser()
+    parser.feed(response.get_data(as_text=True))
+    assert parser.buttons == {
+        "E1": "E1: Monthly regional metrics",
+        "E2": "E2: Before and after comparison",
+    }
+
+
 def test_policy_citations_have_descriptive_accessible_names(monkeypatch):
     documents = {"P1": "west_q3_volume_push.md", "P2": 'Freight & "carrier" memo.md'}
     result = {
