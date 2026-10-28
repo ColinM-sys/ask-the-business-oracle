@@ -106,7 +106,8 @@ def summary_sql():
         f"{MISSING_DISCOUNT_COUNT} AS missing_discount_count",
         f"CASE WHEN ({raw['before']['margin_pct']}) > ({raw['after']['margin_pct']}) THEN 'fell' WHEN ({raw['before']['margin_pct']}) < ({raw['after']['margin_pct']}) THEN 'rose' ELSE 'was unchanged' END AS margin_direction",
         f"ROUND(({raw['before']['margin_pct']})-({raw['after']['margin_pct']}),2) AS margin_drop_pts",
-        f"ROUND(100*(({raw['after']['freight_per_unit']})/NULLIF(({raw['before']['freight_per_unit']}),0)-1),2) AS freight_increase_pct",
+        f"CASE WHEN ({raw['before']['freight_per_unit']}) > 0 THEN "
+        f"ROUND(100*(({raw['after']['freight_per_unit']})/NULLIF(({raw['before']['freight_per_unit']}),0)-1),2) END AS freight_increase_pct",
         "MIN(s.sale_month) AS first_month", "MAX(s.sale_month) AS last_month",
         "MIN(CASE WHEN s.sale_month >= :cutoff THEN s.sale_month END) AS after_first_month",
         "MAX(CASE WHEN s.sale_month < :cutoff THEN s.sale_month END) AS before_last_month",
