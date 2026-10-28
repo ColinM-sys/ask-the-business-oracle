@@ -1,5 +1,6 @@
 """Unit checks and live integration against the existing local Oracle tables."""
 import copy
+import hashlib
 import json
 import re
 import runpy
@@ -318,6 +319,53 @@ def test_policy_chunks_fit_byte_limit(character, tmp_path, monkeypatch):
     assert chunks
     assert all(chunk and len(chunk.encode("utf-8")) <= 4000 for chunk in chunks)
     assert "".join(chunks).replace("\n", "") == content.replace("\n", "")
+    connection.commit.assert_called_once()
+
+
+@pytest.mark.parametrize("paragraph", [
+    "x" * 994 + " discount tail",
+    "x" * 999 + " discount tail",
+], ids=["split-word", "boundary-space"])
+@pytest.mark.parametrize("header", ["", "h" * 900], ids=["no-header", "flush-header"])
+def test_policy_chunk_slices_preserve_source_text(paragraph, header, tmp_path, monkeypatch):
+    content = (header + "\n\n" if header else "") + paragraph + "\n\n  Second paragraph."
+    (tmp_path / "policy.md").write_text(content, encoding="utf-8")
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
+    cursor.execute.return_value.fetchall.return_value = []
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+
+    ensure_policies()
+
+    chunks = [call.kwargs["chunk"] for call in cursor.execute.call_args_list
+              if call.args[0].lstrip().startswith("INSERT INTO policy_chunks")]
+    assert chunks == ([header] if header else []) + [paragraph + "\n\n  Second paragraph."]
+
+
+def test_policy_chunking_change_refreshes_cached_rows(tmp_path, monkeypatch):
+    content = "x" * 994 + " discount tail"
+    (tmp_path / "policy.md").write_text(content, encoding="utf-8")
+    old_fingerprint = hashlib.sha256(repr([("policy.md", content)]).encode()).hexdigest()
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
+    cursor.execute.return_value.fetchall.side_effect = [[], [("hash-v1-512", old_fingerprint)]]
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+
+    ensure_policies()
+
+    inserted = [call.kwargs for call in cursor.execute.call_args_list
+                if call.args[0].lstrip().startswith("INSERT INTO policy_chunks")]
+    assert [row["chunk"] for row in inserted] == [content]
+    assert inserted[0]["fingerprint"] != old_fingerprint
+    cursor.execute.return_value.fetchall.side_effect = [
+        [], [("hash-v1-512", inserted[0]["fingerprint"])]]
+    ensure_policies()
     connection.commit.assert_called_once()
 
 
