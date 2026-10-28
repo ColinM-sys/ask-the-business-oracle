@@ -40,16 +40,23 @@ def embed(cursor, text, backend):
 def ensure_policies():
     """Refresh only on source/model changes; never modify the business tables."""
     with _lock:
-        sources = [(p.name, p.read_text(encoding="utf-8")) for p in sorted(DOCS.glob("*.md"))]
-        if not sources:
-            raise RuntimeError("No policy documents found")
-        fingerprint = hashlib.sha256(repr(sources).encode()).hexdigest()
         with connect() as con:
             cur = con.cursor()
             if not cur.execute("SELECT table_name FROM user_tables WHERE table_name='POLICY_CHUNKS'").fetchone():
-                cur.execute("""CREATE TABLE policy_chunks (
-                    id NUMBER PRIMARY KEY, doc VARCHAR2(255), chunk VARCHAR2(4000),
-                    embedding VECTOR(*, FLOAT32), backend VARCHAR2(128), source_hash VARCHAR2(64))""")
+                try:
+                    cur.execute("""CREATE TABLE policy_chunks (
+                        id NUMBER PRIMARY KEY, doc VARCHAR2(255), chunk VARCHAR2(4000),
+                        embedding VECTOR(*, FLOAT32), backend VARCHAR2(128), source_hash VARCHAR2(64))""")
+                except oracledb.DatabaseError as exc:
+                    # Another process may have created the table after our check.
+                    if not exc.args or getattr(exc.args[0], "code", None) != 955:
+                        raise
+            # DDL commits implicitly, so acquire the transaction lock only after setup.
+            cur.execute("LOCK TABLE policy_chunks IN EXCLUSIVE MODE")
+            sources = [(p.name, p.read_text(encoding="utf-8")) for p in sorted(DOCS.glob("*.md"))]
+            if not sources:
+                raise RuntimeError("No policy documents found")
+            fingerprint = hashlib.sha256(repr(sources).encode()).hexdigest()
             backend = "hash-v1-512"
             for (model,) in cur.execute(
                 "SELECT model_name FROM user_mining_models WHERE mining_function='EMBEDDING' ORDER BY model_name"
