@@ -33,7 +33,7 @@ python policies.py
 python app.py
 ```
 
-Open http://127.0.0.1:5055 and ask “Why did West margin fall since July 2025?”.
+Open http://127.0.0.1:5055, select West, and ask “Why did margin fall since July 2025?”.
 `.env` is read by `db.py`; do not commit credentials. `policies.py` creates only
 `policy_chunks`, probes registered Oracle embedding models, and otherwise uses
 deterministic normalized hashing vectors. Source changes trigger a transactional
@@ -46,9 +46,9 @@ and retrieval. Queries use Oracle `VECTOR_DISTANCE` with cosine distance; the lo
 hashing fallback is lexical retrieval rather than a semantic language model.
 
 The app runs fixed analysis for margin, discount and freight, regardless of
-question wording. It recognizes West, Central, East or South and a full month
-name plus year or `YYYY-MM`. Both formats require a year from 2000 through 2099.
-Defaults are West and July 2025. It compares all available sales before the
+question wording. Select a region from the Oracle regions table and specify a full
+month name plus year or `YYYY-MM`. Both formats require a year from 2000 through
+2099. The default is July 2025. It compares all available sales before the
 selected month with all available sales from that month onward, including later
 years. It displays those boundaries explicitly.
 Margin includes COGS and freight and is weighted by net revenue; discounts use

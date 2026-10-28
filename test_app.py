@@ -1053,9 +1053,10 @@ def test_policy_lock_timeout_returns_temporary_failure_and_allows_retry(code, tm
     cursor.execute.side_effect = execute
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
-    monkeypatch.setattr("app.answer_question", lambda _: tools.search_policies("Policy"))
+    monkeypatch.setattr("app.list_regions", lambda: ["West", "East"])
+    monkeypatch.setattr("app.answer_question", lambda *_: tools.search_policies("Policy"))
 
-    response = app.test_client().post("/", data={"question": "West"})
+    response = app.test_client().post("/", data={"question": "West", "region": "West"})
 
     assert response.status_code == 503
     assert b"retry" in response.data
@@ -1090,28 +1091,104 @@ def test_policy_search_handles_empty_table(monkeypatch):
 
 
 def test_question_scope():
-    assert parse_question("East since March 2025") == ("East", "2025-03")
-    assert parse_question("West since 2025-07") == ("West", "2025-07")
-    with pytest.raises(ValueError):
-        parse_question("West and East")
+    assert parse_question("since March 2025") == "2025-03"
+    assert parse_question("since 2025-07") == "2025-07"
 
 
-@pytest.mark.parametrize("name, expected", [
-    ("Eastern", "East"), ("eAsTeRn", "East"),
-    ("Western", "West"), ("Southern", "South"), ("Central", "Central"),
-])
-def test_question_recognizes_region_adjectives(name, expected):
-    assert parse_question(f"Why did the {name} region's margin fall since July 2025?") == (expected, "2025-07")
+def test_region_selector_uses_database_and_validates_submission(monkeypatch):
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West'), (2, 'North');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+        """)
+        for region_id in (1, 2):
+            for month, revenue, freight in (("2025-06", 100, 5), ("2025-07", 90, 8)):
+                con.execute("INSERT INTO sales VALUES (?, 1, ?, ?, 1, 100, ?)",
+                            (region_id, month, revenue, 100 - revenue))
+                con.execute("INSERT INTO costs VALUES (?, 1, ?, 60, ?)",
+                            (region_id, month, freight))
+
+        queries = []
+        def execute(sql, params=None):
+            queries.append(sql)
+            return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
+                    con.execute(tools.validate_select(sql), params or {})]}
+
+        policies = MagicMock(return_value={"rows": []})
+        monkeypatch.setattr("agent.run_sql", execute)
+        monkeypatch.setattr("agent.search_policies", policies)
+
+        class RegionSelector(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.select = None
+                self.options = []
+                self.inside = False
+                self.option = None
+                self.option_text = ""
+
+            def handle_starttag(self, tag, attrs):
+                attrs = dict(attrs)
+                if tag == "select" and attrs.get("name") == "region":
+                    self.select = attrs
+                    self.inside = True
+                elif tag == "option" and self.inside:
+                    self.option = attrs
+                    self.option_text = ""
+
+            def handle_data(self, data):
+                if self.option is not None:
+                    self.option_text += data
+
+            def handle_endtag(self, tag):
+                if tag == "option" and self.option is not None:
+                    self.options.append(self.option.get("value", self.option_text))
+                    self.option = None
+                elif tag == "select" and self.inside:
+                    self.inside = False
+
+        client = app.test_client()
+        selector = RegionSelector()
+        selector.feed(client.get("/").get_data(as_text=True))
+        assert selector.select is not None and "required" in selector.select
+        assert {"West", "North"} <= set(selector.options)
+        assert "Pacific" not in selector.options
+
+        question = "Why did margin fall since July 2025?"
+        response = client.post("/", data={"question": question, "region": "North"})
+        assert response.status_code == 200
+        assert b"North gross margin fell from" in response.data
+        assert policies.call_count == 1
+
+        for region in ("Pacific", ""):
+            queries.clear()
+            response = client.post("/", data={"question": question, "region": region})
+            assert response.status_code == 400
+            assert not any(re.search(r"\b(?:sales|costs)\b", sql, re.I) for sql in queries)
+            assert policies.call_count == 1
+
+        # A region removed after rendering is still rejected by the analysis.
+        monkeypatch.setattr("app.list_regions", lambda: ["North"])
+        con.execute("DELETE FROM regions WHERE region_name = 'North'")
+        queries.clear()
+        response = client.post("/", data={"question": question, "region": "North"})
+        selector = RegionSelector()
+        selector.feed(response.get_data(as_text=True))
+        assert response.status_code == 400
+        assert selector.select.get("aria-invalid") == "true"
+        assert not any(re.search(r"\b(?:sales|costs)\b", sql, re.I) for sql in queries)
+        assert policies.call_count == 1
 
 
-def test_question_counts_region_adjectives_as_the_same_region():
-    assert parse_question("East and Eastern since July 2025") == ("East", "2025-07")
+@pytest.mark.parametrize("name", ["Eastern", "North", "Pacific", "West and East"])
+def test_question_date_parsing_does_not_select_region(name):
+    assert parse_question(f"Why did {name} margin fall since July 2025?") == "2025-07"
 
 
-@pytest.mark.parametrize("regions", ["West and Eastern", "Western and East", "Southern and East"])
-def test_question_rejects_multiple_regions_with_adjectives(regions):
-    with pytest.raises(ValueError, match="one region"):
-        parse_question(f"{regions} since July 2025")
 @pytest.mark.parametrize("region_id", [1, 2])
 @pytest.mark.parametrize("month", ["2025-06", "2025-07"])
 @pytest.mark.parametrize("incomplete_when", ["both", "monthly", "summary"])
@@ -1144,7 +1221,7 @@ def test_missing_net_revenue_rejects_analysis(region_id, month, incomplete_when,
         policies = MagicMock(return_value={"rows": []})
         monkeypatch.setattr("agent.run_sql", execute)
         monkeypatch.setattr("agent.search_policies", policies)
-        answer_question("West since July 2025")  # Zero revenue is present, not missing.
+        answer_question("West since July 2025", "West")  # Zero revenue is present, not missing.
         policies.reset_mock()
 
         if incomplete_when != "summary":
@@ -1153,6 +1230,8 @@ def test_missing_net_revenue_rejects_analysis(region_id, month, incomplete_when,
 
         def run_sql(sql, params=None):
             result = execute(sql, params)
+            if "FROM regions" in sql:
+                return result
             snapshots.append(result)
             if len(snapshots) == 1:
                 if incomplete_when == "monthly":
@@ -1163,7 +1242,7 @@ def test_missing_net_revenue_rejects_analysis(region_id, month, incomplete_when,
 
         monkeypatch.setattr("agent.run_sql", run_sql)
         with pytest.raises(RevenueDataQualityError, match="Missing net revenue"):
-            answer_question("West since July 2025")
+            answer_question("West since July 2025", "West")
         policies.assert_not_called()
         region = "West" if region_id == 1 else "East"
         for index, snapshot in enumerate(snapshots):
@@ -1184,7 +1263,7 @@ def test_missing_net_revenue_rejects_analysis(region_id, month, incomplete_when,
         # Zero revenue is a real value; its costs still contribute to the margin.
         set_revenue(0)
         monkeypatch.setattr("agent.run_sql", execute)
-        result = answer_question("West since July 2025")
+        result = answer_question("West since July 2025", "West")
         monthly = next(row for row in result["evidence"]["E1"]["rows"]
                        if row["region_name"] == region and row["sale_month"] == month)
         assert (monthly["revenue"], monthly["units"], monthly["margin_pct"]) == (90, 2, -44.44)
@@ -1223,7 +1302,7 @@ def test_missing_sales_inputs_reject_analysis(column, region_id, month, incomple
         policies = MagicMock(return_value={"rows": []})
         monkeypatch.setattr("agent.run_sql", execute)
         monkeypatch.setattr("agent.search_policies", policies)
-        result = answer_question("West since July 2025")
+        result = answer_question("West since July 2025", "West")
         region = "West" if region_id == 1 else "East"
         monthly = next(row for row in result["evidence"]["E1"]["rows"]
                        if row["region_name"] == region and row["sale_month"] == month)
@@ -1243,6 +1322,8 @@ def test_missing_sales_inputs_reject_analysis(column, region_id, month, incomple
 
         def run_sql(sql, params=None):
             result = execute(sql, params)
+            if "FROM regions" in sql:
+                return result
             snapshots.append(result)
             if len(snapshots) == 1:
                 if incomplete_when == "monthly":
@@ -1255,7 +1336,7 @@ def test_missing_sales_inputs_reject_analysis(column, region_id, month, incomple
         error = RevenueDataQualityError if column == "net_revenue" else DiscountDataQualityError
         message = "Missing net revenue" if column == "net_revenue" else "Missing discount inputs"
         with pytest.raises(error, match=message):
-            answer_question("West since July 2025")
+            answer_question("West since July 2025", "West")
         policies.assert_not_called()
         assert len(snapshots) == 2
         for index, snapshot in enumerate(snapshots):
@@ -1274,7 +1355,7 @@ def test_missing_sales_inputs_reject_analysis(column, region_id, month, incomple
 
         set_input(None)
         monkeypatch.setattr("agent.run_sql", execute)
-        response = app.test_client().post("/", data={"question": "West since July 2025"})
+        response = app.test_client().post("/", data={"question": "West since July 2025", "region": "West"})
         assert response.status_code == 503
         message = (b"Correct missing net revenue for sales, then retry." if column == "net_revenue"
                    else b"Correct missing discount, quantity, or unit price inputs, then retry.")
@@ -1319,9 +1400,9 @@ def test_missing_monthly_costs_reject_incomplete_analysis(region_id, month, prod
         monkeypatch.setattr("agent.run_sql", run_sql)
         monkeypatch.setattr("agent.search_policies", policies)
         with pytest.raises(DataQualityError, match="Missing monthly costs"):
-            answer_question("West since July 2025")
+            answer_question("West since July 2025", "West")
         policies.assert_not_called()
-        response = app.test_client().post("/", data={"question": "West since July 2025"})
+        response = app.test_client().post("/", data={"question": "West since July 2025", "region": "West"})
         assert response.status_code == 503
         assert b"Missing monthly costs or duplicate cost rows" in response.data
         assert b"Correct missing, incomplete, or duplicate monthly cost records, then retry." in response.data
@@ -1333,7 +1414,7 @@ def test_missing_monthly_costs_reject_incomplete_analysis(region_id, month, prod
             con.execute("UPDATE costs SET unit_cogs=0, freight_per_unit=0 "
                         "WHERE region_id=? AND product_id=? AND cost_month=?",
                         (region_id, product_id, month))
-        assert answer_question("West since July 2025")["dropped_count"] == 0
+        assert answer_question("West since July 2025", "West")["dropped_count"] == 0
 
 
 @pytest.mark.parametrize("unit_cogs,freight_per_unit", [
@@ -1362,17 +1443,18 @@ def test_monthly_evidence_rejects_null_costs_repaired_before_summary(
         def run_sql(sql, params=None):
             nonlocal calls
             rows = [dict(row) for row in con.execute(tools.validate_select(sql), params or {})]
-            calls += 1
-            if calls == 1:
-                con.execute("UPDATE costs SET unit_cogs=60.0, freight_per_unit=5.0 "
-                            "WHERE cost_month='2025-06'")
+            if "FROM regions" not in sql:
+                calls += 1
+                if calls == 1:
+                    con.execute("UPDATE costs SET unit_cogs=60.0, freight_per_unit=5.0 "
+                                "WHERE cost_month='2025-06'")
             return {"sql": sql, "params": params or {}, "rows": rows}
 
         policies = MagicMock(return_value={"rows": []})
         monkeypatch.setattr("agent.run_sql", run_sql)
         monkeypatch.setattr("agent.search_policies", policies)
         with pytest.raises(DataQualityError, match="Missing monthly costs"):
-            answer_question("West since July 2025")
+            answer_question("West since July 2025", "West")
         assert calls == 2
         policies.assert_not_called()
 
@@ -1408,7 +1490,7 @@ def test_duplicate_monthly_costs_reject_analysis(region_id, unit_cogs, duplicate
         policies = MagicMock(return_value={"rows": []})
         monkeypatch.setattr("agent.run_sql", execute)
         monkeypatch.setattr("agent.search_policies", policies)
-        result = answer_question("West since July 2025")
+        result = answer_question("West since July 2025", "West")
         june = next(row for row in result["evidence"]["E1"]["rows"]
                     if row["region_name"] == "West" and row["sale_month"] == "2025-06")
         assert (june["revenue"], june["units"], june["margin_pct"]) == (200, 2, 35)
@@ -1425,21 +1507,22 @@ def test_duplicate_monthly_costs_reject_analysis(region_id, unit_cogs, duplicate
         def run_sql(sql, params=None):
             nonlocal calls
             rows = execute(sql, params)
-            calls += 1
-            if calls == 1 and duplicate_when == "monthly":
-                con.execute("DELETE FROM costs WHERE rowid = (SELECT MAX(rowid) FROM costs)")
-            elif calls == 1 and duplicate_when == "summary":
-                insert_duplicate()
+            if "FROM regions" not in sql:
+                calls += 1
+                if calls == 1 and duplicate_when == "monthly":
+                    con.execute("DELETE FROM costs WHERE rowid = (SELECT MAX(rowid) FROM costs)")
+                elif calls == 1 and duplicate_when == "summary":
+                    insert_duplicate()
             return rows
 
         monkeypatch.setattr("agent.run_sql", run_sql)
         with pytest.raises(DataQualityError, match="duplicate"):
-            answer_question("West since July 2025")
+            answer_question("West since July 2025", "West")
         policies.assert_not_called()
         if duplicate_when == "monthly":
             insert_duplicate()
         monkeypatch.setattr("agent.run_sql", execute)
-        response = app.test_client().post("/", data={"question": "West since July 2025"})
+        response = app.test_client().post("/", data={"question": "West since July 2025", "region": "West"})
         assert response.status_code == 503
         assert b"Correct missing, incomplete, or duplicate monthly cost records, then retry." in response.data
 
@@ -1447,10 +1530,11 @@ def test_duplicate_monthly_costs_reject_analysis(region_id, unit_cogs, duplicate
 @pytest.mark.parametrize("rows", [[], [{"region_name": "East"}]])
 def test_missing_region_has_descriptive_validation_error(monkeypatch, rows):
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
-        "sql": sql, "params": params or {}, "rows": rows})
+        "sql": sql, "params": params or {},
+        "rows": [{"region_name": "West"}] if "FROM regions" in sql else rows})
     with pytest.raises(ValueError, match="No sales/cost data found for West"):
-        answer_question("Why did West margin fall since July 2025?")
-    response = app.test_client().post("/", data={"question": "West"})
+        answer_question("Why did West margin fall since July 2025?", "West")
+    response = app.test_client().post("/", data={"question": "West", "region": "West"})
     assert response.status_code == 400
     assert b"No sales/cost data found for West" in response.data
 @pytest.mark.parametrize("cutoff,valid", [
@@ -1478,7 +1562,7 @@ def test_cutoff_error_shows_selected_region_coverage(monkeypatch, cutoff, valid)
         policies = MagicMock(return_value={"rows": []})
         monkeypatch.setattr("agent.run_sql", run_sql)
         monkeypatch.setattr("agent.search_policies", policies)
-        response = app.test_client().post("/", data={"question": f"West since {cutoff}"})
+        response = app.test_client().post("/", data={"question": f"West since {cutoff}", "region": "West"})
 
         assert response.status_code == (200 if valid else 400)
         if not valid:
@@ -1521,7 +1605,7 @@ def test_margin_direction_uses_unrounded_sql(before, after, direction, below_pre
     assert tuple(rows[0][key] for key in ("before_margin_pct", "after_margin_pct", "margin_drop_pts")) == displayed
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
         "sql": sql, "params": params or {}, "rows": rows})
-    result = answer_question("West since July 2025")
+    result = answer_question("West since July 2025", "West")
     finding = next(c for c in result["claims"] if c["kind"] == "finding")
     rendered = "".join(p.get("text", str(p.get("value", "")) + p.get("suffix", ""))
                        for p in finding["parts"])
@@ -1567,7 +1651,7 @@ def test_comparison_keeps_available_margin_when_other_period_is_empty(available_
 
         monkeypatch.setattr("agent.run_sql", run_sql)
         monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
-        result = answer_question("West since July 2025")
+        result = answer_question("West since July 2025", "West")
 
     comparison = next(claim for claim in result["claims"] if claim["kind"] == "comparison")
     rendered = "".join(part.get("text", str(part.get("value", "")) + part.get("suffix", ""))
@@ -1600,7 +1684,7 @@ def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
         "sql": sql, "params": params or {}, "rows": [row]})
     monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
 
-    result = answer_question("Why did West margin fall since July 2025?")
+    result = answer_question("Why did West margin fall since July 2025?", "West")
 
     findings = [c for c in result["claims"] if c["kind"] == "finding"]
     discount = next(c for c in findings if "discount" in c["parts"][0].get("text", "").lower())
@@ -1645,8 +1729,8 @@ def test_zero_revenue_preserves_available_metrics(zero_period, monkeypatch):
         monkeypatch.setattr("agent.search_policies", lambda _: {
             "sql": "SELECT policy evidence", "params": {}, "rows": policies})
         question = "West since July 2025"
-        result = answer_question(question)
-        response = app.test_client().post("/", data={"question": question})
+        result = answer_question(question, "West")
+        response = app.test_client().post("/", data={"question": question, "region": "West"})
         assert response.status_code == 200
 
         rows = {row["region_name"]: row for row in result["evidence"]["E2"]["rows"]}
@@ -1689,7 +1773,7 @@ def test_zero_revenue_preserves_available_metrics(zero_period, monkeypatch):
         for missing_month in ("2025-06", "2025-07"):
             con.execute("SAVEPOINT missing_period")
             con.execute("DELETE FROM sales WHERE region_id=1 AND sale_month=?", (missing_month,))
-            response = app.test_client().post("/", data={"question": question})
+            response = app.test_client().post("/", data={"question": question, "region": "West"})
             assert response.status_code == 400
             assert b"sales both before and after" in response.data
             con.execute("ROLLBACK TO missing_period")
@@ -1721,14 +1805,15 @@ def test_missing_revenue_is_not_reported_as_zero(missing_period, monkeypatch):
         def run_sql(sql, params=None):
             result = {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
                 con.execute(tools.validate_select(sql), params or {})]}
-            snapshots.append(result)
+            if "FROM regions" not in sql:
+                snapshots.append(result)
             return result
 
         policies = MagicMock(return_value={"rows": []})
         monkeypatch.setattr("agent.run_sql", run_sql)
         monkeypatch.setattr("agent.search_policies", policies)
         with pytest.raises(RevenueDataQualityError, match="Missing net revenue"):
-            answer_question("West since July 2025")
+            answer_question("West since July 2025", "West")
         policies.assert_not_called()
 
         month = "2025-06" if missing_period == "before" else "2025-07"
@@ -1744,7 +1829,7 @@ def test_missing_revenue_is_not_reported_as_zero(missing_period, monkeypatch):
 
         # Replacing the missing value with an actual zero permits the analysis.
         con.execute("UPDATE sales SET net_revenue=0 WHERE net_revenue IS NULL")
-        result = answer_question("West since July 2025")
+        result = answer_question("West since July 2025", "West")
         row = result["evidence"]["E2"]["rows"][0]
         assert row[f"{missing_period}_revenue"] == 0
         margin = next(c for c in result["claims"] if c["kind"] == "finding"
@@ -1784,7 +1869,7 @@ def test_undefined_metric_preserves_other_metric(unavailable_metric, unavailable
 
         monkeypatch.setattr("agent.run_sql", run_sql)
         monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
-        result = answer_question("West since July 2025")
+        result = answer_question("West since July 2025", "West")
 
     row = result["evidence"]["E2"]["rows"][0]
     columns = {"discount": "discount_pct", "freight": "freight_per_unit"}
@@ -1839,7 +1924,7 @@ def test_undefined_metric_does_not_hide_other_movement(missing_metric, missing_p
 
         monkeypatch.setattr("agent.run_sql", run_sql)
         monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
-        result = answer_question("West since July 2025")
+        result = answer_question("West since July 2025", "West")
 
     row = result["evidence"]["E2"]["rows"][0]
     missing_column = "discount_pct" if missing_metric == "discount" else "freight_per_unit"
@@ -1891,7 +1976,7 @@ def policy_rows(monkeypatch):
 def test_reviewed_policy_text_supports_claims_and_only_matching_citations(policy_rows):
     policy_rows.extend({**policy, "id": policy["id"] + 10, "chunk": "Unrelated policy text."}
                        for policy in policy_rows[:])
-    result = answer_question("West since July 2025")
+    result = answer_question("West since July 2025", "West")
     claims = [claim for claim in result["claims"] if claim["kind"] in {"reason", "action"}]
     assert [claim["kind"] for claim in claims] == ["reason", "action", "action", "action"]
     assert all(claim["policy_ids"] for claim in claims)
@@ -1915,7 +2000,7 @@ def test_policy_filenames_do_not_prove_claims(policy_rows, filename, contradicti
         policy["chunk"] = {"header": original.splitlines()[0], "replacement": contradiction,
                            "addendum": original + "\n\nCorrection: " + contradiction}[revision]
 
-    result = answer_question("West since July 2025")
+    result = answer_question("West since July 2025", "West")
 
     assert all(f"P{policy['id']}" not in claim["policy_ids"] for claim in result["claims"])
     if filename in {"west_q3_volume_push.md", "freight_contract_memo.md"}:
@@ -1934,7 +2019,7 @@ def test_updated_policy_source_invalidates_unchanged_retrieved_chunk(policy_rows
         (tmp_path / policy["doc"]).write_text(content, encoding="utf-8")
     monkeypatch.setattr("agent.DOCS", tmp_path)
 
-    result = answer_question("West since July 2025")
+    result = answer_question("West since July 2025", "West")
 
     assert not any(claim["kind"] == "reason" for claim in result["claims"])
     assert not any(claim["kind"] == "action" for claim in result["claims"])
@@ -1954,7 +2039,7 @@ def test_fixed_policy_claims_require_reviewed_complete_corpus(policy_rows, tmp_p
     monkeypatch.setattr("agent.DOCS", tmp_path)
 
     # The search results still contain only the original, unchanged chunks.
-    result = answer_question("West since July 2025")
+    result = answer_question("West since July 2025", "West")
 
     policy_claims = [claim for claim in result["claims"] if claim["kind"] in {"reason", "action"}]
     if revision == "unchanged":
@@ -1968,7 +2053,7 @@ def test_fixed_policy_claims_require_reviewed_complete_corpus(policy_rows, tmp_p
 @pytest.mark.parametrize("month", ["Jul", "jul.", "Sept", "SEP"])
 def test_question_month_abbreviations(month):
     expected = "07" if month.lower().startswith("jul") else "09"
-    assert parse_question(f"West since {month} 2026") == ("West", f"2026-{expected}")
+    assert parse_question(f"West since {month} 2026") == f"2026-{expected}"
 
 
 @pytest.mark.parametrize("date", ["2026-13", "2026-00", "2026/07", "2026-07-15",
@@ -1980,21 +2065,23 @@ def test_question_rejects_unsupported_explicit_dates(date):
 
 
 def test_question_defaults_only_without_date():
-    assert parse_question("Why did West margin fall?") == ("West", "2025-07")
-@pytest.mark.parametrize("region", ["North", "north", "Northeast", "Northwest", "Southeast", "Southwest", "West and North",
-                                    "Northern", "Northeastern", "Northwestern", "Southeastern", "Southwestern", "West and Northern"])
-def test_unsupported_region_is_rejected_before_querying(monkeypatch, region):
-    def forbidden_query(*args, **kwargs):
-        pytest.fail("Unsupported regions must be rejected before querying")
-    monkeypatch.setattr("agent.run_sql", forbidden_query)
-    with pytest.raises(ValueError, match="Unsupported region"):
-        answer_question(f"Why did {region} margin fall since July 2025?")
-    assert parse_question("Why did margin fall since July 2025?") == ("West", "2025-07")
+    assert parse_question("Why did margin fall?") == "2025-07"
+
+
+@pytest.mark.parametrize("region", ["Pacific", "", None])
+def test_answer_rejects_invalid_region_before_metric_queries(monkeypatch, region):
+    def select_regions(sql, params=None):
+        assert "FROM regions" in sql
+        return {"sql": sql, "params": {}, "rows": [{"region_name": "North"}]}
+
+    monkeypatch.setattr("agent.run_sql", select_regions)
+    with pytest.raises(ValueError, match="valid region"):
+        answer_question("Why did margin fall since July 2025?", region)
 
 
 @pytest.fixture(scope="module")
 def west_answer():
-    return answer_question("Why did West margin fall since July 2025?")
+    return answer_question("Why did West margin fall since July 2025?", "West")
 
 
 @pytest.fixture
@@ -2043,7 +2130,7 @@ def test_policy_claims_require_reviewed_content(retrieved_policy_rows, content):
         elif content == "revoked":
             row["chunk"] += "\nThis document is revoked; its statements and recommendations no longer apply."
 
-    result = answer_question("Why did West margin fall since July 2025?")
+    result = answer_question("Why did West margin fall since July 2025?", "West")
     policy_claims = [c for c in result["claims"] if c["kind"] in ("reason", "action")]
     if content in ("original", "whitespace"):
         assert [c["kind"] for c in policy_claims] == ["reason", "action", "action", "action"]
@@ -2062,7 +2149,7 @@ def test_policy_claims_cite_only_supporting_chunks(retrieved_policy_rows):
         for row in retrieved_policy_rows
     ])
 
-    result = answer_question("Why did West margin fall since July 2025?")
+    result = answer_question("Why did West margin fall since July 2025?", "West")
 
     assert [c["kind"] for c in result["claims"] if c["policy_ids"]] == [
         "reason", "action", "action", "action"]
@@ -2148,11 +2235,12 @@ def test_fractional_oracle_numbers_remain_exact_in_evidence(monkeypatch):
     part = {"value": row["amount"], "evidence": "E1", "row": 0, "column": "amount"}
     assert supported(part, evidence)
     assert not supported({**part, "value": "9007199254740994"}, evidence)
-    monkeypatch.setattr("app.answer_question", lambda _: {
+    monkeypatch.setattr("app.list_regions", lambda: ["West", "East"])
+    monkeypatch.setattr("app.answer_question", lambda *_: {
         "region": "West", "claims": [{"kind": "finding", "parts": [part], "policy_ids": []}],
         "evidence": evidence,
     })
-    response = app.test_client().post("/", data={"question": "West"})
+    response = app.test_client().post("/", data={"question": "West", "region": "West"})
     assert response.status_code == 200
     html = response.get_data(as_text=True)
     assert ">9007199254740993.25</button>" in html
@@ -2174,9 +2262,10 @@ def test_sql_decimal_amount_is_exact_in_critic_and_browser(monkeypatch):
     assert supported(part, evidence)
     assert not supported({**part, "value": "100000000000000.02"}, evidence)
 
-    monkeypatch.setattr("app.answer_question", lambda _: {
+    monkeypatch.setattr("app.list_regions", lambda: ["West", "East"])
+    monkeypatch.setattr("app.answer_question", lambda *_: {
         "region": "West", "claims": [{"kind": "finding", "parts": [part]}], "evidence": evidence})
-    response = app.test_client().post("/", data={"question": "West"})
+    response = app.test_client().post("/", data={"question": "West", "region": "West"})
     assert response.status_code == 200
     serialized = response.get_data(as_text=True).split("const evidence = ", 1)[1].split(";", 1)[0]
     assert json.loads(serialized)["E1"]["rows"][0]["total"] == "100000000000000.01"
@@ -2197,10 +2286,11 @@ def test_select_preserves_semicolon_in_string():
 @pytest.mark.parametrize("method", ["get", "post"])
 def test_ui_rejects_untrusted_hosts_before_analysis(monkeypatch, host, method):
     analysis = MagicMock()
+    monkeypatch.setattr("app.list_regions", lambda: ["West", "East"])
     monkeypatch.setattr("app.answer_question", analysis)
 
     response = getattr(app.test_client(), method)(
-        "/", headers={"Host": host}, data={"question": "West"},
+        "/", headers={"Host": host}, data={"question": "West", "region": "West"},
     )
 
     assert response.status_code == 400
@@ -2209,7 +2299,8 @@ def test_ui_rejects_untrusted_hosts_before_analysis(monkeypatch, host, method):
 
 @pytest.mark.parametrize("host", ["localhost", "localhost:5055", "127.0.0.1", "127.0.0.1:5055"])
 def test_ui_accepts_local_hosts(monkeypatch, host):
-    monkeypatch.setattr("app.answer_question", lambda _: {
+    monkeypatch.setattr("app.list_regions", lambda: ["West", "East"])
+    monkeypatch.setattr("app.answer_question", lambda *_: {
         "region": "West", "claims": [], "dropped_count": 0,
         "evidence": {"E1": {"kind": "sql", "sql": "SELECT revenue FROM sales",
                             "params": {}, "rows": [{"revenue": 12345}]}},
@@ -2217,7 +2308,7 @@ def test_ui_accepts_local_hosts(monkeypatch, host):
     client = app.test_client()
 
     assert client.get("/", headers={"Host": host}).status_code == 200
-    response = client.post("/", headers={"Host": host}, data={"question": "West"})
+    response = client.post("/", headers={"Host": host}, data={"question": "West", "region": "West"})
     assert response.status_code == 200
     assert b"SELECT revenue FROM sales" in response.data
 
@@ -2225,7 +2316,7 @@ def test_ui_accepts_local_hosts(monkeypatch, host):
 def test_flask_live_brief_and_evidence():
     client = app.test_client()
     assert client.get("/").status_code == 200
-    response = client.post("/", data={"question": "Why did West margin fall since July 2025?"})
+    response = client.post("/", data={"question": "Why did West margin fall since July 2025?", "region": "West"})
     assert response.status_code == 200
     assert b"13.36" in response.data
     assert b'data-evidence="E2"' in response.data
@@ -2261,10 +2352,11 @@ def test_download_brief_contains_cited_evidence_and_verification(monkeypatch):
             "E9": {"kind": "sql", "sql": "SELECT uncited FROM sales", "params": {}, "rows": []},
         },
     }
-    monkeypatch.setattr("app.answer_question", lambda _: result)
+    monkeypatch.setattr("app.list_regions", lambda: ["West", "East"])
+    monkeypatch.setattr("app.answer_question", lambda *_: result)
     client = app.test_client()
     assert b'id="download-brief"' not in client.get("/").data
-    response = client.post("/", data={"question": question})
+    response = client.post("/", data={"question": question, "region": "West"})
     html = response.get_data(as_text=True)
     assert response.status_code == 200
     assert 'id="download-brief"' in html and "Download brief" in html
@@ -2366,7 +2458,8 @@ def test_monthly_trend_links_selected_region_to_original_evidence_rows(monkeypat
         {"region_name": "West", "sale_month": "2025-07", "margin_pct": 25.6,
          "discount_pct": 18, "freight_per_unit": None},
     ]
-    monkeypatch.setattr("app.answer_question", lambda _: {
+    monkeypatch.setattr("app.list_regions", lambda: ["West", "East"])
+    monkeypatch.setattr("app.answer_question", lambda *_: {
         "region": region, "claims": [],
         "evidence": {"E1": {"kind": "sql", "sql": "SELECT ...", "params": {}, "rows": rows}},
     })
@@ -2411,7 +2504,7 @@ def test_monthly_trend_links_selected_region_to_original_evidence_rows(monkeypat
             elif tag == "table":
                 self.in_table = False
 
-    response = app.test_client().post("/", data={"question": region})
+    response = app.test_client().post("/", data={"question": region, "region": region})
     assert response.status_code == 200
     parser = TrendParser()
     parser.feed(response.get_data(as_text=True))
@@ -2449,7 +2542,7 @@ def test_ui_discloses_missing_explanation_and_actions(policy_rows, missing_reaso
                 (missing_actions and policy["doc"] == "pricing_policy.md")):
             policy["chunk"] = ""
 
-    response = app.test_client().post("/", data={"question": "West since July 2025"})
+    response = app.test_client().post("/", data={"question": "West since July 2025", "region": "West"})
 
     assert response.status_code == 200
     assert b"West gross margin" in response.data
@@ -2472,7 +2565,8 @@ def test_brief_shows_selected_region_monthly_trend_with_cell_citations(monkeypat
     ]
     result = {"region": "West", "claims": [], "dropped_count": 0,
               "evidence": {"E1": {"kind": "sql", "sql": "SELECT ...", "params": {}, "rows": rows}}}
-    monkeypatch.setattr("app.answer_question", lambda _: result)
+    monkeypatch.setattr("app.list_regions", lambda: ["West", "East"])
+    monkeypatch.setattr("app.answer_question", lambda *_: result)
 
     class BriefTableParser(HTMLParser):
         def __init__(self):
@@ -2510,7 +2604,7 @@ def test_brief_shows_selected_region_monthly_trend_with_cell_citations(monkeypat
             elif tag == "article":
                 self.in_article = False
 
-    response = app.test_client().post("/", data={"question": "West"})
+    response = app.test_client().post("/", data={"question": "West", "region": "West"})
     assert response.status_code == 200
     parser = BriefTableParser()
     parser.feed(response.get_data(as_text=True))
@@ -2550,9 +2644,10 @@ def test_ui_discloses_dropped_claims_and_empty_brief(monkeypatch, has_claims, dr
         "dropped_count": dropped_count,
         "evidence": {},
     }
-    monkeypatch.setattr("app.answer_question", lambda _: result)
+    monkeypatch.setattr("app.list_regions", lambda: ["West", "East"])
+    monkeypatch.setattr("app.answer_question", lambda *_: result)
 
-    response = app.test_client().post("/", data={"question": "West"})
+    response = app.test_client().post("/", data={"question": "West", "region": "West"})
 
     assert response.status_code == 200
     assert (b"2 claims were omitted because they failed verification." in response.data) == bool(dropped_count)
@@ -2584,7 +2679,7 @@ def test_ui_reports_unavailable_policy_claims(
             if policy["doc"] in unavailable:
                 policy["chunk"] = "This policy has changed."
 
-    response = app.test_client().post("/", data={"question": question})
+    response = app.test_client().post("/", data={"question": question, "region": "West"})
 
     assert response.status_code == 200
     assert b'data-evidence="E2"' in response.data
@@ -2615,7 +2710,7 @@ def test_ui_discloses_missing_policy_backed_sections(
             if row["doc"] in missing_docs:
                 row["chunk"] = "Changed policy content."
 
-    response = app.test_client().post("/", data={"question": "West since July 2025"})
+    response = app.test_client().post("/", data={"question": "West since July 2025", "region": "West"})
 
     assert response.status_code == 200
     assert (b"Explanation unavailable" in response.data) == (not reason_available)
@@ -2668,11 +2763,12 @@ def test_ui_boundaries_contrast_with_adjacent_backgrounds():
 
 @pytest.mark.parametrize("has_result", [False, True])
 def test_ui_allows_retry_after_stopped_submission(monkeypatch, has_result):
-    monkeypatch.setattr("app.answer_question", lambda _: {
+    monkeypatch.setattr("app.list_regions", lambda: ["West", "East"])
+    monkeypatch.setattr("app.answer_question", lambda *_: {
         "region": "West", "claims": [], "dropped_count": 0, "evidence": {},
     })
     client = app.test_client()
-    response = client.post("/", data={"question": "West"}) if has_result else client.get("/")
+    response = client.post("/", data={"question": "West", "region": "West"}) if has_result else client.get("/")
     html = response.get_data(as_text=True)
 
     class SubmitButtonParser(HTMLParser):
@@ -2736,8 +2832,9 @@ def test_evidence_dialog_preserves_exact_integers(monkeypatch):
                             "rows": [{"units": value} for value in values]}},
     }
     original = copy.deepcopy(result)
-    monkeypatch.setattr("app.answer_question", lambda _: result)
-    response = app.test_client().post("/", data={"question": "West"})
+    monkeypatch.setattr("app.list_regions", lambda: ["West", "East"])
+    monkeypatch.setattr("app.answer_question", lambda *_: result)
+    response = app.test_client().post("/", data={"question": "West", "region": "West"})
     assert response.status_code == 200
     assert result == original  # Rendering must not change the critic's evidence.
     script = response.get_data(as_text=True).split("<script>", 1)[1].split("</script>", 1)[0]
@@ -2790,8 +2887,9 @@ def test_evidence_dialog_explains_empty_rows(monkeypatch):
                    "rows": [{"region": "West"}]},
         },
     }
-    monkeypatch.setattr("app.answer_question", lambda _: result)
-    response = app.test_client().post("/", data={"question": "West"})
+    monkeypatch.setattr("app.list_regions", lambda: ["West", "East"])
+    monkeypatch.setattr("app.answer_question", lambda *_: result)
+    response = app.test_client().post("/", data={"question": "West", "region": "West"})
     assert response.status_code == 200
     script = response.get_data(as_text=True).split("<script>", 1)[1].split("</script>", 1)[0]
     check = subprocess.run(["node", "-e", """
@@ -2833,7 +2931,8 @@ def test_evidence_dialog_explains_empty_rows(monkeypatch):
     """], capture_output=True, text=True)
     assert check.returncode == 0, check.stderr
 def test_evidence_rows_region_is_keyboard_focusable_and_named(monkeypatch):
-    monkeypatch.setattr("app.answer_question", lambda _: {
+    monkeypatch.setattr("app.list_regions", lambda: ["West", "East"])
+    monkeypatch.setattr("app.answer_question", lambda *_: {
         "region": "West", "claims": [], "evidence": {},
     })
 
@@ -2859,7 +2958,7 @@ def test_evidence_rows_region_is_keyboard_focusable_and_named(monkeypatch):
             if tag == "h3":
                 self.heading_id = None
 
-    response = app.test_client().post("/", data={"question": "West"})
+    response = app.test_client().post("/", data={"question": "West", "region": "West"})
     assert response.status_code == 200
     parser = EvidenceParser()
     parser.feed(response.get_data(as_text=True))
@@ -2872,10 +2971,11 @@ def test_evidence_rows_region_is_keyboard_focusable_and_named(monkeypatch):
 
 
 def test_evidence_dialog_identifies_cited_cell(monkeypatch):
-    monkeypatch.setattr("app.answer_question", lambda _: {
+    monkeypatch.setattr("app.list_regions", lambda: ["West", "East"])
+    monkeypatch.setattr("app.answer_question", lambda *_: {
         "region": "West", "claims": [], "evidence": {},
     })
-    html = app.test_client().post("/", data={"question": "West"}).get_data(as_text=True)
+    html = app.test_client().post("/", data={"question": "West", "region": "West"}).get_data(as_text=True)
 
     assert 'aria-describedby="evidence-description"' in html
     assert '<p id="evidence-description"></p>' in html
@@ -2921,7 +3021,8 @@ def test_numeric_buttons_describe_cited_metric_period_and_units(monkeypatch):
             for row, column, suffix, _ in citations]}],
         "evidence": {"E2": {"kind": "sql", "sql": "SELECT ...", "params": {}, "rows": rows}},
     }
-    monkeypatch.setattr("app.answer_question", lambda _: result)
+    monkeypatch.setattr("app.list_regions", lambda: ["West", "East"])
+    monkeypatch.setattr("app.answer_question", lambda *_: result)
 
     class ButtonParser(HTMLParser):
         def __init__(self):
@@ -2933,7 +3034,7 @@ def test_numeric_buttons_describe_cited_metric_period_and_units(monkeypatch):
             if tag == "button" and attrs.get("class") == "number":
                 self.buttons.append(attrs)
 
-    response = app.test_client().post("/", data={"question": "West"})
+    response = app.test_client().post("/", data={"question": "West", "region": "West"})
     assert response.status_code == 200
     parser = ButtonParser()
     parser.feed(response.get_data(as_text=True))
@@ -2965,8 +3066,9 @@ def test_evidence_dialog_focuses_cited_cell(monkeypatch):
         "evidence": {"E1": {"kind": "sql", "sql": "SELECT ...", "params": {},
                             "rows": [{"margin": 38}, {"margin": 25}]}},
     }
-    monkeypatch.setattr("app.answer_question", lambda _: result)
-    html = app.test_client().post("/", data={"question": "West"}).get_data(as_text=True)
+    monkeypatch.setattr("app.list_regions", lambda: ["West", "East"])
+    monkeypatch.setattr("app.answer_question", lambda *_: result)
+    html = app.test_client().post("/", data={"question": "West", "region": "West"}).get_data(as_text=True)
     script = html.split("<script>", 1)[1].split("</script>", 1)[0]
     check = subprocess.run(["node", "-e", """
         const assert = require('node:assert/strict');
@@ -3038,7 +3140,8 @@ def test_policy_citations_have_descriptive_accessible_names(monkeypatch):
         "evidence": {id: {"kind": "policy", "rows": [{"doc": doc}]}
                      for id, doc in documents.items()},
     }
-    monkeypatch.setattr("app.answer_question", lambda _: result)
+    monkeypatch.setattr("app.list_regions", lambda: ["West", "East"])
+    monkeypatch.setattr("app.answer_question", lambda *_: result)
 
     class CitationParser(HTMLParser):
         def __init__(self):
@@ -3050,7 +3153,7 @@ def test_policy_citations_have_descriptive_accessible_names(monkeypatch):
             if tag == "button" and attrs.get("class") == "citation":
                 self.buttons.append(attrs)
 
-    response = app.test_client().post("/", data={"question": "West"})
+    response = app.test_client().post("/", data={"question": "West", "region": "West"})
     assert response.status_code == 200
     parser = CitationParser()
     parser.feed(response.get_data(as_text=True))
@@ -3067,6 +3170,7 @@ def test_question_validation_errors_are_associated_and_focused(monkeypatch):
         def __init__(self):
             super().__init__()
             self.question = None
+            self.region = None
             self.alert = None
             self.alert_text = ""
             self.in_alert = False
@@ -3075,6 +3179,8 @@ def test_question_validation_errors_are_associated_and_focused(monkeypatch):
             attrs = dict(attrs)
             if tag == "input" and attrs.get("id") == "question":
                 self.question = attrs
+            if tag == "select" and attrs.get("id") == "region":
+                self.region = attrs
             if tag == "p" and attrs.get("role") == "alert":
                 self.alert = attrs
                 self.in_alert = True
@@ -3092,10 +3198,10 @@ def test_question_validation_errors_are_associated_and_focused(monkeypatch):
         parser.feed(response.get_data(as_text=True))
         return parser
 
+    monkeypatch.setattr("app.list_regions", lambda: ["West", "East"])
     client = app.test_client()
     for data, status, message in [
         ({"question": ""}, 400, "Enter a business question"),
-        ({"question": "North"}, 400, "Unsupported region"),
         ({"question": "x" * (app.config["MAX_CONTENT_LENGTH"] + 1)}, 413,
          "Submission too large"),
     ]:
@@ -3109,12 +3215,22 @@ def test_question_validation_errors_are_associated_and_focused(monkeypatch):
         assert "autofocus" not in page.alert
         assert message in page.alert_text
 
-    def failure(_):
+    response = client.post("/", data={"question": "Why did margin fall?", "region": "Pacific"})
+    assert response.status_code == 400
+    page = parse(response)
+    assert page.region.get("aria-invalid") == "true"
+    assert page.region.get("aria-describedby") == page.alert.get("id")
+    assert "autofocus" in page.region
+    assert "autofocus" not in page.question
+    assert "valid region" in page.alert_text
+
+    def failure(*_):
         raise RuntimeError("unavailable")
 
+    monkeypatch.setattr("app.list_regions", lambda: ["West", "East"])
     monkeypatch.setattr("app.answer_question", failure)
     for response, status in [(client.get("/"), 200),
-                             (client.post("/", data={"question": "West"}), 503)]:
+                             (client.post("/", data={"question": "West", "region": "West"}), 503)]:
         assert response.status_code == status
         page = parse(response)
         assert "aria-invalid" not in page.question
@@ -3129,12 +3245,13 @@ def test_question_validation_errors_are_associated_and_focused(monkeypatch):
 
 def test_ui_validation_and_safe_error(monkeypatch):
     client = app.test_client()
-    assert client.post("/", data={"question": ""}).status_code == 400
-    assert client.post("/", data={"question": "West since July 2030"}).status_code == 400
-    def failure(_):
+    assert client.post("/", data={"question": "", "region": "West"}).status_code == 400
+    assert client.post("/", data={"question": "West since July 2030", "region": "West"}).status_code == 400
+    def failure(*_):
         raise RuntimeError("secret-driver-settings")
+    monkeypatch.setattr("app.list_regions", lambda: ["West", "East"])
     monkeypatch.setattr("app.answer_question", failure)
-    response = client.post("/", data={"question": "West"})
+    response = client.post("/", data={"question": "West", "region": "West"})
     assert response.status_code == 503
     assert b"secret-driver-settings" not in response.data
 
@@ -3156,7 +3273,7 @@ def test_ui_reports_data_quality_errors(column, message, incomplete_when, monkey
     monkeypatch.setattr("agent.run_sql", run_sql)
     monkeypatch.setattr("agent.search_policies", policies)
 
-    response = app.test_client().post("/", data={"question": "West"})
+    response = app.test_client().post("/", data={"question": "West", "region": "West"})
 
     assert response.status_code == 503
     assert message in response.data
@@ -3170,12 +3287,13 @@ def test_ui_reports_data_quality_errors(column, message, incomplete_when, monkey
     oracledb.DatabaseError(SimpleNamespace(code=3113, message="secret-driver-settings\nforged log entry")),
 ])
 def test_ui_logs_sanitized_unexpected_failures(failure, monkeypatch, caplog):
-    def fail(_):
+    def fail(*_):
         raise failure
 
+    monkeypatch.setattr("app.list_regions", lambda: ["West", "East"])
     monkeypatch.setattr("app.answer_question", fail)
     with caplog.at_level("ERROR", logger=app.logger.name):
-        response = app.test_client().post("/", data={"question": "West private-question"})
+        response = app.test_client().post("/", data={"question": "West private-question", "region": "West"})
 
     assert response.status_code == 503
     assert b"Analysis unavailable." in response.data
@@ -3193,11 +3311,12 @@ def test_ui_logs_sanitized_unexpected_failures(failure, monkeypatch, caplog):
 def test_ui_data_quality_message_does_not_expose_exception_details(error_type, monkeypatch):
     import agent
 
-    def fail(_):
+    def fail(*_):
         raise getattr(agent, error_type)("secret-driver-settings")
 
+    monkeypatch.setattr("app.list_regions", lambda: ["West", "East"])
     monkeypatch.setattr("app.answer_question", fail)
-    response = app.test_client().post("/", data={"question": "West"})
+    response = app.test_client().post("/", data={"question": "West", "region": "West"})
 
     assert response.status_code == 503
     assert b"Check" in response.data
@@ -3210,7 +3329,7 @@ def test_ui_logs_oracle_code_and_owned_failure_location(monkeypatch, caplog):
 
     monkeypatch.setattr("agent.run_sql", fail)
     with caplog.at_level("ERROR", logger=app.logger.name):
-        response = app.test_client().post("/", data={"question": "West"})
+        response = app.test_client().post("/", data={"question": "West", "region": "West"})
 
     assert response.status_code == 503
     assert "DatabaseError" in caplog.text
@@ -3222,12 +3341,13 @@ def test_ui_logs_oracle_code_and_owned_failure_location(monkeypatch, caplog):
 def test_ui_does_not_log_untrusted_exception_class_name(monkeypatch, caplog):
     failure = type("secret_driver_settings", (Exception,), {})()
 
-    def fail(_):
+    def fail(*_):
         raise failure
 
+    monkeypatch.setattr("app.list_regions", lambda: ["West", "East"])
     monkeypatch.setattr("app.answer_question", fail)
     with caplog.at_level("ERROR", logger=app.logger.name):
-        response = app.test_client().post("/", data={"question": "West"})
+        response = app.test_client().post("/", data={"question": "West", "region": "West"})
 
     assert response.status_code == 503
     assert "Analysis failed" in caplog.text
@@ -3244,7 +3364,7 @@ def test_ui_sanitizes_invalid_policy_encoding(tmp_path, monkeypatch):
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
         "sql": sql, "params": params or {}, "rows": [row]})
 
-    response = app.test_client().post("/", data={"question": "West since July 2025"})
+    response = app.test_client().post("/", data={"question": "West since July 2025", "region": "West"})
 
     assert response.status_code == 503
     assert b"Analysis unavailable. Check the local Oracle connection and policy setup, then retry." in response.data
@@ -3252,11 +3372,12 @@ def test_ui_sanitizes_invalid_policy_encoding(tmp_path, monkeypatch):
 
 
 def test_ui_sanitizes_data_quality_error(monkeypatch):
-    def failure(_):
+    def failure(*_):
         raise DataQualityError("private-data-quality-details")
 
+    monkeypatch.setattr("app.list_regions", lambda: ["West", "East"])
     monkeypatch.setattr("app.answer_question", failure)
-    response = app.test_client().post("/", data={"question": "West"})
+    response = app.test_client().post("/", data={"question": "West", "region": "West"})
 
     assert response.status_code == 503
     assert b"Correct missing, incomplete, or duplicate monthly cost records, then retry." in response.data
@@ -3265,11 +3386,12 @@ def test_ui_sanitizes_data_quality_error(monkeypatch):
 
 
 def test_ui_sanitizes_discount_data_quality_error(monkeypatch):
-    def failure(_):
+    def failure(*_):
         raise DiscountDataQualityError("private-data-quality-details")
 
+    monkeypatch.setattr("app.list_regions", lambda: ["West", "East"])
     monkeypatch.setattr("app.answer_question", failure)
-    response = app.test_client().post("/", data={"question": "West"})
+    response = app.test_client().post("/", data={"question": "West", "region": "West"})
 
     assert response.status_code == 503
     assert b"Correct missing discount, quantity, or unit price inputs, then retry." in response.data
@@ -3278,11 +3400,12 @@ def test_ui_sanitizes_discount_data_quality_error(monkeypatch):
 
 
 def test_ui_sanitizes_revenue_data_quality_error(monkeypatch):
-    def failure(_):
+    def failure(*_):
         raise RevenueDataQualityError("private-data-quality-details")
 
+    monkeypatch.setattr("app.list_regions", lambda: ["West", "East"])
     monkeypatch.setattr("app.answer_question", failure)
-    response = app.test_client().post("/", data={"question": "West"})
+    response = app.test_client().post("/", data={"question": "West", "region": "West"})
 
     assert response.status_code == 503
     assert b"Correct missing net revenue for sales, then retry." in response.data
@@ -3295,7 +3418,7 @@ def test_ui_sanitizes_downstream_value_error(monkeypatch):
         raise ValueError("private-internal-details")
 
     monkeypatch.setattr("agent.run_sql", failure)
-    response = app.test_client().post("/", data={"question": "West"})
+    response = app.test_client().post("/", data={"question": "West", "region": "West"})
 
     assert response.status_code == 503
     assert b"Analysis unavailable. Check the local Oracle connection and policy setup, then retry." in response.data
@@ -3313,8 +3436,8 @@ def test_script_starts_and_shows_unavailable_when_setup_fails(monkeypatch):
     def run(server, **kwargs):
         started.append(server)
         client = server.test_client()
-        assert client.get("/").status_code == 200
-        response = client.post("/", data={"question": "West"})
+        assert client.get("/").status_code == 503
+        response = client.post("/", data={"question": "West", "region": "West"})
         assert response.status_code == 503
         assert b"Analysis unavailable. Check the local Oracle connection and policy setup, then retry." in response.data
         assert b"secret-driver-settings" not in response.data
@@ -3323,12 +3446,13 @@ def test_script_starts_and_shows_unavailable_when_setup_fails(monkeypatch):
     runpy.run_path(str(Path(__file__).with_name("app.py")), run_name="__main__")
     assert len(started) == 1
 def test_ui_oversized_submission(monkeypatch):
-    def unexpected_analysis(_):
+    def unexpected_analysis(*_):
         pytest.fail("Oversized submissions must not run analysis")
 
+    monkeypatch.setattr("app.list_regions", lambda: ["West", "East"])
     monkeypatch.setattr("app.answer_question", unexpected_analysis)
     response = app.test_client().post(
-        "/", data={"question": "x" * (app.config["MAX_CONTENT_LENGTH"] + 1)}
+        "/", data={"question": "x" * (app.config["MAX_CONTENT_LENGTH"] + 1), "region": "West"}
     )
     assert response.status_code == 413
     assert b'id="question-form"' in response.data
@@ -3337,6 +3461,6 @@ def test_ui_oversized_submission(monkeypatch):
 
 
 def test_ui_escapes_question():
-    response = app.test_client().post("/", data={"question": '<script>alert("x")</script> West'})
+    response = app.test_client().post("/", data={"question": '<script>alert("x")</script> West', "region": "West"})
     assert response.status_code == 200
     assert b'<script>alert("x")</script>' not in response.data

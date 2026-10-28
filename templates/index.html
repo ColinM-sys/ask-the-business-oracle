@@ -15,6 +15,7 @@
     form { display: flex; gap: 12px; margin: 28px 0; flex-wrap: wrap; }
     label { width: 100%; font-weight: 650; }
     input { flex: 1; min-width: 230px; padding: 16px; border: 1px solid #52736c; border-radius: 10px; font: inherit; background: white; }
+    select { flex: 1; min-width: 230px; padding: 16px; border: 1px solid #52736c; border-radius: 10px; font: inherit; background: white; }
     button { font: inherit; cursor: pointer; }
     .submit, .download { border: 0; border-radius: 10px; background: #1d5c4f; color: white; padding: 16px 24px; font-weight: 650; }
     .card { background: white; border: 1px solid #dbe3d8; border-radius: 16px; padding: 26px; margin: 22px 0; }
@@ -51,12 +52,18 @@
   <h1>Ask the Business</h1>
   <p class="intro">Understand what changed, explore the evidence, and decide what to do next. Every number opens the SQL and rows behind it.</p>
   <form method="post" id="question-form">
+    <label for="region">Region</label>
+    <select id="region" name="region" required{% if region_error %} aria-invalid="true" aria-describedby="question-error" autofocus{% endif %}>
+      <option value="">Select a region</option>
+      {% for region in regions %}<option value="{{ region }}"{% if region == selected_region %} selected{% endif %}>{{ region }}</option>{% endfor %}
+    </select>
     <label for="question">Your business question</label>
     <input id="question" name="question" maxlength="1000" value="{{ question }}" required{% if question_error %} aria-invalid="true" aria-describedby="question-error" autofocus{% endif %}>
     <button class="submit" type="submit">Analyze question</button>
   </form>
-  <p class="hint">Fixed analysis of margin, discounts and freight. Name a region and comparison month; defaults are West and July 2025. Uses all available sales on each side of that month.</p>
-  {% if error %}<p class="error" role="alert" id="question-error"{% if not question_error %} tabindex="-1" autofocus{% endif %}>{{ error }}</p>{% endif %}
+  <p class="hint">Fixed analysis of margin, discounts and freight for the selected region. Name a comparison month; the default is July 2025. Uses all available sales on each side of that month.</p>
+  {% if not regions %}<p class="hint">Regions unavailable. <a href="/">Reload the region list</a>.</p>{% endif %}
+  {% if error %}<p class="error" role="alert" id="question-error"{% if not question_error and not region_error %} tabindex="-1" autofocus{% endif %}>{{ error }}</p>{% endif %}
   {% if result %}
   <article class="card" aria-live="polite">
     <div class="eyebrow">Business brief · {{ result.region }}</div>

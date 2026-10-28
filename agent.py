@@ -12,6 +12,10 @@ class QuestionValidationError(ValueError):
     """A user-facing problem with the requested analysis."""
 
 
+class RegionValidationError(QuestionValidationError):
+    """The selected region is not present in the regions table."""
+
+
 class DataQualityError(ValueError):
     """The underlying business data cannot support a reliable analysis."""
 
@@ -122,17 +126,13 @@ MONTHS.update({name[:3]: value for name, value in list(MONTHS.items())})
 MONTHS["sept"] = "09"
 
 
+def list_regions():
+    return [row["region_name"] for row in run_sql(
+        "SELECT DISTINCT region_name FROM regions WHERE region_name IS NOT NULL ORDER BY region_name"
+    )["rows"]]
+
+
 def parse_question(question):
-    unsupported = re.search(
-        r"\b(north|northwest|northeast|southwest|southeast)(?:ern)?\b", question, re.I)
-    if unsupported:
-        raise QuestionValidationError(f"Unsupported region: {unsupported[0]}. Choose West, Central, East, or South.")
-    region_matches = [region for region, pattern in (
-        ("West", r"west(?:ern)?"), ("Central", r"central"),
-        ("East", r"east(?:ern)?"), ("South", r"south(?:ern)?"))
-        if re.search(rf"\b{pattern}\b", question, re.I)]
-    if len(region_matches) > 1:
-        raise QuestionValidationError("Ask about one region at a time; the evidence includes all regions for comparison.")
     cutoff = "2025-07"
     date = re.search(r"\b(20\d{2})-(0[1-9]|1[0-2])\b(?![-/\d])", question)
     month_pattern = r"\b(" + "|".join(MONTHS) + r")\b"
@@ -147,13 +147,15 @@ def parse_question(question):
     if (re.search(r"\b\d{4}\b|\b\d+[-/]\d+\b", remaining)
             or re.search(month_pattern, remaining, re.I)):
         raise QuestionValidationError("Unsupported date; use YYYY-MM or a month name and four-digit year.")
-    return region_matches[0] if region_matches else "West", cutoff
+    return cutoff
 
 
-def answer_question(question):
+def answer_question(question, region):
     if not isinstance(question, str) or not question.strip() or len(question) > 1000:
         raise QuestionValidationError("Enter a business question of up to one thousand characters.")
-    region, cutoff = parse_question(question)
+    if not isinstance(region, str) or not region or region not in list_regions():
+        raise RegionValidationError("Select a valid region.")
+    cutoff = parse_question(question)
     evidence = {
         "E1": {"kind": "sql", **run_sql(MONTHLY_SQL)},
         "E2": {"kind": "sql", **run_sql(summary_sql(), {"cutoff": cutoff})},
@@ -280,6 +282,6 @@ def answer_question(question):
 
 
 if __name__ == "__main__":
-    result = answer_question("Why did West margin fall since July 2025?")
+    result = answer_question("Why did margin fall since July 2025?", "West")
     for claim in result["claims"]:
         print("".join(p.get("text", str(p.get("value", "")) + p.get("suffix", "")) for p in claim["parts"]))
