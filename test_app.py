@@ -146,6 +146,20 @@ def test_ui_validation_and_safe_error(monkeypatch):
     assert b"secret-driver-settings" not in response.data
 
 
+def test_ui_oversized_submission(monkeypatch):
+    def unexpected_analysis(_):
+        pytest.fail("Oversized submissions must not run analysis")
+
+    monkeypatch.setattr("app.answer_question", unexpected_analysis)
+    response = app.test_client().post(
+        "/", data={"question": "x" * (app.config["MAX_CONTENT_LENGTH"] + 1)}
+    )
+    assert response.status_code == 413
+    assert b'id="question-form"' in response.data
+    assert b'class="error" role="alert"' in response.data
+    assert b"Submission too large. Shorten your question and try again." in response.data
+
+
 def test_ui_escapes_question():
     response = app.test_client().post("/", data={"question": '<script>alert("x")</script> West'})
     assert response.status_code == 200
