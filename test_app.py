@@ -7,6 +7,7 @@ import sqlite3
 from contextlib import nullcontext
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from decimal import Decimal
 from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
@@ -837,6 +838,36 @@ def test_real_select_and_bind(ending):
     result = tools.run_sql(sql, {"name": "West"})
     assert result["rows"] == [{"region_name": "West"}]
     assert result["sql"] == sql
+
+
+def test_oracle_number_precision_reaches_critic_and_evidence(monkeypatch):
+    exact = Decimal("9007199254740992.01")
+    integer = Decimal("9007199254740993")
+    negative = Decimal("-12345678901234567890123456789012345.678")
+    source = {"kind": "sql", **tools.run_sql(
+        "SELECT 9007199254740992.01 AS amount, 9007199254740993 AS units, "
+        "-12345678901234567890123456789012345.678 AS negative "
+        "FROM regions WHERE region_name=:name", {"name": "West"})}
+    row = source["rows"][0]
+    assert isinstance(row["amount"], Decimal) and row["amount"] == exact
+    assert isinstance(row["units"], Decimal) and row["units"] == integer
+    assert isinstance(row["negative"], Decimal) and row["negative"] == negative
+    evidence = {"E1": source}
+    part = {"value": row["amount"], "evidence": "E1", "row": 0, "column": "amount", "suffix": ""}
+    assert supported(part, evidence)
+    assert not supported({**part, "value": "9007199254740992"}, evidence)
+
+    monkeypatch.setattr("app.answer_question", lambda _: {
+        "region": "West", "claims": [{"kind": "finding", "parts": [part], "policy_ids": []}],
+        "dropped_count": 0, "evidence": evidence,
+    })
+    response = app.test_client().post("/", data={"question": "West"})
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    serialized = html.split("const evidence = ", 1)[1].split(";", 1)[0]
+    assert json.loads(serialized)["E1"]["rows"][0] == {
+        "amount": str(exact), "units": str(integer), "negative": str(negative)}
+    assert ">9007199254740992.01</button>" in html
 
 
 def test_select_preserves_semicolon_in_string():
