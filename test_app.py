@@ -1181,6 +1181,63 @@ def test_ui_restores_submit_button_on_pageshow():
             assert.equal(button.textContent, 'Analyze question');
         }
     """], check=True, capture_output=True, text=True)
+
+
+def test_evidence_dialog_displays_empty_rows_and_switches_evidence(monkeypatch):
+    result = {
+        "region": "West", "claims": [],
+        "evidence": {
+            "E1": {"kind": "sql", "sql": "SELECT monthly", "params": {}, "rows": []},
+            "E2": {"kind": "sql", "sql": "SELECT summary", "params": {"cutoff": "2025-07"},
+                   "rows": [{"units": 42}]},
+        },
+    }
+    monkeypatch.setattr("app.answer_question", lambda _: result)
+    response = app.test_client().post("/", data={"question": "West"})
+    assert response.status_code == 200
+    script = response.get_data(as_text=True).split("<script>", 1)[1].split("</script>", 1)[0]
+    check = subprocess.run(["node", "-e", """
+        const assert = require('node:assert/strict');
+        const buttons = ['E1', 'E2'].map(id => ({
+            dataset: {evidence: id},
+            addEventListener: (_, handler) => { buttonsById[id] = handler; },
+        }));
+        const buttonsById = {};
+        const elements = {};
+        for (const id of ['evidence-title', 'evidence-description', 'evidence-sql',
+                          'evidence-params', 'evidence-rows', 'close-dialog', 'evidence-dialog']) {
+            elements[id] = {addEventListener() {}, showModal() {}, querySelector: () => null,
+                            replaceChildren(child) {
+                                this.child = child;
+                                this.textContent = typeof child === 'string' ? child : child.textContent;
+                            }};
+        }
+        global.document = {
+            getElementById: id => elements[id],
+            querySelectorAll: () => buttons,
+            createElement: tag => tag === 'table' ? {
+                tag, cells: [],
+                createTHead: () => ({insertRow: () => ({append() {}})}),
+                createTBody() { return {insertRow: () => ({insertCell: () => {
+                    const cell = {}; this.cells.push(cell); return cell;
+                }})}; },
+            } : {},
+        };
+    """ + script + """
+        buttonsById.E1();
+        assert.equal(elements['evidence-rows'].textContent, 'No rows returned.');
+        assert.equal(elements['evidence-sql'].textContent, 'SELECT monthly');
+        buttonsById.E2();
+        assert.equal(elements['evidence-rows'].child.tag, 'table');
+        assert.equal(elements['evidence-rows'].child.cells[0].textContent, '42');
+        assert.equal(elements['evidence-sql'].textContent, 'SELECT summary');
+        assert.deepEqual(JSON.parse(elements['evidence-params'].textContent), {cutoff: '2025-07'});
+        buttonsById.E1();
+        assert.equal(elements['evidence-rows'].textContent, 'No rows returned.');
+    """], capture_output=True, text=True)
+    assert check.returncode == 0, check.stderr
+
+
 def test_evidence_dialog_preserves_exact_integers(monkeypatch):
     values = [9007199254740993, -9007199254740993, 10**37 + 1,
               9007199254740991, 0, 42, 1.25, None, True, False, "text"]

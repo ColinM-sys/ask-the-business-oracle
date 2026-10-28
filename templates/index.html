@@ -125,7 +125,7 @@
           }
         });
       });
-      document.getElementById('evidence-rows').replaceChildren(table);
+      document.getElementById('evidence-rows').replaceChildren(item.rows.length ? table : 'No rows returned.');
       dialog.showModal();
       dialog.querySelector('.selected')?.scrollIntoView({block: 'nearest'});
     }));
