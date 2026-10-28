@@ -1042,6 +1042,128 @@ def test_flask_live_brief_and_evidence():
     assert b"evidence-dialog" in response.data
 
 
+def test_download_brief_contains_cited_evidence_and_verification(monkeypatch):
+    question = "Why did West margin fall since July 2025?"
+    result = {
+        "region": "West", "cutoff": "2025-07", "dropped_count": 2,
+        "claims": [
+            {"kind": "scope", "parts": [{"text": "West: compare "},
+                {"value": "2025-06", "suffix": "", "evidence": "E2", "row": 0,
+                 "column": "first_month"}, {"text": " with July."}]},
+            {"kind": "finding", "parts": [
+                {"text": "Margin fell to "},
+                {"value": 25.6, "suffix": "%", "evidence": "E2", "row": 0,
+                 "column": "margin_pct"}, {"text": "."}]},
+            {"kind": "reason", "parts": [{"text": "A volume push affected pricing."}],
+             "policy_ids": ["P1"]},
+            {"kind": "action", "parts": [{"text": "Review discounts."}]},
+        ],
+        "evidence": {
+            "E2": {"kind": "sql", "sql": "SELECT margin_pct, units FROM sales WHERE month >= :cutoff",
+                   "params": {"cutoff": "2025-07"},
+                   "rows": [{"margin_pct": 25.6, "first_month": "2025-06",
+                             "units": 9007199254740993}]},
+            "P1": {"kind": "policy", "sql": "SELECT chunk FROM policy_chunks WHERE id = :policy_id",
+                   "params": {"policy_id": 1}, "rows": [{"id": 1, "doc": "volume_push.md",
+                                                           "chunk": "Discounts increased in West."}]},
+            "E9": {"kind": "sql", "sql": "SELECT uncited FROM sales", "params": {}, "rows": []},
+        },
+    }
+    monkeypatch.setattr("app.answer_question", lambda _: result)
+    client = app.test_client()
+    assert b'id="download-brief"' not in client.get("/").data
+    response = client.post("/", data={"question": question})
+    html = response.get_data(as_text=True)
+    assert response.status_code == 200
+    assert 'id="download-brief"' in html and "Download brief" in html
+
+    class BriefParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.claims, self.notices = [], []
+            self.current = self.button = None
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if "data-claim" in attrs or "data-notice" in attrs:
+                self.current = {"childNodes": [], "textContent": "", "dataset": {
+                    "claimKind": attrs.get("data-claim-kind", "")}}
+                (self.claims if "data-claim" in attrs else self.notices).append(self.current)
+            elif self.current is not None and tag == "button":
+                self.button = {"nodeType": 1, "textContent": "", "dataset": {
+                    key[5:]: value for key, value in attrs.items() if key.startswith("data-")}}
+                self.current["childNodes"].append(self.button)
+
+        def handle_data(self, data):
+            if self.current is not None:
+                self.current["textContent"] += data
+                if self.button is not None:
+                    self.button["textContent"] += data
+                else:
+                    self.current["childNodes"].append({"nodeType": 3, "textContent": data})
+
+        def handle_endtag(self, tag):
+            if tag == "button":
+                self.button = None
+            elif tag == "p":
+                self.current = None
+
+    page = BriefParser()
+    page.feed(html)
+    assert len(page.claims) == len(result["claims"])
+    script = html.split("<script>", 1)[1].split("</script>", 1)[0]
+    dom = json.dumps({"claims": page.claims, "notices": page.notices})
+    check = subprocess.run(["node", "-e", """
+        const assert = require('node:assert/strict');
+        const page = """ + dom + """;
+        const handlers = {};
+        let blob, clicked = false;
+        const anchor = {click() { clicked = true; }, remove() {}};
+        const element = {addEventListener() {}};
+        const button = {addEventListener(event, handler) { handlers[event] = handler; }};
+        global.Node = {TEXT_NODE: 3, ELEMENT_NODE: 1};
+        global.document = {
+            getElementById: id => id === 'download-brief' ? button :
+                id === 'question' ? {value: 'Edited after the analysis'} : element,
+            querySelectorAll: selector => selector === '[data-claim]' ? page.claims :
+                selector === '[data-notice]' ? page.notices : [],
+            createElement: tag => { assert.equal(tag, 'a'); return anchor; },
+            body: {appendChild() {}, append() {}},
+        };
+        URL.createObjectURL = value => { blob = value; return 'blob:brief'; };
+        URL.revokeObjectURL = () => {};
+    """ + script + """
+        assert.equal(typeof handlers.click, 'function');
+        handlers.click();
+        assert.ok(clicked && blob);
+        assert.match(anchor.download, /\\.md$/);
+        assert.match(blob.type, /^text\\/(markdown|plain)/);
+        blob.text().then(text => process.stdout.write(text));
+    """], capture_output=True, text=True, encoding="utf-8")
+    assert check.returncode == 0, check.stderr
+    markdown = check.stdout
+    assert question in markdown and "Edited after the analysis" not in markdown
+    scope = next(line for line in markdown.splitlines() if "West: compare" in line)
+    assert "2025-06" in scope and "E2" in scope and "row 1" in scope
+    assert "first_month" in scope.replace("\\_", "_")
+    finding = next(line for line in markdown.splitlines() if "Margin fell to" in line)
+    assert "25.6%" in finding and "E2" in finding and "row 1" in finding
+    assert "margin_pct" in finding.replace("\\_", "_")
+    reason = next(line for line in markdown.splitlines() if "A volume push affected pricing." in line)
+    assert "P1" in reason
+    assert "Review discounts." in markdown
+    assert "2 claims were omitted because they failed verification." in markdown
+    assert "Numbers in retained claims verified against cited SQL cells." in markdown
+    assert "Policy-backed recommendations are unavailable for this brief." in markdown
+    assert "SELECT margin_pct, units FROM sales WHERE month >= :cutoff" in markdown
+    assert '"cutoff": "2025-07"' in markdown and '"margin_pct": 25.6' in markdown
+    assert "9007199254740993" in markdown
+    assert "SELECT chunk FROM policy_chunks WHERE id = :policy_id" in markdown
+    assert '"policy_id": 1' in markdown
+    assert "volume_push.md" in markdown.replace("\\_", "_") and "Discounts increased in West." in markdown
+    assert "SELECT uncited FROM sales" not in markdown
+
+
 @pytest.mark.parametrize("has_claims,dropped_count", [(True, 0), (True, 2), (False, 2), (False, 0)])
 def test_ui_discloses_dropped_claims_and_empty_brief(monkeypatch, has_claims, dropped_count):
     result = {

@@ -59,15 +59,16 @@
   <article class="card" aria-live="polite">
     <div class="eyebrow">Business brief · {{ result.region }}</div>
     <h2>What changed, and what to do</h2>
+    <button type="button" class="submit" id="download-brief">Download brief</button>
     {% set reasons = result.claims | selectattr('kind', 'equalto', 'reason') | list %}
     {% set actions = result.claims | selectattr('kind', 'equalto', 'action') | list %}
     {% set policy_reasons = reasons | selectattr('policy_ids') | list %}
     {% set policy_actions = actions | selectattr('policy_ids') | list %}
     {% if result.dropped_count %}
-    <p class="error" role="alert">{{ result.dropped_count }} claim{{ 's' if result.dropped_count != 1 else '' }} {{ 'were' if result.dropped_count != 1 else 'was' }} omitted because they failed verification.</p>
+    <p class="error" role="alert" data-notice>{{ result.dropped_count }} claim{{ 's' if result.dropped_count != 1 else '' }} {{ 'were' if result.dropped_count != 1 else 'was' }} omitted because they failed verification.</p>
     {% endif %}
     {% for claim in result.claims %}
-      <p class="{{ claim.kind }}">
+      <p class="{{ claim.kind }}" data-claim data-claim-kind="{{ claim.kind }}">
       {%- for part in claim.parts -%}
         {%- if 'text' in part -%}{{ part.text }}
         {%- else -%}<button type="button" class="number" data-evidence="{{ part.evidence }}" data-row="{{ part.row }}" data-column="{{ part.column }}" aria-label="Evidence for {{ part.value }}{{ part.suffix }}">{{ part.value }}{{ part.suffix }}</button>{%- endif -%}
@@ -75,16 +76,16 @@
       {% for id in claim.policy_ids %}<button type="button" class="citation" data-evidence="{{ id }}" aria-label="{{ id }}: {{ result.evidence[id].rows[0].doc }}">{{ id }}</button>{% endfor %}
       </p>
     {% else %}
-    <p>No verified claims are available for this brief.</p>
+    <p data-notice>No verified claims are available for this brief.</p>
     {% endfor %}
     {% if not policy_reasons %}
-    <p class="hint">{% if not reasons %}Explanation unavailable: {% endif %}Policy-backed explanation is unavailable for this brief.</p>
+    <p class="hint" data-notice>{% if not reasons %}Explanation unavailable: {% endif %}Policy-backed explanation is unavailable for this brief.</p>
     {% endif %}
     {% if not policy_actions %}
-    <p class="hint">{% if not actions %}Recommendations unavailable: {% endif %}Policy-backed recommendations are unavailable for this brief.</p>
+    <p class="hint" data-notice>{% if not actions %}Recommendations unavailable: {% endif %}Policy-backed recommendations are unavailable for this brief.</p>
     {% endif %}
     {% if result.claims %}
-    <p class="hint">Numbers in retained claims verified against cited SQL cells.{% if policy_reasons %} Policy citations support the qualitative explanation.{% endif %}</p>
+    <p class="hint" data-notice>Numbers in retained claims verified against cited SQL cells.{% if policy_reasons %} Policy citations support the qualitative explanation.{% endif %}</p>
     {% endif %}
     <details><summary>Explore all evidence</summary>
       <p>{% for id in result.evidence %}<button type="button" class="citation" data-evidence="{{ id }}"{% if result.evidence[id].kind == 'policy' %} aria-label="{{ id }}: {{ result.evidence[id].rows[0].doc }}"{% endif %}>{{ id }}</button>{% endfor %}</p>
@@ -130,6 +131,53 @@
       dialog.querySelector('.selected')?.scrollIntoView({block: 'nearest'});
     }));
     document.getElementById('close-dialog').addEventListener('click', () => dialog.close());
+    document.getElementById('download-brief').addEventListener('click', () => {
+      const cited = new Set();
+      const escapeText = value => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/([\\`*_[\]#!|])/g, '\\$1');
+      const block = (value, language = '') => {
+        const text = String(value);
+        const fence = '`'.repeat(Math.max(3, ...Array.from(text.matchAll(/`+/g), match => match[0].length + 1)));
+        return `${fence}${language}\n${text}\n${fence}`;
+      };
+      const claimText = claim => Array.from(claim.childNodes, part => {
+        if (part.nodeType === 3) return escapeText(part.textContent);
+        const id = part.dataset.evidence;
+        cited.add(id);
+        const link = `#${id.toLowerCase()}`;
+        return part.dataset.row === undefined
+          ? ` [${id}](${link})`
+          : `${escapeText(part.textContent)} [${id}, row ${Number(part.dataset.row) + 1}, column ${escapeText(part.dataset.column)}](${link})`;
+      }).join('').replace(/\s+/g, ' ').trim();
+      const claims = Array.from(document.querySelectorAll('[data-claim]'));
+      const scope = claims.filter(claim => claim.dataset.claimKind === 'scope').map(claimText);
+      const findings = claims.filter(claim => claim.dataset.claimKind !== 'scope').map(claimText);
+      const notices = Array.from(document.querySelectorAll('[data-notice]'), notice => escapeText(notice.textContent.trim()));
+      const markdown = [
+        '# Business brief', '## Question', escapeText({{ question | tojson }}),
+        '## Scope', `Region: ${escapeText({{ result.region | tojson }})}`, ...scope,
+        '## Retained claims', ...findings.map(claim => `- ${claim}`),
+        '## Verification notices', ...notices.map(notice => `- ${notice}`),
+        '## Cited evidence',
+      ];
+      cited.forEach(id => {
+        const item = evidence[id];
+        markdown.push(`### ${id}`, '**SQL**', block(item.sql, 'sql'),
+          '**Bound parameters**', block(JSON.stringify(item.params, null, 2), 'json'),
+          '**Returned rows**', block(JSON.stringify(item.rows, null, 2), 'json'));
+        if (item.kind === 'policy') item.rows.forEach(row => {
+          markdown.push(`**Policy document:** ${escapeText(row.doc)}`, '**Source text**', block(row.chunk));
+        });
+      });
+      const url = URL.createObjectURL(new Blob([markdown.join('\n\n') + '\n'], {type: 'text/markdown;charset=utf-8'}));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'business-brief.md';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+    });
   </script>
   {% endif %}
   <script>
