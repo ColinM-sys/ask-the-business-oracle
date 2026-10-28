@@ -78,11 +78,13 @@ def search_policies(text, k=5):
         if row is None:
             raise RuntimeError("No policy chunks available")
         backend = row[0]
+        # The manifest and search must describe the same read-only snapshot.
+        corpus = cur.execute("SELECT doc, chunk FROM policy_chunks").fetchall()
         vector = embed(cur, text, backend)
         # Store the exact vector as JSON; SQL converts it back on execution/replay.
         params = {"query_vector": json.dumps(vector.tolist()), "k": k}
         sql = """SELECT id, doc, chunk, VECTOR_DISTANCE(embedding, TO_VECTOR(:query_vector), COSINE) AS distance
             FROM policy_chunks ORDER BY distance, id FETCH FIRST :k ROWS ONLY"""
         rows = cur.execute(sql, params).fetchall()
-        return {"sql": sql, "params": params,
+        return {"sql": sql, "params": params, "corpus": corpus,
                 "rows": [dict(zip(("id", "doc", "chunk", "distance"), row)) for row in rows]}

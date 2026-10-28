@@ -1642,8 +1642,9 @@ def test_zero_revenue_preserves_available_metrics(zero_period, monkeypatch):
         monkeypatch.setattr("agent.run_sql", run_sql)
         policies = [{"id": i, "doc": path.name, "chunk": path.read_text(encoding="utf-8").strip()}
                     for i, path in enumerate(sorted(Path(__file__).with_name("docs").glob("*.md")), 1)]
+        corpus = [(policy["doc"], policy["chunk"]) for policy in policies]
         monkeypatch.setattr("agent.search_policies", lambda _: {
-            "sql": "SELECT policy evidence", "params": {}, "rows": policies})
+            "sql": "SELECT policy evidence", "params": {}, "rows": policies, "corpus": corpus})
         question = "West since July 2025"
         result = answer_question(question)
         response = app.test_client().post("/", data={"question": question})
@@ -1881,10 +1882,11 @@ def policy_rows(monkeypatch):
     }
     policies = [{"id": i, "doc": path.name, "chunk": path.read_text(encoding="utf-8").strip()}
                 for i, path in enumerate(sorted(Path(__file__).with_name("docs").glob("*.md")), 1)]
+    corpus = [(policy["doc"], policy["chunk"]) for policy in policies]
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
         "sql": sql, "params": params or {}, "rows": [row]})
     monkeypatch.setattr("agent.search_policies", lambda _: {
-        "sql": "SELECT policy evidence", "params": {}, "rows": policies})
+        "sql": "SELECT policy evidence", "params": {}, "rows": policies, "corpus": corpus})
     return policies
 
 
@@ -1965,6 +1967,99 @@ def test_fixed_policy_claims_require_reviewed_complete_corpus(policy_rows, tmp_p
     assert result["dropped_count"] == 0
 
 
+@pytest.mark.parametrize("replacement", ["none", "before_search", "during_search"])
+def test_policy_claims_use_complete_search_snapshot(policy_rows, monkeypatch, replacement):
+    # Another instance adds a two-chunk superseding document. Its correction is
+    # outside the five nearest results, while all original chunks are retrieved.
+    original = [{**policy, "distance": float(i)} for i, policy in enumerate(policy_rows)]
+    revised = original + [
+        {"id": 5, "doc": "superseding.md", "chunk": "Introduction.", "distance": 4.0},
+        {"id": 6, "doc": "superseding.md", "chunk": "Earlier policies are revoked.", "distance": 5.0},
+    ]
+    database = original.copy()
+
+    def ensure():
+        assert database == original
+        if replacement == "before_search":
+            database[:] = revised
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def execute(self, sql, params=None):
+            query = " ".join(sql.upper().split())
+            if query == "SET TRANSACTION READ ONLY":
+                self.snapshot = database.copy()
+                return self
+            assert hasattr(self, "snapshot"), "Policy queries must share a read-only snapshot"
+            if query.startswith("SELECT BACKEND FROM POLICY_CHUNKS"):
+                self.result = [("hash-v1-512",)] if self.snapshot else []
+            elif "VECTOR_DISTANCE" in query:
+                self.result = [(row["id"], row["doc"], row["chunk"], row["distance"])
+                               for row in self.snapshot[:params["k"]]]
+            elif query.startswith("SELECT DOC, CHUNK FROM POLICY_CHUNKS"):
+                self.result = [(row["doc"], row["chunk"]) for row in self.snapshot]
+            else:
+                pytest.fail(f"Unexpected policy search SQL: {sql}")
+            if replacement == "during_search":
+                database[:] = revised
+            return self
+
+        def fetchone(self):
+            return self.result[0] if self.result else None
+
+        def fetchall(self):
+            return self.result
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def cursor(self):
+            return Cursor()
+
+    monkeypatch.setattr(tools, "ensure_policies", ensure)
+    monkeypatch.setattr(tools, "connect", Connection)
+    monkeypatch.setattr(tools, "embed", lambda cursor, text, backend: hash_embedding(text))
+    monkeypatch.setattr("agent.search_policies", tools.search_policies)
+
+    result = answer_question("West since July 2025")
+
+    claims = [claim["kind"] for claim in result["claims"] if claim["kind"] in {"reason", "action"}]
+    assert claims == ([] if replacement == "before_search" else ["reason", "action", "action", "action"])
+    assert {"P1", "P2", "P3", "P4"} <= result["evidence"].keys()
+    assert "P6" not in result["evidence"]
+    assert result["dropped_count"] == 0
+
+
+@pytest.mark.parametrize("revision", ["missing_metadata", "changed", "duplicate", "missing"])
+def test_policy_claims_reject_invalid_snapshot_manifest(policy_rows, monkeypatch, revision):
+    corpus = [(policy["doc"], policy["chunk"]) for policy in policy_rows]
+    if revision == "changed":
+        corpus[0] = (corpus[0][0], corpus[0][1] + "\nRevoked.")
+    elif revision == "duplicate":
+        corpus[-1] = corpus[0]
+    elif revision == "missing":
+        corpus[-1] = ("unreviewed.md", "Replacement policy.")
+    search = {"sql": "SELECT policy evidence", "params": {}, "rows": policy_rows}
+    if revision != "missing_metadata":
+        search["corpus"] = corpus
+    monkeypatch.setattr("agent.search_policies", lambda _: search)
+
+    result = answer_question("West since July 2025")
+
+    assert not any(claim["kind"] in {"reason", "action"} for claim in result["claims"])
+    assert len([claim for claim in result["claims"] if claim["kind"] == "finding"]) == 3
+    assert result["dropped_count"] == 0
+
+
 @pytest.mark.parametrize("month", ["Jul", "jul.", "Sept", "SEP"])
 def test_question_month_abbreviations(month):
     expected = "07" if month.lower().startswith("jul") else "09"
@@ -2012,8 +2107,9 @@ def retrieved_policy_rows(monkeypatch):
         "sql": sql, "params": params or {}, "rows": [summary]})
     rows = [{"id": index, "doc": path.name, "chunk": path.read_text(encoding="utf-8")}
             for index, path in enumerate(sorted(Path(__file__).with_name("docs").glob("*.md")), 1)]
+    corpus = [(row["doc"], row["chunk"]) for row in rows]
     monkeypatch.setattr("agent.search_policies", lambda _: {
-        "sql": "SELECT ...", "params": {}, "rows": rows})
+        "sql": "SELECT ...", "params": {}, "rows": rows, "corpus": corpus})
     return rows
 
 

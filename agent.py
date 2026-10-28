@@ -200,8 +200,16 @@ def answer_question(question):
     except (OSError, UnicodeError):
         corpus_hashes = {}
 
+    # Search results are only the top-k; validate the complete searched snapshot.
+    corpus = policies.get("corpus", [])
+    snapshot_hashes = {
+        doc: sha256(" ".join(chunk.split()).encode("utf-8")).hexdigest()
+        for doc, chunk in corpus if isinstance(chunk, str)
+    }
+
     def policy_ids(filename):
-        if corpus_hashes != POLICY_SHA256:
+        if (corpus_hashes != POLICY_SHA256 or len(corpus) != len(REVIEWED_POLICY_HASHES)
+                or snapshot_hashes != REVIEWED_POLICY_HASHES):
             return []
         # These reviewed documents each fit in one chunk; partial text is not proof.
         citations = []
