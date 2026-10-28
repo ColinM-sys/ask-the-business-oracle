@@ -345,6 +345,80 @@ def test_hashing_is_stable_and_normalized():
     assert abs(sum(v*v for v in first) - 1) < 0.000001
 
 
+@pytest.mark.parametrize("failure_mode", ["incompatible", "null"])
+def test_policy_probe_cache_tracks_model_versions(failure_mode, tmp_path, monkeypatch):
+    (tmp_path / "policy.md").write_text("Distinct policy content", encoding="utf-8")
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.fetchone.return_value = ("POLICY_CHUNKS",)
+    models = [("INCOMPATIBLE_MODEL", "created", 10, "v1"), ("GOOD_MODEL", "created", 20, "v1")]
+    rows, probes, document_embeddings = [], [], []
+    bad_recovers = [False]
+
+    def execute(sql, **params):
+        if "FROM user_mining_models" in sql:
+            cursor.fetchall.return_value = (list(models) if "object_id" in sql.lower()
+                                             else [(model[0],) for model in models])
+        elif sql.startswith("SELECT DISTINCT backend, source_hash"):
+            cursor.fetchall.return_value = [(row["backend"], row["fingerprint"]) for row in rows]
+        elif sql.startswith("DELETE FROM policy_chunks"):
+            rows.clear()
+        elif sql.lstrip().startswith("INSERT INTO policy_chunks"):
+            rows.append(params)
+        return cursor
+
+    def embedding(cur, text, backend):
+        if text == "Business policy":
+            probes.append(next(model for model in models if model[0] == backend))
+            if backend == "INCOMPATIBLE_MODEL" and not bad_recovers[0]:
+                if failure_mode == "null":
+                    return None
+                raise oracledb.DatabaseError(SimpleNamespace(code=40290))
+        else:
+            document_embeddings.append((backend, text))
+        return hash_embedding(text)
+
+    cursor.execute.side_effect = execute
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+    monkeypatch.setattr("policies.embed", embedding)
+    monkeypatch.setattr("policies._probe_cache", {}, raising=False)
+
+    assert ensure_policies() == "GOOD_MODEL"
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        assert list(executor.map(lambda _: ensure_policies(), range(4))) == ["GOOD_MODEL"] * 4
+    assert probes == models
+    assert document_embeddings == [("GOOD_MODEL", "Distinct policy content")]
+
+    models[0] = ("INCOMPATIBLE_MODEL", "created", 11, "v1")
+    assert ensure_policies() == "GOOD_MODEL"
+    assert probes == [("INCOMPATIBLE_MODEL", "created", 10, "v1"), ("GOOD_MODEL", "created", 20, "v1"), models[0]]
+    assert len(document_embeddings) == 1
+
+    old_fingerprint = rows[0]["fingerprint"]
+    models[1] = ("GOOD_MODEL", "created", 21, "v1")
+    assert ensure_policies() == "GOOD_MODEL"
+    assert probes[-1] == models[1]
+    assert len(probes) == 4
+    assert len(document_embeddings) == 2
+    assert rows[0]["fingerprint"] != old_fingerprint
+
+    models[1] = ("GOOD_MODEL", "created", 21, "v2")
+    assert ensure_policies() == "GOOD_MODEL"
+    assert probes[-1] == models[1]
+    assert len(probes) == 5
+    assert len(document_embeddings) == 3
+
+    if failure_mode == "null":
+        # A revised model can recover after the prior null probe was cached.
+        bad_recovers[0] = True
+        models[0] = ("INCOMPATIBLE_MODEL", "created", 11, "v2")
+        assert ensure_policies() == "INCOMPATIBLE_MODEL"
+        assert probes[-1] == models[0]
+        assert document_embeddings[-1] == ("INCOMPATIBLE_MODEL", "Distinct policy content")
+
+
 @pytest.mark.parametrize("text_type", ["VARCHAR2", "CLOB", "NVARCHAR2", "NCLOB"])
 @pytest.mark.parametrize("image, null_model, good_model", [
     (True, False, True),
@@ -360,7 +434,7 @@ def test_policy_probe_selects_usable_text_model(
     metadata.execute("""CREATE TABLE user_mining_model_attributes
         (model_name TEXT, attribute_name TEXT, attribute_type TEXT, data_type TEXT)""")
     metadata.execute("""CREATE TABLE user_objects
-        (object_name TEXT, object_type TEXT, subobject_name TEXT, object_id INTEGER)""")
+        (object_name TEXT, object_type TEXT, subobject_name TEXT, object_id INTEGER, last_ddl_time TEXT)""")
     models = []
     if image:
         models.append(("A_IMAGE", "UNSTRUCTURED", "BLOB"))
@@ -371,9 +445,9 @@ def test_policy_probe_selects_usable_text_model(
     model_versions = {}
     for object_id, (name, attribute_type, data_type) in enumerate(models, 1):
         created = f"created-{name}"
-        model_versions[name] = (name, created, object_id)
+        model_versions[name] = (name, created, object_id, "modified")
         metadata.execute("INSERT INTO user_mining_models VALUES (?, 'EMBEDDING', ?)", (name, created))
-        metadata.execute("INSERT INTO user_objects VALUES (?, 'MINING MODEL', NULL, ?)", (name, object_id))
+        metadata.execute("INSERT INTO user_objects VALUES (?, 'MINING MODEL', NULL, ?, 'modified')", (name, object_id))
         metadata.execute("INSERT INTO user_mining_model_attributes VALUES (?, 'DATA', ?, ?)",
                          (name, attribute_type, data_type))
         metadata.execute("INSERT INTO user_mining_model_attributes VALUES (?, 'ORA$ONNXTARGET', 'VECTOR', 'VECTOR')",
@@ -388,6 +462,7 @@ def test_policy_probe_selects_usable_text_model(
         metadata.execute(sql) if "user_mining_models" in sql.lower() else cursor)
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
+    monkeypatch.setattr("policies._probe_cache", {})
     probed = []
 
     def embedding(cur, text, backend):
@@ -423,29 +498,35 @@ def test_policy_probe_propagates_unexpected_failures(failure, tmp_path, monkeypa
     connection.__enter__.return_value = connection
     cursor = connection.cursor.return_value
     cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
-    cursor.execute.return_value.fetchall.side_effect = [[("BROKEN_MODEL", "created", 1)], []]
+    cursor.execute.return_value.fetchall.side_effect = [[("BROKEN_MODEL", "created", 1, "modified")]] * 2
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
+    monkeypatch.setattr("policies._probe_cache", {})
+
+    attempts = []
 
     def embedding(cur, text, backend):
+        attempts.append(backend)
         if backend == "BROKEN_MODEL":
             raise failure
         return hash_embedding(text)
 
     monkeypatch.setattr("policies.embed", embedding)
 
-    with pytest.raises(type(failure)) as caught:
-        ensure_policies()
+    for _ in range(2):
+        with pytest.raises(type(failure)) as caught:
+            ensure_policies()
 
-    assert caught.value is failure
+        assert caught.value is failure
+    assert attempts == ["BROKEN_MODEL", "BROKEN_MODEL"]
     connection.commit.assert_not_called()
     assert not any(call.args[0].startswith("DELETE") for call in cursor.execute.call_args_list)
 
 
 @pytest.mark.parametrize("models, expected", [
     ([], "hash-v1-512"),
-    ([("INCOMPATIBLE_MODEL",)], "hash-v1-512"),
-    ([("INCOMPATIBLE_MODEL",), ("GOOD_MODEL",)], "GOOD_MODEL"),
+    ([("INCOMPATIBLE_MODEL", "created", 1, "v1")], "hash-v1-512"),
+    ([("INCOMPATIBLE_MODEL", "created", 1, "v1"), ("GOOD_MODEL", "created", 2, "v1")], "GOOD_MODEL"),
 ])
 def test_policy_probe_fallback_is_explicit_and_sanitized(
         models, expected, tmp_path, monkeypatch, caplog):
@@ -454,10 +535,10 @@ def test_policy_probe_fallback_is_explicit_and_sanitized(
     connection.__enter__.return_value = connection
     cursor = connection.cursor.return_value
     cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
-    cursor.execute.return_value.fetchall.side_effect = [
-        [(name, "created", i) for i, (name,) in enumerate(models)], []]
+    cursor.execute.return_value.fetchall.side_effect = [models, []]
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
+    monkeypatch.setattr("policies._probe_cache", {})
 
     def embedding(cur, text, backend):
         if backend == "INCOMPATIBLE_MODEL":
@@ -484,11 +565,11 @@ def test_policy_probe_skips_unsupported_names(unsupported, later_model, tmp_path
     connection.__enter__.return_value = connection
     cursor = connection.cursor.return_value
     cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
-    models = [(unsupported,)] + ([(later_model,)] if later_model else [])
-    cursor.execute.return_value.fetchall.side_effect = [
-        [(name, "created", i) for i, (name,) in enumerate(models)], []]
+    models = [(unsupported, "created", 1, "modified")] + ([(later_model, "created", 2, "modified")] if later_model else [])
+    cursor.execute.return_value.fetchall.side_effect = [models, []]
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
+    monkeypatch.setattr("policies._probe_cache", {})
 
     expected = later_model or "hash-v1-512"
     assert ensure_policies() == expected
@@ -599,7 +680,7 @@ def test_policy_refresh_rechunks_model_versioned_cache(tmp_path, monkeypatch):
     cursor.fetchone.return_value = ("POLICY_CHUNKS",)
 
     def execute(sql, **params):
-        if sql.startswith("SELECT model_name"):
+        if "FROM user_mining_models" in sql:
             cursor.fetchall.return_value = []
         elif sql.startswith("SELECT DISTINCT backend, source_hash"):
             cursor.fetchall.return_value = list({(row["backend"], row["fingerprint"]) for row in rows})
@@ -664,11 +745,11 @@ def test_policy_refresh_reuses_chunk_embeddings_by_model(tmp_path, monkeypatch):
     # Legacy rows have no recorded model revision and must be refreshed once.
     rows = [{"backend": "MODEL_V1", "fingerprint": "0" * 64,
              "chunk": "Shared policy", "vector": "legacy vector"}]
-    model = ["MODEL_V1", "created", 100]
+    model = ["MODEL_V1", "created", 100, "modified"]
     embedding_calls = []
 
     def execute(sql, **params):
-        if sql.startswith("SELECT model_name"):
+        if "FROM user_mining_models" in sql:
             cursor.fetchall.return_value = [tuple(model)]
         elif sql.startswith("SELECT DISTINCT backend, source_hash"):
             cursor.fetchall.return_value = list({(row["backend"], row["fingerprint"]) for row in rows})
@@ -763,7 +844,7 @@ def test_delayed_policy_refresh_preserves_newer_content(tmp_path, monkeypatch):
     rows = []
 
     def execute(sql, **params):
-        if sql.startswith("SELECT model_name"):
+        if "FROM user_mining_models" in sql:
             cursor.fetchall.return_value = []
         elif sql.startswith("SELECT DISTINCT backend, source_hash"):
             cursor.fetchall.return_value = [(row["backend"], row["fingerprint"]) for row in rows]
@@ -853,7 +934,7 @@ def test_concurrent_policy_refreshes_do_not_overwrite_newer_content(tmp_path, mo
                     second_progress.set()
                 assert database_lock.acquire(timeout=10), "Database lock was not released"
                 self.connection.locked = True
-            elif sql.startswith("SELECT MODEL_NAME, CREATION_DATE,"):
+            elif sql.startswith("SELECT M.MODEL_NAME, M.CREATION_DATE,"):
                 self.result = []
             elif sql.startswith("SELECT DISTINCT BACKEND, SOURCE_HASH FROM POLICY_CHUNKS"):
                 with rows_lock:

@@ -15,6 +15,7 @@ DOCS = Path(__file__).parent / "docs"
 _lock = threading.Lock()
 _logger = logging.getLogger(__name__)
 _model_identifier = re.compile(r"[A-Z][A-Z0-9_$#]*")
+_probe_cache = {}
 
 
 def hash_embedding(text, dimensions=512):
@@ -60,34 +61,43 @@ def ensure_policies():
             source_hash = hashlib.sha256(repr(("chunk-v2", sources)).encode()).hexdigest()
             backend = "hash-v1-512"
             model_version = (backend,)
-            for model, created, object_id in cur.execute(
-                """SELECT model_name, creation_date,
-                    (SELECT object_id FROM user_objects WHERE object_name=m.model_name
-                        AND object_type='MINING MODEL' AND subobject_name IS NULL)
+            models = cur.execute(
+                """SELECT m.model_name, m.creation_date, o.object_id, o.last_ddl_time
                     FROM user_mining_models m
-                    WHERE mining_function='EMBEDDING' AND EXISTS (
+                    LEFT JOIN user_objects o ON o.object_name=m.model_name
+                        AND o.object_type='MINING MODEL' AND o.subobject_name IS NULL
+                    WHERE m.mining_function='EMBEDDING' AND EXISTS (
                         SELECT 1 FROM user_mining_model_attributes a
                         WHERE a.model_name=m.model_name AND a.attribute_type='TEXT'
                         AND a.data_type IN ('VARCHAR2', 'CLOB', 'NVARCHAR2', 'NCLOB')
-                    ) ORDER BY model_name"""
-            ).fetchall():
+                    ) ORDER BY m.model_name"""
+            ).fetchall()
+            for stale in _probe_cache.keys() - set(models):
+                del _probe_cache[stale]
+            for model_key in models:
+                model = model_key[0]
                 if not _model_identifier.fullmatch(model):
                     _logger.warning("Skipping unsupported embedding model %r", model)
                     continue
-                try:
-                    if embed(cur, "Business policy", model) is None:
-                        _logger.warning("Embedding model %r returned no vector", model)
-                        continue
+                if model_key not in _probe_cache:
+                    try:
+                        vector = embed(cur, "Business policy", model)
+                    except oracledb.DatabaseError as exc:
+                        code = getattr(exc.args[0], "code", None) if exc.args else None
+                        # ORA-40290: the model is incompatible with this SQL operator.
+                        # Other failures indicate broken operations and must stop ingestion.
+                        if code != 40290:
+                            raise
+                        _logger.warning("Embedding model %r incompatible (ORA-%05d)", model, code)
+                        _probe_cache[model_key] = False
+                    else:
+                        if vector is None:
+                            _logger.warning("Embedding model %r returned no vector", model)
+                        _probe_cache[model_key] = vector is not None
+                if _probe_cache[model_key]:
                     backend = model
-                    model_version = (model, created, object_id)
+                    model_version = model_key
                     break
-                except oracledb.DatabaseError as exc:
-                    code = getattr(exc.args[0], "code", None) if exc.args else None
-                    # ORA-40290: the model is incompatible with this SQL operator.
-                    # Other failures indicate broken operations and must stop ingestion.
-                    if code != 40290:
-                        raise
-                    _logger.warning("Embedding model %r incompatible (ORA-%05d)", model, code)
             else:
                 _logger.warning("Using hash-v1-512 fallback: no compatible embedding models available")
             # Tag the collection fingerprint with the model revision. The non-hex prefix
