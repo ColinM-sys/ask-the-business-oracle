@@ -72,6 +72,20 @@ def test_pooled_connection_cleans_up_transaction(monkeypatch, fail):
     finally:
         if db._pool is not None:
             db._pool.close(force=True)
+
+
+def test_readme_documents_oracle_bootstrap_before_policy_setup():
+    readme = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
+    setup = readme.split("python policies.py", 1)[0]
+    for instruction in ("docker run", "container-registry.oracle.com/database/free:",
+                        "FREEPDB1", "CREATE USER", "CREATE SESSION", "CREATE TABLE",
+                        ".env", "ORACLE_USER=", "ORACLE_PASSWORD=", "ORACLE_DSN=",
+                        "data/oracle_load.sql", "python load.py"):
+        assert instruction in setup
+    assert (setup.index("docker run") < setup.index("CREATE USER")
+            < setup.index("ORACLE_USER=") < setup.index("python load.py"))
+
+
 def test_readme_documents_node_test_prerequisite():
     readme = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
     test_instructions = readme.split("python -m pytest -q test_app.py", 1)[1]
