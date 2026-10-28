@@ -30,3 +30,5 @@ a short brief: the cause, the evidence and 2-3 actions. Every number links to th
 ## Rules
 - Read-only SQL from the agent. Refuse DELETE, DROP, UPDATE, INSERT, ALTER, GRANT, and PL/SQL blocks.
 - Never print or commit API keys or DB passwords. Keep `.env` in `.gitignore`.
+
+Local DB: docker container oracle-free (Oracle AI Database 26ai Free), user atb, settings in .env. `docker start oracle-free` after a reboot. Tables loaded by `python load.py`.
