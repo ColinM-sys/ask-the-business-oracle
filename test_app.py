@@ -698,13 +698,56 @@ def test_margin_direction_uses_unrounded_sql(before, after, direction, below_pre
     assert result["dropped_count"] == 0
 
 
+@pytest.mark.parametrize("before,after,change", [
+    ((9.704, 10.104), (11.106, 12.306), 2.0),
+    ((11.106, 12.306), (9.704, 10.104), -2.0),
+])
+def test_discount_change_uses_unrounded_weighted_rates(before, after, change, monkeypatch):
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+        """)
+        for month, discounts in (("2025-06", before), ("2025-07", after)):
+            for quantity, discount in zip((1, 3), discounts):
+                con.execute("INSERT INTO sales VALUES (1, 1, ?, ?, ?, 100.0, ?)",
+                            (month, quantity * 100.0, quantity, discount))
+            con.execute("INSERT INTO costs VALUES (1, 1, ?, 60.0, 5.0)", (month,))
+
+        def run_sql(sql, params=None):
+            return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
+                con.execute(tools.validate_select(sql), params or {})]}
+
+        monkeypatch.setattr("agent.run_sql", run_sql)
+        monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
+        result = answer_question("West since July 2025")
+
+    row = result["evidence"]["E2"]["rows"][0]
+    assert sorted((row["before_discount_pct"], row["after_discount_pct"])) == [10.0, 12.01]
+    assert row["discount_change_pts"] == change
+    finding = next(c for c in result["claims"] if c["kind"] == "finding"
+                   and "discount" in c["parts"][0].get("text", "").lower())
+    part = next(p for p in finding["parts"] if p.get("column") == "discount_change_pts")
+    assert part == {"value": change, "evidence": "E2", "row": 0,
+                    "column": "discount_change_pts", "suffix": " percentage points"}
+    rendered = "".join(p.get("text", str(p.get("value", "")) + p.get("suffix", ""))
+                       for p in finding["parts"])
+    assert f"change: {change} percentage points" in rendered
+    assert supported(part, result["evidence"])
+    assert result["dropped_count"] == 0
+
+
 def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
     row = {
         "region_name": "West", "first_month": "2025-01", "last_month": "2025-09",
         "before_last_month": "2025-06", "after_first_month": "2025-07",
         "before_margin_pct": 40, "after_margin_pct": 25, "margin_drop_pts": 15,
         "margin_direction": "fell",
-        "before_discount_pct": 3, "after_discount_pct": 18,
+        "before_discount_pct": 3, "after_discount_pct": 18, "discount_change_pts": 15,
         "before_freight_per_unit": 0, "after_freight_per_unit": 5,
         "freight_increase_pct": None,
         "missing_cost_count": 0, "missing_discount_count": 0,
@@ -783,6 +826,9 @@ def test_undefined_metric_preserves_other_metric(unavailable_metric, unavailable
                 assert f"{period}_{column}" in cited_columns
         if metric == "freight" and unavailable_metric == "freight":
             assert "change: unavailable" in rendered
+        if metric == "discount" and unavailable_metric == "discount":
+            assert row["discount_change_pts"] is None
+            assert "change: unavailable" in rendered
     assert result["dropped_count"] == 0
 
 
@@ -792,7 +838,7 @@ def policy_rows(monkeypatch):
         "region_name": "West", "first_month": "2025-01", "last_month": "2025-09",
         "before_last_month": "2025-06", "after_first_month": "2025-07",
         "before_margin_pct": 40, "after_margin_pct": 25, "margin_drop_pts": 15,
-        "margin_direction": "fell", "before_discount_pct": 3, "after_discount_pct": 18,
+        "margin_direction": "fell", "before_discount_pct": 3, "after_discount_pct": 18, "discount_change_pts": 15,
         "before_freight_per_unit": 5, "after_freight_per_unit": 8,
         "freight_increase_pct": 60,
         "missing_cost_count": 0, "missing_discount_count": 0,
@@ -896,7 +942,7 @@ def retrieved_policy_rows(monkeypatch):
         "region_name": "West", "first_month": "2025-01", "last_month": "2025-09",
         "before_last_month": "2025-06", "after_first_month": "2025-07",
         "before_margin_pct": 40, "after_margin_pct": 25, "margin_drop_pts": 15,
-        "margin_direction": "fell", "before_discount_pct": 3, "after_discount_pct": 18,
+        "margin_direction": "fell", "before_discount_pct": 3, "after_discount_pct": 18, "discount_change_pts": 15,
         "before_freight_per_unit": 5, "after_freight_per_unit": 8,
         "freight_increase_pct": 60,
         "missing_cost_count": 0, "missing_discount_count": 0,
