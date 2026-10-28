@@ -4,6 +4,7 @@ import json
 import runpy
 import subprocess
 import sqlite3
+from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -480,6 +481,37 @@ def test_evidence_dialog_identifies_cited_cell(monkeypatch):
     assert "td.append(' (Cited cell)');" in html
     assert "td.setAttribute('aria-describedby', 'evidence-description');" in html
     assert html.index("description.textContent = `Cited cell:") < html.index("dialog.showModal()")
+def test_policy_citations_have_descriptive_accessible_names(monkeypatch):
+    documents = {"P1": "west_q3_volume_push.md", "P2": 'Freight & "carrier" memo.md'}
+    result = {
+        "region": "West",
+        "claims": [{"kind": "reason", "parts": [{"text": "Policy context."}],
+                    "policy_ids": list(documents)}],
+        "evidence": {id: {"kind": "policy", "rows": [{"doc": doc}]}
+                     for id, doc in documents.items()},
+    }
+    monkeypatch.setattr("app.answer_question", lambda _: result)
+
+    class CitationParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.buttons = []
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == "button" and attrs.get("class") == "citation":
+                self.buttons.append(attrs)
+
+    response = app.test_client().post("/", data={"question": "West"})
+    assert response.status_code == 200
+    parser = CitationParser()
+    parser.feed(response.get_data(as_text=True))
+    # Both inline citations and the evidence explorer must identify the document.
+    assert len(parser.buttons) == 4
+    for button in parser.buttons:
+        evidence_id = button["data-evidence"]
+        assert evidence_id in button.get("aria-label", "")
+        assert documents[evidence_id] in button["aria-label"]
 
 
 def test_ui_validation_and_safe_error(monkeypatch):

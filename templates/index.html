@@ -68,7 +68,7 @@
         {%- if 'text' in part -%}{{ part.text }}
         {%- else -%}<button type="button" class="number" data-evidence="{{ part.evidence }}" data-row="{{ part.row }}" data-column="{{ part.column }}" aria-label="Evidence for {{ part.value }}{{ part.suffix }}">{{ part.value }}{{ part.suffix }}</button>{%- endif -%}
       {%- endfor -%}
-      {% for id in claim.policy_ids %}<button type="button" class="citation" data-evidence="{{ id }}">{{ id }}</button>{% endfor %}
+      {% for id in claim.policy_ids %}<button type="button" class="citation" data-evidence="{{ id }}" aria-label="{{ id }}: {{ result.evidence[id].rows[0].doc }}">{{ id }}</button>{% endfor %}
       </p>
     {% else %}
     <p>No verified claims are available for this brief.</p>
@@ -77,7 +77,7 @@
     <p class="hint">Numbers in retained claims verified against cited SQL cells. Policy citations support the qualitative explanation.</p>
     {% endif %}
     <details><summary>Explore all evidence</summary>
-      <p>{% for id in result.evidence %}<button type="button" class="citation" data-evidence="{{ id }}">{{ id }}</button>{% endfor %}</p>
+      <p>{% for id in result.evidence %}<button type="button" class="citation" data-evidence="{{ id }}"{% if result.evidence[id].kind == 'policy' %} aria-label="{{ id }}: {{ result.evidence[id].rows[0].doc }}"{% endif %}>{{ id }}</button>{% endfor %}</p>
     </details>
   </article>
   <dialog id="evidence-dialog" aria-labelledby="evidence-title" aria-describedby="evidence-description">
