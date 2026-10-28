@@ -1133,7 +1133,7 @@ def test_ui_missing_question_rejected_before_querying(monkeypatch, data):
     assert response.status_code == 400
 
 
-def test_focus_indicator_contrasts_with_page_and_cards():
+def test_ui_boundaries_contrast_with_adjacent_backgrounds():
     html = app.test_client().get("/").get_data(as_text=True)
 
     def declaration(selector, name):
@@ -1151,11 +1151,17 @@ def test_focus_indicator_contrasts_with_page_and_cards():
                   for c in channels]
         return sum(weight * channel for weight, channel in zip((0.2126, 0.7152, 0.0722), linear))
 
-    outline = declaration(":focus-visible", "outline").split()[-1]
-    for surface in (declaration(":root", "background"), declaration(".card", "background")):
-        dark, light = sorted((luminance(outline), luminance(surface)))
-        contrast = (light + 0.05) / (dark + 0.05)
-        assert contrast >= 3, f"Focus outline {outline} has {contrast:.2f}:1 contrast against {surface}"
+    page = declaration(":root", "background")
+    for boundary, surfaces in (
+        (declaration(":focus-visible", "outline").split()[-1],
+         (page, declaration(".card", "background"))),
+        (declaration("input", "border").split()[-1],
+         (page, declaration("input", "background"))),
+    ):
+        for surface in surfaces:
+            dark, light = sorted((luminance(boundary), luminance(surface)))
+            contrast = (light + 0.05) / (dark + 0.05)
+            assert contrast >= 3, f"Boundary {boundary} has {contrast:.2f}:1 contrast against {surface}"
 
 
 def test_ui_restores_submit_button_on_pageshow():
