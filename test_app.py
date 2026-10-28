@@ -14,7 +14,7 @@ import pytest
 
 import tools
 from db import connect
-from agent import answer_question, parse_question, summary_sql
+from agent import COST_CHECK_SQL, MONTHLY_SQL, answer_question, parse_question, summary_sql
 from app import app
 from critic import critique, supported
 from policies import ensure_policies, hash_embedding
@@ -253,7 +253,8 @@ def test_question_scope():
 @pytest.mark.parametrize("rows", [[], [{"region_name": "East"}]])
 def test_missing_region_has_descriptive_validation_error(monkeypatch, rows):
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
-        "sql": sql, "params": params or {}, "rows": rows})
+        "sql": sql, "params": params or {},
+        "rows": [{"missing_costs": 0}] if sql == COST_CHECK_SQL else rows})
     with pytest.raises(ValueError, match="No sales/cost data found for West"):
         answer_question("Why did West margin fall since July 2025?")
     response = app.test_client().post("/", data={"question": "West"})
@@ -285,7 +286,8 @@ def test_margin_direction_uses_unrounded_sql(before, after, direction, below_pre
         rows = [dict(row) for row in con.execute(sql, {"cutoff": "2025-07"})]
 
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
-        "sql": sql, "params": params or {}, "rows": rows})
+        "sql": sql, "params": params or {},
+        "rows": [{"missing_costs": 0}] if sql == COST_CHECK_SQL else rows})
     monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
     result = answer_question("West since July 2025")
     finding = next(c for c in result["claims"] if c["kind"] == "finding")
@@ -294,6 +296,59 @@ def test_margin_direction_uses_unrounded_sql(before, after, direction, below_pre
     assert rendered.startswith(f"West gross margin {direction} from ")
     assert ("below display precision" in rendered) == below_precision
     assert result["dropped_count"] == 0
+
+
+@pytest.mark.parametrize("cost_column", ["unit_cogs", "freight_per_unit"])
+@pytest.mark.parametrize("month", ["2025-06", "2025-07"])
+@pytest.mark.parametrize("region_id", [1, 2])
+@pytest.mark.parametrize("cost_value", [None, 0])
+def test_required_costs_validated_before_margins(
+        cost_column, month, region_id, cost_value, monkeypatch):
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West'), (2, 'East');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+        """)
+        for region in (1, 2):
+            for sale_month in ("2025-06", "2025-07"):
+                for product in (1, 2):
+                    con.execute("INSERT INTO sales VALUES (?, ?, ?, 100.0, 1, 100.0, 0)",
+                                (region, product, sale_month))
+                    con.execute("INSERT INTO costs VALUES (?, ?, ?, 60.0, 10.0)",
+                                (region, product, sale_month))
+        # Keep a valid sale in the same region/period as the incomplete one.
+        con.execute(f"UPDATE costs SET {cost_column} = ? "
+                    "WHERE region_id = ? AND cost_month = ? AND product_id = 2",
+                    (cost_value, region_id, month))
+        queries = []
+
+        def run_local_sql(sql, params=None):
+            tools.validate_select(sql)
+            queries.append(sql)
+            return {"sql": sql, "params": params or {},
+                    "rows": [dict(row) for row in con.execute(sql, params or {})]}
+
+        monkeypatch.setattr("agent.run_sql", run_local_sql)
+        policy_search = MagicMock(return_value={"rows": []})
+        monkeypatch.setattr("agent.search_policies", policy_search)
+        if cost_value is None:
+            with pytest.raises(ValueError, match="COGS or freight"):
+                answer_question("West since July 2025")
+            assert MONTHLY_SQL not in queries
+            assert summary_sql() not in queries
+            policy_search.assert_not_called()
+        else:
+            result = answer_question("West since July 2025")
+            region_name = "West" if region_id == 1 else "East"
+            row = next(r for r in result["evidence"]["E2"]["rows"]
+                       if r["region_name"] == region_name)
+            period = "before" if month == "2025-06" else "after"
+            assert row[f"{period}_margin_pct"] == (60 if cost_column == "unit_cogs" else 35)
+            assert result["dropped_count"] == 0
 
 
 def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
@@ -307,7 +362,8 @@ def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
         "freight_increase_pct": None,
     }
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
-        "sql": sql, "params": params or {}, "rows": [row]})
+        "sql": sql, "params": params or {},
+        "rows": [{"missing_costs": 0}] if sql == COST_CHECK_SQL else [row]})
     monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
 
     result = answer_question("Why did West margin fall since July 2025?")

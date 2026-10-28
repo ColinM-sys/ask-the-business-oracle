@@ -7,6 +7,8 @@ from tools import run_sql, search_policies
 JOIN = """FROM sales s JOIN costs c ON c.region_id=s.region_id
     AND c.product_id=s.product_id AND c.cost_month=s.sale_month
     JOIN regions r ON r.region_id=s.region_id"""
+COST_CHECK_SQL = f"""SELECT COUNT(*) AS missing_costs {JOIN}
+    WHERE c.unit_cogs IS NULL OR c.freight_per_unit IS NULL"""
 MONTHLY_SQL = f"""SELECT r.region_name, s.sale_month,
     ROUND(SUM(s.net_revenue),2) AS revenue,
     SUM(s.quantity) AS units,
@@ -81,6 +83,9 @@ def answer_question(question):
     if not isinstance(question, str) or not question.strip() or len(question) > 1000:
         raise ValueError("Enter a business question of up to one thousand characters.")
     region, cutoff = parse_question(question)
+    # All regions appear in the evidence and comparisons, so validate them all.
+    if run_sql(COST_CHECK_SQL)["rows"][0]["missing_costs"]:
+        raise ValueError("Cannot calculate margins: sales have missing COGS or freight costs.")
     evidence = {
         "E1": {"kind": "sql", **run_sql(MONTHLY_SQL)},
         "E2": {"kind": "sql", **run_sql(summary_sql(), {"cutoff": cutoff})},
