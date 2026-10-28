@@ -27,8 +27,10 @@ An orchestration layer drove four kinds of agent:
 - **AgentSocial:** a prompt change turned a rubber-stamping checker (46 confirmed, 0 challenged) into a
   discriminating one (9 confirmed, 43 challenged).
 
-We also document twelve operational failures. The largest were process mass-termination tied to how jobs were
-launched, and a model/effort combination that exits under `codex exec`. We give the fix for each.
+We also document twelve operational failures and the fix for each. The largest was a local runaway-process
+guard. It terminates any 25 or more processes that share an identical command line, and our stdin-prompted
+agents did. We first misattributed that failure to how jobs were launched and to one model setting; §5
+records the correction.
 
 ## 1 Introduction
 
@@ -80,7 +82,7 @@ Every agent is one `codex exec` process.
 |---|---|---|
 | GPT-6.1-Sol | default | Codex default until 13:40 ET |
 | GPT-6.1-Terra | `ultra` | default from 13:56; 500k context |
-| GPT-6-Astra | `max` | `ultra` (with automatic task delegation) exits with code 15 under `codex exec` |
+| GPT-6-Astra | `max` in the main runs | `ultra` also works: a full review completed in 161 s once command lines were unique (§5) |
 
 **Sandboxing on Windows:**
 - **Reviewers** receive the code in their prompt and run in an empty folder with `-s danger-full-access`.
@@ -284,10 +286,19 @@ checked once, and 2 remained contested at pause.
 | 6 | Many fixers on the same bug | redundant reviewers | dedupe on (file, ⌊line/10⌋) |
 | 7 | Later rounds re-found old bugs | no merge between rounds | merge bots plus rounds on the new `master` |
 | 8 | No commits for 20+ minutes | round barrier behind 200 slow reviewers | stream findings straight to fixers |
-| 9 | Hundreds of agents exited 15 at once | jobs started inside the orchestrating session ended with it | launch detached and hidden through WMI |
-| 10 | Every Astra reviewer exited 15 | Astra at `ultra` effort under `codex exec` | Astra at `max`, Terra at `ultra` |
+| 9 | Hundreds of agents exited 15 at once, in bursts | a local runaway-process guard, installed after an earlier fork-bomb incident, terminates any group of ≥25 node/python/cmd processes with an identical command line (psutil kill → exit code 15). Stdin-prompted `codex exec` runs share one command line. | give every agent a unique command line (`--cd <unique dir>`); the guard stays on |
+| 10 | Every Astra reviewer exited 15 | the same guard: the Astra reviewers shared one command line | none needed. Astra at `ultra` completed a full review (rc 0, 161 s) once its command line was unique |
 | 11 | Merge bots rejected sound PRs | bot reviewer was sandboxed | diff-only review; wrongly closed PRs reopened |
 | 12 | Fixers failed after a restart | branch numbers reused | number new branches above the highest existing branch |
+
+**Correction.** During the run we blamed failure 9 on jobs started inside the orchestrating session, and
+failure 10 on Astra's `ultra` effort. We moved jobs to detached launches and ran Astra at `max`. Kills continued
+after the move, though, and a teammate session traced them to the guard. A retest with a unique command line then
+cleared `ultra`.
+
+**What the evidence shows:**
+- The 200-agent scaling run survived because its prompts went in argv, so every command line was unique.
+- Pipelined rounds showed no failures while each model's concurrency stayed below 25.
 
 **Most of the "not completed" runs** in Table 2 come from failures 9 and 10. Their tokens up to the point of
 termination are still counted.
