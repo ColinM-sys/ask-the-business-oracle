@@ -221,6 +221,25 @@ def test_guard_accepts_comments_and_harmless_string():
     tools.validate_select("SELECT 'DROP TABLE sales' AS harmless FROM regions")
 
 
+@pytest.mark.parametrize("sql, columns, rows", [
+    ("SELECT region_id, region_id + 1 AS region_id FROM regions",
+     ["REGION_ID", "REGION_ID"], [(1, 2)]),
+    ('SELECT region_id AS "ID", region_id + 1 AS "id" FROM regions',
+     ["ID", "id"], [(1, 2)]),
+    ("SELECT region_id, region_id + 1 AS region_id FROM regions WHERE 1 = 0",
+     ["REGION_ID", "REGION_ID"], []),
+])
+def test_run_sql_rejects_duplicate_evidence_columns(sql, columns, rows, monkeypatch):
+    connection = MagicMock()
+    cursor = connection.__enter__.return_value.cursor.return_value.__enter__.return_value
+    cursor.description = [(name,) for name in columns]
+    cursor.fetchmany.return_value = rows
+    monkeypatch.setattr(tools, "connect", lambda: connection)
+
+    with pytest.raises(ValueError, match="duplicate column names"):
+        tools.run_sql(sql)
+
+
 @pytest.mark.parametrize("name", ["sales", "costs", "customers", "discounts", "products", "regions"])
 def test_guard_resolves_oracle_table_names(name, monkeypatch):
     for identifier in (name, name.upper(), name.capitalize(), f'"{name.upper()}"'):
