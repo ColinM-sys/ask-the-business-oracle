@@ -59,6 +59,9 @@
   <article class="card" aria-live="polite">
     <div class="eyebrow">Business brief · {{ result.region }}</div>
     <h2>What changed, and what to do</h2>
+    {% if result.dropped_count %}
+    <p class="error" role="alert">{{ result.dropped_count }} claim{{ 's' if result.dropped_count != 1 else '' }} {{ 'were' if result.dropped_count != 1 else 'was' }} omitted because they failed verification.</p>
+    {% endif %}
     {% for claim in result.claims %}
       <p class="{{ claim.kind }}">
       {%- for part in claim.parts -%}
@@ -67,8 +70,12 @@
       {%- endfor -%}
       {% for id in claim.policy_ids %}<button type="button" class="citation" data-evidence="{{ id }}">{{ id }}</button>{% endfor %}
       </p>
+    {% else %}
+    <p>No verified claims are available for this brief.</p>
     {% endfor %}
-    <p class="hint">Numbers verified against cited SQL cells. Policy citations support the qualitative explanation.</p>
+    {% if result.claims %}
+    <p class="hint">Numbers in retained claims verified against cited SQL cells. Policy citations support the qualitative explanation.</p>
+    {% endif %}
     <details><summary>Explore all evidence</summary>
       <p>{% for id in result.evidence %}<button type="button" class="citation" data-evidence="{{ id }}">{{ id }}</button>{% endfor %}</p>
     </details>
