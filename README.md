@@ -40,6 +40,9 @@ writes/locks/sequences/procedural calls, and executes in a read-only transaction
 It refuses evidence over the row limit instead of silently truncating it.
 Policy setup is the separate write path. The Flask server binds only to localhost
 and runs without debug mode; this demo has no production authentication layer.
+Unexpected failures are recorded in the Flask server log with exception types and
+traceback locations, without exception messages or request data. Restrict log
+access to operators and configure retention in the hosting environment.
 
 ```powershell
 python -m pytest -q test_app.py

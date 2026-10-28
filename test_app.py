@@ -883,6 +883,32 @@ def test_ui_validation_and_safe_error(monkeypatch):
     assert b"secret-driver-settings" not in response.data
 
 
+def test_ui_unexpected_failure_logs_sanitized_traceback(monkeypatch, caplog):
+    def failure(_):
+        try:
+            raise oracledb.DatabaseError("private-driver-details\nforged log entry")
+        except oracledb.DatabaseError as cause:
+            raise RuntimeError("secret-wrapper-details") from cause
+
+    monkeypatch.setattr("app.answer_question", failure)
+    response = app.test_client().post("/", data={"question": "private-question"})
+
+    assert response.status_code == 503
+    assert b"Analysis unavailable. Check the local Oracle connection and policy setup, then retry." in response.data
+    for secret in ("private-driver-details", "forged log entry", "secret-wrapper-details"):
+        assert secret not in response.get_data(as_text=True)
+        assert secret not in caplog.text
+    assert "private-question" not in caplog.text
+    records = [record for record in caplog.records if record.name == app.logger.name]
+    assert len(records) == 1
+    assert records[0].exc_info is None
+    assert "RuntimeError" in records[0].getMessage()
+    assert "DatabaseError" in records[0].getMessage()
+    assert "test_app.py" in records[0].getMessage()
+    assert f"('test_app.py', 'failure', {failure.__code__.co_firstlineno + 2})" in records[0].getMessage()
+    assert f"('test_app.py', 'failure', {failure.__code__.co_firstlineno + 4})" in records[0].getMessage()
+
+
 def test_script_starts_and_shows_unavailable_when_setup_fails(monkeypatch):
     def failure(*args, **kwargs):
         raise RuntimeError("secret-driver-settings")
