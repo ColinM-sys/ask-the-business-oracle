@@ -722,6 +722,25 @@ def test_flask_live_brief_and_evidence():
     assert b"evidence-dialog" in response.data
 
 
+@pytest.mark.parametrize("missing_reason,missing_actions", [
+    (False, False), (True, False), (False, True), (True, True),
+])
+def test_ui_discloses_missing_explanation_and_actions(policy_rows, missing_reason, missing_actions):
+    for policy in policy_rows:
+        if ((missing_reason and policy["doc"] == "west_q3_volume_push.md") or
+                (missing_actions and policy["doc"] == "pricing_policy.md")):
+            policy["chunk"] = ""
+
+    response = app.test_client().post("/", data={"question": "West since July 2025"})
+
+    assert response.status_code == 200
+    assert b"West gross margin" in response.data
+    assert (b"No verified explanation is available for this brief." in response.data) == missing_reason
+    assert (b"No verified actions are available for this brief." in response.data) == missing_actions
+    assert (b"The policy documents identify a regional volume discount push" in response.data) == (not missing_reason)
+    assert (b"Review discount approvals with Sales and Finance" in response.data) == (not missing_actions)
+
+
 @pytest.mark.parametrize("has_claims,dropped_count", [(True, 0), (True, 2), (False, 2), (False, 0)])
 def test_ui_discloses_dropped_claims_and_empty_brief(monkeypatch, has_claims, dropped_count):
     result = {
@@ -739,6 +758,8 @@ def test_ui_discloses_dropped_claims_and_empty_brief(monkeypatch, has_claims, dr
     assert (b"No verified claims are available for this brief." in response.data) == (not has_claims)
     assert (b"Numbers in retained claims verified against cited SQL cells." in response.data) == has_claims
     assert (b"Retained finding." in response.data) == has_claims
+    assert b"No verified explanation is available for this brief." in response.data
+    assert b"No verified actions are available for this brief." in response.data
 @pytest.mark.parametrize("data", [None, {}, {"unrelated": "value"}, {"question": ""}])
 def test_ui_missing_question_rejected_before_querying(monkeypatch, data):
     def forbidden_query(*args, **kwargs):

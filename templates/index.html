@@ -73,6 +73,12 @@
     {% else %}
     <p>No verified claims are available for this brief.</p>
     {% endfor %}
+    {% if not (result.claims | selectattr('kind', 'equalto', 'reason') | list) %}
+    <p>No verified explanation is available for this brief.</p>
+    {% endif %}
+    {% if not (result.claims | selectattr('kind', 'equalto', 'action') | list) %}
+    <p>No verified actions are available for this brief.</p>
+    {% endif %}
     {% if result.claims %}
     <p class="hint">Numbers in retained claims verified against cited SQL cells. Policy citations support the qualitative explanation.</p>
     {% endif %}
