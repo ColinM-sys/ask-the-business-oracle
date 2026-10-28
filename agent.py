@@ -85,7 +85,9 @@ def answer_question(question):
         "E2": {"kind": "sql", **run_sql(summary_sql(), {"cutoff": cutoff})},
     }
     rows = evidence["E2"]["rows"]
-    index = next(i for i, row in enumerate(rows) if row["region_name"] == region)
+    index = next((i for i, row in enumerate(rows) if row["region_name"] == region), None)
+    if index is None:
+        raise ValueError(f"No sales/cost data found for {region}.")
     row = rows[index]
     if row["before_margin_pct"] is None or row["after_margin_pct"] is None:
         raise ValueError("The comparison date must have sales both before and after it.")

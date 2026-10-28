@@ -135,6 +135,17 @@ def test_question_scope():
         parse_question("West and East")
 
 
+@pytest.mark.parametrize("rows", [[], [{"region_name": "East"}]])
+def test_missing_region_has_descriptive_validation_error(monkeypatch, rows):
+    monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
+        "sql": sql, "params": params or {}, "rows": rows})
+    with pytest.raises(ValueError, match="No sales/cost data found for West"):
+        answer_question("Why did West margin fall since July 2025?")
+    response = app.test_client().post("/", data={"question": "West"})
+    assert response.status_code == 400
+    assert b"No sales/cost data found for West" in response.data
+
+
 def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
     row = {
         "region_name": "West", "first_month": "2025-01", "last_month": "2025-09",
