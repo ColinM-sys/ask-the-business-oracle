@@ -118,8 +118,9 @@ def answer_question(question):
         raise ValueError("The comparison date must have sales both before and after it.")
     policies = search_policies(f"{region} margin discount freight policy " + question)
     for policy in policies["rows"]:
-        evidence[f"P{policy['id']}"] = {"kind": "policy", "sql": policies["sql"],
-            "params": policies["params"], "rows": [policy]}
+        evidence[f"P{policy['id']}"] = {"kind": "policy",
+            "sql": f"SELECT * FROM (\n{policies['sql']}\n) WHERE id = :policy_id",
+            "params": {**policies["params"], "policy_id": policy["id"]}, "rows": [policy]}
 
     def text(value):
         return {"text": value}

@@ -675,6 +675,18 @@ def test_west_live_end_to_end(west_answer):
 
 
 def test_live_evidence_replays(west_answer):
+    policy_sources = [(key, source) for key, source in west_answer["evidence"].items()
+                      if source["kind"] == "policy"]
+    assert len(policy_sources) > 1
+    with connect() as con, con.cursor() as cur:
+        cur.execute("SET TRANSACTION READ ONLY")
+        for key, source in policy_sources:
+            params = json.loads(json.dumps(source["params"]))
+            rows = cur.execute(source["sql"], params).fetchall()
+            columns = [column[0].lower() for column in cur.description]
+            assert [dict(zip(columns, row)) for row in rows] == source["rows"]
+            assert len(source["rows"]) == 1
+            assert key == f"P{source['rows'][0]['id']}"
     for source in west_answer["evidence"].values():
         if source["kind"] == "sql":
             assert tools.run_sql(source["sql"], source["params"])["rows"] == source["rows"]
