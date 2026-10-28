@@ -6,6 +6,11 @@ from critic import critique
 from policies import DOCS
 from tools import run_sql, search_policies
 
+
+class QuestionValidationError(ValueError):
+    """A user-facing problem with the requested analysis."""
+
+
 # SHA-256 of the complete, whitespace-normalized chunks reviewed for the fixed
 # claims below. Changed or partial chunks require reviewing both the claims and
 # these fingerprints; deriving them from current files would approve edits blindly.
@@ -77,11 +82,11 @@ def parse_question(question):
     unsupported = re.search(
         r"\b(north|northwest|northeast|southwest|southeast)\b", question, re.I)
     if unsupported:
-        raise ValueError(f"Unsupported region: {unsupported[0]}. Choose West, Central, East, or South.")
+        raise QuestionValidationError(f"Unsupported region: {unsupported[0]}. Choose West, Central, East, or South.")
     region_matches = [r for r in ("West", "Central", "East", "South")
                       if re.search(rf"\b{r}\b", question, re.I)]
     if len(region_matches) > 1:
-        raise ValueError("Ask about one region at a time; the evidence includes all regions for comparison.")
+        raise QuestionValidationError("Ask about one region at a time; the evidence includes all regions for comparison.")
     cutoff = "2025-07"
     date = re.search(r"\b(20\d{2})-(0[1-9]|1[0-2])\b(?![-/\d])", question)
     month_pattern = r"\b(" + "|".join(MONTHS) + r")\b"
@@ -95,13 +100,13 @@ def parse_question(question):
     remaining = question[:matched.start()] + question[matched.end():] if matched else question
     if (re.search(r"\b\d{4}\b|\b\d+[-/]\d+\b", remaining)
             or re.search(month_pattern, remaining, re.I)):
-        raise ValueError("Unsupported date; use YYYY-MM or a month name and four-digit year.")
+        raise QuestionValidationError("Unsupported date; use YYYY-MM or a month name and four-digit year.")
     return region_matches[0] if region_matches else "West", cutoff
 
 
 def answer_question(question):
     if not isinstance(question, str) or not question.strip() or len(question) > 1000:
-        raise ValueError("Enter a business question of up to one thousand characters.")
+        raise QuestionValidationError("Enter a business question of up to one thousand characters.")
     region, cutoff = parse_question(question)
     evidence = {
         "E1": {"kind": "sql", **run_sql(MONTHLY_SQL)},
@@ -110,12 +115,12 @@ def answer_question(question):
     rows = evidence["E2"]["rows"]
     index = next((i for i, row in enumerate(rows) if row["region_name"] == region), None)
     if index is None:
-        raise ValueError(f"No sales/cost data found for {region}.")
+        raise QuestionValidationError(f"No sales/cost data found for {region}.")
     if any(row["missing_cost_count"] for row in rows):
         raise ValueError("Missing monthly costs for some sales; cannot analyze incomplete data.")
     row = rows[index]
     if row["before_margin_pct"] is None or row["after_margin_pct"] is None:
-        raise ValueError("The comparison date must have sales both before and after it.")
+        raise QuestionValidationError("The comparison date must have sales both before and after it.")
     policies = search_policies(f"{region} margin discount freight policy " + question)
     for policy in policies["rows"]:
         evidence[f"P{policy['id']}"] = {"kind": "policy", "sql": policies["sql"],
