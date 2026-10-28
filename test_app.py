@@ -1973,6 +1973,8 @@ def test_question_month_abbreviations(month):
 
 @pytest.mark.parametrize("date", ["2026-13", "2026-00", "2026/07", "2026-07-15",
                                   "Smarch 2026", "2026", "July 26", "July",
+                                  "20261", "202601", "202613", "2026011", "20260115",
+                                  "July 2025 and 202601", "2025-07 and 202601",
                                   "July 2025 and 2026-13"])
 def test_question_rejects_unsupported_explicit_dates(date):
     with pytest.raises(ValueError, match="date"):
