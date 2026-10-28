@@ -7,6 +7,7 @@ from agent import QuestionValidationError, answer_question
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024
+app.config["TRUSTED_HOSTS"] = ["localhost", "127.0.0.1"]
 
 
 @app.template_filter()
