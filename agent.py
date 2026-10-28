@@ -56,7 +56,7 @@ def summary_sql():
         for name, expression in raw[period].items():
             columns.append(f"ROUND({expression},2) AS {period}_{name}")
     columns.extend([
-        "COUNT(*)-COUNT(c.cost_month) AS missing_cost_count",
+        "SUM(CASE WHEN c.unit_cogs IS NULL OR c.freight_per_unit IS NULL THEN 1 ELSE 0 END) AS missing_cost_count",
         f"CASE WHEN ({raw['before']['margin_pct']}) > ({raw['after']['margin_pct']}) THEN 'fell' WHEN ({raw['before']['margin_pct']}) < ({raw['after']['margin_pct']}) THEN 'rose' ELSE 'was unchanged' END AS margin_direction",
         f"ROUND(({raw['before']['margin_pct']})-({raw['after']['margin_pct']}),2) AS margin_drop_pts",
         f"ROUND(100*(({raw['after']['freight_per_unit']})/NULLIF(({raw['before']['freight_per_unit']}),0)-1),2) AS freight_increase_pct",
@@ -177,7 +177,10 @@ def answer_question(question):
     if region == "West" and cutoff == "2025-07":
         push, freight = policy_ids("west_q3_volume_push.md"), policy_ids("freight_contract_memo.md")
         if push and freight:
-            claim("reason", [text("The policy documents identify a regional volume discount push and a replacement freight contract. The discount program bypassed senior sales approval and Finance review. These changes are consistent with the observed margin decline; this comparison does not isolate their individual causal effects.")], push + freight)
+            impact = ("These changes are consistent with the observed margin decline"
+                      if direction == "fell" else f"The observed margin {direction}")
+            claim("reason", [text("The policy documents identify a regional volume discount push and a replacement freight contract. The discount program bypassed senior sales approval and Finance review. "
+                f"{impact}; this comparison does not isolate their individual causal effects.")], push + freight)
     else:
         claim("reason", [text("Use the discount and freight movements to investigate the margin change. The retrieved West-specific documents do not establish a cause for this region and comparison period.")])
     pricing = policy_ids("pricing_policy.md")
