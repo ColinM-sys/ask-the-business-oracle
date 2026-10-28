@@ -364,10 +364,11 @@ def test_question_scope():
 
 
 @pytest.mark.parametrize("region_id", [1, 2])
+@pytest.mark.parametrize("cost", [None, (None, 5.0), (60.0, None), (None, None)])
 @pytest.mark.parametrize("month,product_id", [
     ("2025-05", 1), ("2025-06", 2), ("2025-08", 1),
 ])
-def test_missing_monthly_costs_reject_incomplete_analysis(region_id, month, product_id, monkeypatch):
+def test_missing_monthly_costs_reject_incomplete_analysis(region_id, month, product_id, cost, monkeypatch):
     # Missing costs must not hide boundary months or sales within a covered month,
     # including sales in a comparison region.
     with sqlite3.connect(":memory:") as con:
@@ -387,6 +388,9 @@ def test_missing_monthly_costs_reject_incomplete_analysis(region_id, month, prod
                             (matched_region, matched_month))
         con.execute("INSERT INTO sales VALUES (?, ?, ?, 100.0, 1, 100.0, 0)",
                     (region_id, product_id, month))
+        if cost is not None:
+            con.execute("INSERT INTO costs VALUES (?, ?, ?, ?, ?)",
+                        (region_id, product_id, month, *cost))
 
         def run_sql(sql, params=None):
             return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
@@ -402,8 +406,13 @@ def test_missing_monthly_costs_reject_incomplete_analysis(region_id, month, prod
         assert response.status_code == 503
         assert b"Missing monthly costs" not in response.data
 
-        con.execute("INSERT INTO costs VALUES (?, ?, ?, 60.0, 5.0)",
-                    (region_id, product_id, month))
+        if cost is None:
+            con.execute("INSERT INTO costs VALUES (?, ?, ?, 60.0, 5.0)",
+                        (region_id, product_id, month))
+        else:
+            con.execute("UPDATE costs SET unit_cogs=0, freight_per_unit=0 "
+                        "WHERE region_id=? AND product_id=? AND cost_month=?",
+                        (region_id, product_id, month))
         assert answer_question("West since July 2025")["dropped_count"] == 0
 
 
@@ -423,7 +432,7 @@ def test_missing_region_has_descriptive_validation_error(monkeypatch, rows):
     (25, 26, "rose", False),
     (26, 25, "fell", False),
 ])
-def test_margin_direction_uses_unrounded_sql(before, after, direction, below_precision, monkeypatch):
+def test_margin_direction_uses_unrounded_sql(before, after, direction, below_precision, monkeypatch, policy_rows):
     # Execute the production aggregation over controlled rows without changing Oracle data.
     with sqlite3.connect(":memory:") as con:
         con.row_factory = sqlite3.Row
@@ -443,13 +452,22 @@ def test_margin_direction_uses_unrounded_sql(before, after, direction, below_pre
 
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
         "sql": sql, "params": params or {}, "rows": rows})
-    monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
     result = answer_question("West since July 2025")
     finding = next(c for c in result["claims"] if c["kind"] == "finding")
     rendered = "".join(p.get("text", str(p.get("value", "")) + p.get("suffix", ""))
                        for p in finding["parts"])
     assert rendered.startswith(f"West gross margin {direction} from ")
     assert ("below display precision" in rendered) == below_precision
+    reason = next(c for c in result["claims"] if c["kind"] == "reason")
+    explanation = "".join(p["text"] for p in reason["parts"])
+    if direction == "fell":
+        assert "consistent with the observed margin decline" in explanation
+    else:
+        assert f"The observed margin {direction}" in explanation
+        assert "margin decline" not in explanation
+    assert set(reason["policy_ids"]) == {
+        f"P{p['id']}" for p in policy_rows
+        if p["doc"] in {"west_q3_volume_push.md", "freight_contract_memo.md"}}
     assert result["dropped_count"] == 0
 
 
