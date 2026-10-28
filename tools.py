@@ -18,6 +18,9 @@ def validate_select(sql):
         statements = sqlglot.parse(sql, read="oracle")
     except sqlglot.errors.SqlglotError as exc:
         raise ValueError("Invalid SELECT") from exc
+    # SQLGlot represents comments after a terminal delimiter as a Semicolon node.
+    if len(statements) == 2 and isinstance(statements[-1], exp.Semicolon):
+        statements.pop()
     if len(statements) != 1 or not isinstance(statements[0], exp.Select):
         raise ValueError("Only a single read-only SELECT is allowed")
     tree = statements[0]
@@ -35,15 +38,15 @@ def validate_select(sql):
             raise ValueError("Function is not in the read-only allowlist")
     if tree.find(exp.Dot) or any(c.name.lower() in {"nextval", "currval"} for c in tree.find_all(exp.Column)):
         raise ValueError("Object calls and sequence access are refused")
-    return sql
+    return tree.sql(dialect="oracle", comments=False)
 
 
 def run_sql(select, params=None):
-    validate_select(select)
+    executable = validate_select(select)
     with connect() as con:
         with con.cursor() as cur:
             cur.execute("SET TRANSACTION READ ONLY")
-            cur.execute(select.rstrip().removesuffix(";"), params or {})
+            cur.execute(executable, params or {})
             columns = [d[0].lower() for d in cur.description]
             rows = cur.fetchmany(1001)
             if len(rows) > 1000:
