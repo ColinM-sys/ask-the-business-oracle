@@ -26,7 +26,7 @@ from agent import (DataQualityError, DiscountDataQualityError, RevenueDataQualit
                    answer_question, parse_question, summary_sql)
 from app import app
 from critic import critique, supported
-from policies import ensure_policies, hash_embedding
+from policies import ensure_policies, hash_embedding, source_fingerprint
 
 
 @pytest.mark.parametrize("wallet", [None, "test-wallet"])
@@ -345,6 +345,12 @@ def test_hashing_is_stable_and_normalized():
     assert abs(sum(v*v for v in first) - 1) < 0.000001
 
 
+def policy_source_hash(directory):
+    sources = [(path.name, path.read_text(encoding="utf-8"))
+               for path in sorted(directory.glob("*.md"))]
+    return "v" * 32 + source_fingerprint(sources)
+
+
 @pytest.mark.parametrize("failure_mode", ["incompatible", "null"])
 def test_policy_probe_cache_tracks_model_versions(failure_mode, tmp_path, monkeypatch):
     (tmp_path / "policy.md").write_text("Distinct policy content", encoding="utf-8")
@@ -385,7 +391,8 @@ def test_policy_probe_cache_tracks_model_versions(failure_mode, tmp_path, monkey
     monkeypatch.setattr("policies.embed", embedding)
     monkeypatch.setattr("policies._probe_cache", {}, raising=False)
 
-    assert ensure_policies() == "GOOD_MODEL"
+    assert ensure_policies(include_fingerprint=True) == ("GOOD_MODEL", rows[0]["fingerprint"])
+    assert ensure_policies(include_fingerprint=True) == ("GOOD_MODEL", rows[0]["fingerprint"])
     with ThreadPoolExecutor(max_workers=4) as executor:
         assert list(executor.map(lambda _: ensure_policies(), range(4))) == ["GOOD_MODEL"] * 4
     assert probes == models
@@ -1077,8 +1084,8 @@ def test_policy_search_handles_empty_table(monkeypatch):
     connection = MagicMock()
     connection.__enter__.return_value = connection
     cursor = connection.cursor.return_value.__enter__.return_value
-    cursor.execute.return_value.fetchone.return_value = None
-    monkeypatch.setattr(tools, "ensure_policies", lambda: None)
+    cursor.execute.return_value.fetchall.return_value = []
+    monkeypatch.setattr(tools, "ensure_policies", lambda **kwargs: ("hash-v1-512", "fingerprint"))
     monkeypatch.setattr(tools, "connect", lambda: connection)
     embedding = MagicMock()
     monkeypatch.setattr(tools, "embed", embedding)
@@ -1087,6 +1094,83 @@ def test_policy_search_handles_empty_table(monkeypatch):
         tools.search_policies("West freight")
 
     embedding.assert_not_called()
+
+
+@pytest.mark.parametrize("metadata", [
+    [("hash-v1-512", "v" * 32 + "b" * 32)],
+    [("hash-v1-512", "v" * 32 + "a" * 32),
+     ("hash-v1-512", "v" * 32 + "b" * 32)],
+    [("OTHER_MODEL", "v" * 32 + "a" * 32)],
+])
+def test_policy_search_rejects_corpus_replaced_after_setup(metadata, monkeypatch):
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value.__enter__.return_value
+    ensured = ("hash-v1-512", "v" * 32 + "a" * 32)
+    setup = MagicMock(return_value=ensured)
+    monkeypatch.setattr(tools, "ensure_policies", setup)
+    monkeypatch.setattr(tools, "connect", lambda: connection)
+    embedding = MagicMock(return_value=hash_embedding("West freight"))
+    monkeypatch.setattr(tools, "embed", embedding)
+
+    def execute(sql, *args, **kwargs):
+        if sql.startswith("SELECT backend FROM"):
+            cursor.fetchone.return_value = ("hash-v1-512",)
+        elif sql.startswith("SELECT DISTINCT backend, source_hash"):
+            cursor.fetchall.return_value = metadata
+        elif "VECTOR_DISTANCE" in sql:
+            cursor.fetchall.return_value = [
+                (1, "west_q3_volume_push.md", "Unchanged reviewed policy", 0.1),
+                (2, "superseding.md", "The earlier policy is revoked", 0.2),
+            ]
+        return cursor
+
+    cursor.execute.side_effect = execute
+    with pytest.raises(RuntimeError, match="Policy corpus"):
+        tools.search_policies("West freight")
+
+    setup.assert_called_once_with(include_fingerprint=True)
+    assert cursor.execute.call_args_list[0].args[0] == "SET TRANSACTION READ ONLY"
+    assert cursor.execute.call_args_list[1].args[0].startswith("SELECT DISTINCT backend, source_hash")
+    embedding.assert_not_called()
+
+
+def test_policy_search_keeps_fingerprint_and_results_in_one_snapshot(monkeypatch):
+    ensured = ("hash-v1-512", "v" * 32 + "a" * 32)
+    current = [(1, "original.md", "Original policy", 0.1)]
+    snapshot = []
+    events = []
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value.__enter__.return_value
+
+    def execute(sql, *args, **kwargs):
+        if sql == "SET TRANSACTION READ ONLY":
+            events.append("snapshot")
+            snapshot.extend(current)
+        elif sql.startswith("SELECT DISTINCT backend, source_hash"):
+            events.append("metadata")
+            cursor.fetchall.return_value = [ensured]
+        elif "VECTOR_DISTANCE" in sql:
+            events.append("search")
+            cursor.fetchall.return_value = list(snapshot)
+        return cursor
+
+    def embed_in_next_snapshot(*args):
+        events.append("embed")
+        current[:] = [(2, "superseding.md", "Revised policy", 0.1)]
+        return hash_embedding("West freight")
+
+    cursor.execute.side_effect = execute
+    monkeypatch.setattr(tools, "ensure_policies", lambda **kwargs: ensured)
+    monkeypatch.setattr(tools, "connect", lambda: connection)
+    monkeypatch.setattr(tools, "embed", embed_in_next_snapshot)
+
+    result = tools.search_policies("West freight")
+
+    assert events == ["snapshot", "metadata", "embed", "search"]
+    assert result["source_hash"] == ensured[1]
+    assert [row["doc"] for row in result["rows"]] == ["original.md"]
 
 
 def test_question_scope():
@@ -1643,7 +1727,8 @@ def test_zero_revenue_preserves_available_metrics(zero_period, monkeypatch):
         policies = [{"id": i, "doc": path.name, "chunk": path.read_text(encoding="utf-8").strip()}
                     for i, path in enumerate(sorted(Path(__file__).with_name("docs").glob("*.md")), 1)]
         monkeypatch.setattr("agent.search_policies", lambda _: {
-            "sql": "SELECT policy evidence", "params": {}, "rows": policies})
+            "sql": "SELECT policy evidence", "params": {}, "rows": policies,
+            "source_hash": policy_source_hash(Path(__file__).with_name("docs"))})
         question = "West since July 2025"
         result = answer_question(question)
         response = app.test_client().post("/", data={"question": question})
@@ -1884,7 +1969,8 @@ def policy_rows(monkeypatch):
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
         "sql": sql, "params": params or {}, "rows": [row]})
     monkeypatch.setattr("agent.search_policies", lambda _: {
-        "sql": "SELECT policy evidence", "params": {}, "rows": policies})
+        "sql": "SELECT policy evidence", "params": {}, "rows": policies,
+        "source_hash": policy_source_hash(Path(__file__).with_name("docs"))})
     return policies
 
 
@@ -1897,6 +1983,19 @@ def test_reviewed_policy_text_supports_claims_and_only_matching_citations(policy
     assert all(claim["policy_ids"] for claim in claims)
     assert {citation for claim in claims for citation in claim["policy_ids"]} == {"P1", "P2", "P3", "P4"}
     assert result["dropped_count"] == 0
+
+
+def test_fixed_claims_require_searched_corpus_to_match_reviewed_files(policy_rows, monkeypatch):
+    # The files were restored after setup, while the searched snapshot still contains
+    # a superseding policy alongside unchanged, individually reviewed chunks.
+    superseding = {"id": 99, "doc": "superseding.md", "chunk": "The earlier policy is revoked."}
+    monkeypatch.setattr("agent.search_policies", lambda _: {
+        "sql": "SELECT policy evidence", "params": {}, "rows": [*policy_rows, superseding],
+        "source_hash": "v" * 32 + "b" * 32})
+
+    result = answer_question("West since July 2025")
+
+    assert not any(claim["kind"] in {"reason", "action"} for claim in result["claims"])
 
 
 @pytest.mark.parametrize("filename,contradiction", [
@@ -1944,7 +2043,8 @@ def test_updated_policy_source_invalidates_unchanged_retrieved_chunk(policy_rows
 @pytest.mark.parametrize("revision", ["unchanged", "superseding", "missing"])
 def test_fixed_policy_claims_require_reviewed_complete_corpus(policy_rows, tmp_path, monkeypatch, revision):
     for policy in policy_rows:
-        (tmp_path / policy["doc"]).write_text(policy["chunk"], encoding="utf-8")
+        content = (Path(__file__).with_name("docs") / policy["doc"]).read_text(encoding="utf-8")
+        (tmp_path / policy["doc"]).write_text(content, encoding="utf-8")
     if revision == "superseding":
         (tmp_path / "superseding.md").write_text(
             "The West discount push is revoked; do not follow the earlier freight recommendations.",
@@ -2013,7 +2113,8 @@ def retrieved_policy_rows(monkeypatch):
     rows = [{"id": index, "doc": path.name, "chunk": path.read_text(encoding="utf-8")}
             for index, path in enumerate(sorted(Path(__file__).with_name("docs").glob("*.md")), 1)]
     monkeypatch.setattr("agent.search_policies", lambda _: {
-        "sql": "SELECT ...", "params": {}, "rows": rows})
+        "sql": "SELECT ...", "params": {}, "rows": rows,
+        "source_hash": policy_source_hash(Path(__file__).with_name("docs"))})
     return rows
 
 
