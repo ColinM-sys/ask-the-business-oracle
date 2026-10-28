@@ -33,8 +33,8 @@ REVIEWED_POLICY_HASHES = {
     "west_q3_volume_push.md": "5dc8fd6cd5ce406fcd582abb8220e16d24dbf5fe7a133eb798c5bf871a3f8c1f",
 }
 
-# The fixed claims below were reviewed against these complete document versions.
-# Review the claims again before accepting any changed document digest.
+# The fixed claims below were reviewed against this complete corpus.
+# Review the claims again before accepting any added, removed, or changed document.
 POLICY_SHA256 = {
     "west_q3_volume_push.md": "f5c98d964fc1b7b6a872152b15fef8044ff7a30797a3a65e1b5891e152bf3b71",
     "freight_contract_memo.md": "8b73b6dbad7be9dcdc24759e02da963a465420d4a00f1c0c8b0940c4dd6da747",
@@ -169,13 +169,17 @@ def answer_question(question):
         return ([text(prefix), number(column, suffix)] if row[column] is not None
                 else [text("unavailable")])
 
+    # An unchanged document can be superseded by any other policy in the corpus.
+    try:
+        corpus_hashes = {
+            path.name: sha256(path.read_text(encoding="utf-8").strip().encode("utf-8")).hexdigest()
+            for path in DOCS.glob("*.md")
+        }
+    except (OSError, UnicodeError):
+        corpus_hashes = {}
+
     def policy_ids(filename):
-        # Verify the whole source too: an old chunk may survive a contradictory addendum.
-        try:
-            source = (DOCS / filename).read_text(encoding="utf-8").strip()
-        except (OSError, UnicodeError):
-            return []
-        if sha256(source.encode("utf-8")).hexdigest() != POLICY_SHA256[filename]:
+        if corpus_hashes != POLICY_SHA256:
             return []
         # These reviewed documents each fit in one chunk; partial text is not proof.
         citations = []

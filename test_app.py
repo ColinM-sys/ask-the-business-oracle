@@ -6,6 +6,7 @@ import runpy
 import subprocess
 import sqlite3
 from contextlib import nullcontext
+from decimal import Decimal
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
@@ -105,6 +106,16 @@ def test_readme_documents_node_test_prerequisite():
     assert "Node.js installed and available as `node` on PATH" in " ".join(test_instructions.split())
 
 
+def test_readme_documents_runtime_policy_refresh():
+    readme = " ".join(Path(__file__).with_name("README.md").read_text(encoding="utf-8").split())
+    assert "`search_policies()` calls `ensure_policies()` on every policy search" in readme
+    assert "including normal POST requests" in readme
+    assert "`CREATE TABLE`" in readme and "tablespace quota" in readme
+    assert "`SELECT`, `DELETE`, and `INSERT` access to `policy_chunks`" in readme
+    assert "source documents or selected embedding backend change" in readme
+    assert "deletes and replaces all rows and commits" in readme
+    assert "shared by requests and other app instances using the same schema" in readme
+    assert "Policy setup is the separate write path" not in readme
 def test_readme_explains_independent_rounding():
     readme = " ".join(Path(__file__).with_name("README.md").read_text(encoding="utf-8").split())
     assert "Changes and margin direction use unrounded aggregates." in readme
@@ -112,10 +123,10 @@ def test_readme_explains_independent_rounding():
     assert "subtracting displayed endpoints may give a different result" in readme
 def test_readme_documents_request_time_policy_writes():
     readme = " ".join(Path(__file__).with_name("README.md").read_text(encoding="utf-8").split())
-    assert "Each `search_policies` call runs `ensure_policies`" in readme
+    assert "`search_policies()` calls `ensure_policies()` on every policy search" in readme
     assert "creates `policy_chunks` if absent" in readme
-    assert "policy documents or the embedding backend change" in readme
-    assert "`CREATE TABLE` and tablespace quota" in readme
+    assert "source documents or selected embedding backend change" in readme
+    assert "`CREATE TABLE`" in readme and "tablespace quota" in readme
     assert "`SELECT`, `DELETE`, and `INSERT` access to `policy_chunks`" in readme
     assert "Running `python policies.py` once does not make SELECT-only runtime permissions sufficient." in readme
 def test_readme_documents_required_oracle_configuration():
@@ -1132,7 +1143,31 @@ def test_updated_policy_source_invalidates_unchanged_retrieved_chunk(policy_rows
     result = answer_question("West since July 2025")
 
     assert not any(claim["kind"] == "reason" for claim in result["claims"])
-    assert len([claim for claim in result["claims"] if claim["kind"] == "action"]) == 3
+    assert not any(claim["kind"] == "action" for claim in result["claims"])
+    assert result["dropped_count"] == 0
+
+
+@pytest.mark.parametrize("revision", ["unchanged", "superseding", "missing"])
+def test_fixed_policy_claims_require_reviewed_complete_corpus(policy_rows, tmp_path, monkeypatch, revision):
+    for policy in policy_rows:
+        (tmp_path / policy["doc"]).write_text(policy["chunk"], encoding="utf-8")
+    if revision == "superseding":
+        (tmp_path / "superseding.md").write_text(
+            "The West discount push is revoked; do not follow the earlier freight recommendations.",
+            encoding="utf-8")
+    elif revision == "missing":
+        (tmp_path / "regional_playbook.md").unlink()
+    monkeypatch.setattr("agent.DOCS", tmp_path)
+
+    # The search results still contain only the original, unchanged chunks.
+    result = answer_question("West since July 2025")
+
+    policy_claims = [claim for claim in result["claims"] if claim["kind"] in {"reason", "action"}]
+    if revision == "unchanged":
+        assert [claim["kind"] for claim in policy_claims] == ["reason", "action", "action", "action"]
+    else:
+        assert policy_claims == []
+    assert len([claim for claim in result["claims"] if claim["kind"] == "finding"]) == 3
     assert result["dropped_count"] == 0
 
 
@@ -1301,6 +1336,36 @@ def test_real_select_and_bind(ending):
     assert result["sql"] == sql
 
 
+def test_fractional_oracle_numbers_remain_exact_in_evidence(monkeypatch):
+    sql = ("SELECT 9007199254740993.25 AS amount, -9007199254740993.25 AS negative_amount, "
+           "0.0000000000000000000000000001 AS tiny, 42 AS whole, NULL AS missing "
+           "FROM regions WHERE region_name=:name")
+    result = tools.run_sql(sql, {"name": "West"})
+    row = result["rows"][0]
+    assert row == {"amount": Decimal("9007199254740993.25"),
+                   "negative_amount": Decimal("-9007199254740993.25"),
+                   "tiny": Decimal("0.0000000000000000000000000001"),
+                   "whole": Decimal("42"), "missing": None}
+    assert all(isinstance(row[column], Decimal)
+               for column in ("amount", "negative_amount", "tiny", "whole"))
+
+    evidence = {"E1": {"kind": "sql", **result}}
+    part = {"value": row["amount"], "evidence": "E1", "row": 0, "column": "amount"}
+    assert supported(part, evidence)
+    assert not supported({**part, "value": "9007199254740994"}, evidence)
+    monkeypatch.setattr("app.answer_question", lambda _: {
+        "region": "West", "claims": [{"kind": "finding", "parts": [part], "policy_ids": []}],
+        "evidence": evidence,
+    })
+    response = app.test_client().post("/", data={"question": "West"})
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert ">9007199254740993.25</button>" in html
+    serialized = json.loads(re.search(r"const evidence = (.*?);", html).group(1))
+    assert serialized["E1"]["rows"][0] == {
+        "amount": "9007199254740993.25", "negative_amount": "-9007199254740993.25",
+        "tiny": "1E-28", "whole": "42", "missing": None,
+    }
 def test_sql_decimal_amount_is_exact_in_critic_and_browser(monkeypatch):
     source = {"kind": "sql", **tools.run_sql(
         "SELECT SUM(100000000000000.01) AS total FROM regions WHERE region_name=:name",
