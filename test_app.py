@@ -1,5 +1,6 @@
 """Unit checks and live integration against the existing local Oracle tables."""
 import copy
+import hashlib
 import json
 import re
 import runpy
@@ -436,6 +437,117 @@ def test_policy_chunks_fit_byte_limit(character, tmp_path, monkeypatch):
     assert chunks
     assert all(chunk and len(chunk.encode("utf-8")) <= 4000 for chunk in chunks)
     assert "".join(chunks).replace("\n", "") == content.replace("\n", "")
+    connection.commit.assert_called_once()
+
+
+@pytest.mark.parametrize("paragraph", [
+    "a" * 999 + "bc" + "d" * 299,
+    "a" * 999 + " " + "b" * 300,
+    "a" * 999 + " " + "b" * 1300,
+], ids=["split-word", "boundary-space", "space-across-chunks"])
+def test_long_policy_paragraph_preserves_text_and_embedding(paragraph, tmp_path, monkeypatch):
+    content = paragraph + "\n\nNext paragraph."
+    (tmp_path / "policy.md").write_text(content, encoding="utf-8")
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
+    cursor.execute.return_value.fetchall.return_value = []
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+
+    ensure_policies()
+
+    inserted = [call.kwargs for call in cursor.execute.call_args_list
+                if call.args[0].lstrip().startswith("INSERT INTO policy_chunks")]
+    assert "".join(row["chunk"] for row in inserted) == content
+    assert all(row["vector"] == hash_embedding(row["chunk"]) for row in inserted)
+
+
+def test_policy_refresh_replaces_legacy_chunks_once(tmp_path, monkeypatch):
+    content = "a" * 1300
+    (tmp_path / "policy.md").write_text(content, encoding="utf-8")
+    legacy_hash = hashlib.sha256(repr([("policy.md", content)]).encode()).hexdigest()
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
+    cursor.execute.return_value.fetchall.side_effect = [[], [("hash-v1-512", legacy_hash)]]
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+
+    ensure_policies()
+
+    inserted = [call.kwargs for call in cursor.execute.call_args_list
+                if call.args[0].lstrip().startswith("INSERT INTO policy_chunks")]
+    assert inserted and inserted[0]["chunk"] == content
+    new_hash = inserted[0]["fingerprint"]
+    assert new_hash != legacy_hash
+    connection.commit.assert_called_once()
+
+    cursor.execute.reset_mock()
+    connection.commit.reset_mock()
+    cursor.execute.return_value.fetchall.side_effect = [[], [("hash-v1-512", new_hash)]]
+    ensure_policies()
+    assert not any(call.args[0].lstrip().startswith(("DELETE", "INSERT"))
+                   for call in cursor.execute.call_args_list)
+    connection.commit.assert_not_called()
+
+
+def test_policy_refresh_rechunks_model_versioned_cache(tmp_path, monkeypatch):
+    paragraph = "a" * 999 + "bc" + "d" * 299
+    sources = [("a.md", paragraph), ("b.md", "Shared policy")]
+    for name, content in sources:
+        (tmp_path / name).write_text(content, encoding="utf-8")
+
+    backend = "hash-v1-512"
+    version = "v" + hashlib.sha256(repr((backend,)).encode()).hexdigest()[:31]
+    old_hash = version + hashlib.sha256(repr(sources).encode()).hexdigest()[:32]
+    rows = [
+        {"backend": backend, "fingerprint": old_hash,
+         "chunk": paragraph[:1000] + "\n\n" + paragraph[1000:], "vector": "old long vector"},
+        {"backend": backend, "fingerprint": old_hash,
+         "chunk": "Shared policy", "vector": "shared vector"},
+    ]
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.fetchone.return_value = ("POLICY_CHUNKS",)
+
+    def execute(sql, **params):
+        if sql.startswith("SELECT model_name"):
+            cursor.fetchall.return_value = []
+        elif sql.startswith("SELECT DISTINCT backend, source_hash"):
+            cursor.fetchall.return_value = list({(row["backend"], row["fingerprint"]) for row in rows})
+        elif sql.startswith("SELECT chunk, embedding FROM policy_chunks"):
+            cursor.fetchall.return_value = [(row["chunk"], row["vector"]) for row in rows
+                                           if row["backend"] == params["backend"]
+                                           and row["fingerprint"].startswith(params["version"])]
+        elif sql.startswith("DELETE FROM policy_chunks"):
+            rows.clear()
+        elif sql.startswith("INSERT INTO policy_chunks"):
+            rows.append(params)
+        return cursor
+
+    cursor.execute.side_effect = execute
+    embed = MagicMock(side_effect=lambda cur, text, model: "new vector for " + text)
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+    monkeypatch.setattr("policies.embed", embed)
+
+    assert ensure_policies() == backend
+    embed.assert_called_once_with(cursor, paragraph, backend)
+    assert [(row["doc"], row["chunk"], row["vector"]) for row in rows] == [
+        ("a.md", paragraph, "new vector for " + paragraph),
+        ("b.md", "Shared policy", "shared vector"),
+    ]
+    assert all(row["fingerprint"].startswith(version) and row["fingerprint"] != old_hash
+               for row in rows)
+    connection.commit.assert_called_once()
+
+    embed.reset_mock()
+    assert ensure_policies() == backend
+    embed.assert_not_called()
     connection.commit.assert_called_once()
 
 
