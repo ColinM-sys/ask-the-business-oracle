@@ -95,6 +95,13 @@ def test_readme_documents_required_oracle_configuration():
         assert is_empty, f"{name} must be blank in .env.example"
 
 
+def test_readme_documents_embedding_probe_fallback():
+    readme = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
+    readme = " ".join(readme.split())
+    assert "If no compatible model is available, it uses deterministic normalized hashing vectors." in readme
+    assert "Other probe errors propagate, aborting ingestion and causing analysis to return HTTP 503." in readme
+
+
 @pytest.mark.parametrize("sql", [
     "DELETE FROM sales", "DROP TABLE sales", "UPDATE sales SET quantity=0",
     "INSERT INTO sales (sale_id) VALUES (0)", "ALTER TABLE sales ADD x NUMBER",

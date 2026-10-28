@@ -26,9 +26,11 @@ python app.py
 
 Open http://127.0.0.1:5055 and ask “Why did West margin fall since July 2025?”.
 `.env` is read by `db.py`; do not commit credentials. `policies.py` creates only
-`policy_chunks`, probes registered Oracle embedding models, and otherwise uses
-deterministic normalized hashing vectors. Source changes trigger a transactional
-policy refresh. Queries use Oracle `VECTOR_DISTANCE` with cosine distance; the
+`policy_chunks` and probes registered Oracle embedding models. If no compatible
+model is available, it uses deterministic normalized hashing vectors. Other probe
+errors propagate, aborting ingestion and causing analysis to return HTTP 503.
+Source changes trigger a transactional policy refresh. Queries use Oracle
+`VECTOR_DISTANCE` with cosine distance; the
 local hashing fallback is lexical retrieval rather than a semantic language model.
 
 The app runs fixed analysis for margin, discount and freight, regardless of
