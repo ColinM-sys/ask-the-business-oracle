@@ -30,7 +30,10 @@ POLICY_SHA256 = {
     "regional_playbook.md": "6a3fd585c58b2528206a9545db63db828c836ce0a265e1fb3fc90525d6ab03d8",
 }
 
-JOIN = """FROM sales s LEFT JOIN costs c ON c.region_id=s.region_id
+JOIN = """FROM sales s LEFT JOIN
+    (SELECT region_id, product_id, cost_month, MIN(unit_cogs) AS unit_cogs,
+        MIN(freight_per_unit) AS freight_per_unit FROM costs
+        GROUP BY region_id, product_id, cost_month HAVING COUNT(*)=1) c ON c.region_id=s.region_id
     AND c.product_id=s.product_id AND c.cost_month=s.sale_month
     JOIN regions r ON r.region_id=s.region_id"""
 MONTHLY_SQL = f"""SELECT r.region_name, s.sale_month,
@@ -40,7 +43,8 @@ MONTHLY_SQL = f"""SELECT r.region_name, s.sale_month,
         /NULLIF(SUM(s.net_revenue),0),2) AS margin_pct,
     ROUND(SUM(s.quantity*s.unit_price*s.discount_pct)
         /NULLIF(SUM(s.quantity*s.unit_price),0),2) AS discount_pct,
-    ROUND(SUM(s.quantity*c.freight_per_unit)/NULLIF(SUM(s.quantity),0),2) AS freight_per_unit
+    ROUND(SUM(s.quantity*c.freight_per_unit)/NULLIF(SUM(s.quantity),0),2) AS freight_per_unit,
+    SUM(CASE WHEN c.unit_cogs IS NULL OR c.freight_per_unit IS NULL THEN 1 ELSE 0 END) AS missing_cost_count
     {JOIN} GROUP BY r.region_name,s.sale_month ORDER BY r.region_name,s.sale_month"""
 
 
@@ -116,8 +120,8 @@ def answer_question(question):
     index = next((i for i, row in enumerate(rows) if row["region_name"] == region), None)
     if index is None:
         raise QuestionValidationError(f"No sales/cost data found for {region}.")
-    if any(row["missing_cost_count"] for row in rows):
-        raise ValueError("Missing monthly costs for some sales; cannot analyze incomplete data.")
+    if any(row["missing_cost_count"] for key in ("E1", "E2") for row in evidence[key]["rows"]):
+        raise ValueError("Missing monthly costs or duplicate cost rows for some sales; cannot analyze incomplete or ambiguous data.")
     row = rows[index]
     if row["before_margin_pct"] is None or row["after_margin_pct"] is None:
         raise QuestionValidationError("The comparison date must have sales both before and after it.")

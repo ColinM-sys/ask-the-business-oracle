@@ -416,6 +416,108 @@ def test_missing_monthly_costs_reject_incomplete_analysis(region_id, month, prod
         assert answer_question("West since July 2025")["dropped_count"] == 0
 
 
+@pytest.mark.parametrize("unit_cogs,freight_per_unit", [
+    (None, 5.0), (60.0, None), (None, None),
+])
+def test_monthly_evidence_rejects_null_costs_repaired_before_summary(
+        unit_cogs, freight_per_unit, monkeypatch):
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+            INSERT INTO sales VALUES (1, 1, '2025-06', 100.0, 1, 100.0, 0);
+            INSERT INTO sales VALUES (1, 1, '2025-06', 100.0, 1, 100.0, 0);
+            INSERT INTO sales VALUES (1, 1, '2025-07', 100.0, 1, 100.0, 0);
+            INSERT INTO costs VALUES (1, 1, '2025-07', 60.0, 5.0);
+        """)
+        con.execute("INSERT INTO costs VALUES (1, 1, '2025-06', ?, ?)",
+                    (unit_cogs, freight_per_unit))
+
+        calls = 0
+
+        def run_sql(sql, params=None):
+            nonlocal calls
+            rows = [dict(row) for row in con.execute(tools.validate_select(sql), params or {})]
+            calls += 1
+            if calls == 1:
+                con.execute("UPDATE costs SET unit_cogs=60.0, freight_per_unit=5.0 "
+                            "WHERE cost_month='2025-06'")
+            return {"sql": sql, "params": params or {}, "rows": rows}
+
+        policies = MagicMock(return_value={"rows": []})
+        monkeypatch.setattr("agent.run_sql", run_sql)
+        monkeypatch.setattr("agent.search_policies", policies)
+        with pytest.raises(ValueError, match="Missing monthly costs"):
+            answer_question("West since July 2025")
+        assert calls == 2
+        policies.assert_not_called()
+
+
+@pytest.mark.parametrize("region_id", [1, 2])
+@pytest.mark.parametrize("unit_cogs", [60.0, 80.0])
+@pytest.mark.parametrize("duplicate_when", ["both", "monthly", "summary"])
+def test_duplicate_monthly_costs_reject_analysis(region_id, unit_cogs, duplicate_when, monkeypatch):
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West'), (2, 'East');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+        """)
+        for matched_region in (1, 2):
+            for month in ("2025-06", "2025-07"):
+                con.execute("INSERT INTO sales VALUES (?, 1, ?, 100.0, 1, 100.0, 0)",
+                            (matched_region, month))
+                con.execute("INSERT INTO costs VALUES (?, 1, ?, 60.0, 5.0)",
+                            (matched_region, month))
+        # Multiple sales for one cost key are valid; unused duplicate costs are irrelevant.
+        con.execute("INSERT INTO sales VALUES (1, 1, '2025-06', 100.0, 1, 100.0, 0)")
+        con.execute("INSERT INTO costs VALUES (1, 2, '2025-06', 60.0, 5.0)")
+        con.execute("INSERT INTO costs VALUES (1, 2, '2025-06', 80.0, 5.0)")
+
+        def execute(sql, params=None):
+            return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
+                con.execute(tools.validate_select(sql), params or {})]}
+
+        policies = MagicMock(return_value={"rows": []})
+        monkeypatch.setattr("agent.run_sql", execute)
+        monkeypatch.setattr("agent.search_policies", policies)
+        result = answer_question("West since July 2025")
+        june = next(row for row in result["evidence"]["E1"]["rows"]
+                    if row["region_name"] == "West" and row["sale_month"] == "2025-06")
+        assert (june["revenue"], june["units"], june["margin_pct"]) == (200, 2, 35)
+        policies.reset_mock()
+
+        def insert_duplicate():
+            con.execute("INSERT INTO costs VALUES (?, 1, '2025-06', ?, 5.0)",
+                        (region_id, unit_cogs))
+
+        if duplicate_when != "summary":
+            insert_duplicate()
+        calls = 0
+
+        def run_sql(sql, params=None):
+            nonlocal calls
+            rows = execute(sql, params)
+            calls += 1
+            if calls == 1 and duplicate_when == "monthly":
+                con.execute("DELETE FROM costs WHERE rowid = (SELECT MAX(rowid) FROM costs)")
+            elif calls == 1 and duplicate_when == "summary":
+                insert_duplicate()
+            return rows
+
+        monkeypatch.setattr("agent.run_sql", run_sql)
+        with pytest.raises(ValueError, match="duplicate"):
+            answer_question("West since July 2025")
+        policies.assert_not_called()
+
+
 @pytest.mark.parametrize("rows", [[], [{"region_name": "East"}]])
 def test_missing_region_has_descriptive_validation_error(monkeypatch, rows):
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
