@@ -1541,6 +1541,47 @@ def test_margin_direction_uses_unrounded_sql(before, after, direction, below_pre
     assert result["dropped_count"] == 0
 
 
+@pytest.mark.parametrize("before,after,change", [
+    ((9.990, 9.998), (10.010, 10.002), 0.01),
+    ((10.010, 10.002), (9.990, 9.998), -0.01),
+    ((9.990, 9.998), (9.990, 9.998), 0),
+])
+def test_discount_change_uses_unrounded_weighted_rates(before, after, change, monkeypatch):
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+        """)
+        for month, discounts in (("2025-06", before), ("2025-07", after)):
+            for price, discount in zip((100.0, 300.0), discounts):
+                con.execute("INSERT INTO sales VALUES (1, 1, ?, 100.0, 1, ?, ?)",
+                            (month, price, discount))
+            con.execute("INSERT INTO costs VALUES (1, 1, ?, 60.0, 5.0)", (month,))
+
+        def run_sql(sql, params=None):
+            return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
+                con.execute(tools.validate_select(sql), params or {})]}
+
+        monkeypatch.setattr("agent.run_sql", run_sql)
+        monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
+        result = answer_question("West since July 2025")
+
+    row = result["evidence"]["E2"]["rows"][0]
+    assert (row["before_discount_pct"], row["after_discount_pct"]) == (10, 10)
+    assert row["discount_change_pts"] == change
+    finding = next(c for c in result["claims"] if c["parts"][0].get("text", "").startswith("Average discount:"))
+    assert any("change from unrounded rates" in p.get("text", "") for p in finding["parts"])
+    part = next(p for p in finding["parts"] if p.get("column") == "discount_change_pts")
+    assert part == {"value": change, "evidence": "E2", "row": 0,
+                    "column": "discount_change_pts", "suffix": " percentage points"}
+    assert supported(part, result["evidence"])
+    assert result["dropped_count"] == 0
+
+
 @pytest.mark.parametrize("available_period,margin", [
     ("before", 35), ("after", 35), ("before", 0), ("after", 0),
 ])
@@ -1591,7 +1632,7 @@ def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
         "before_last_month": "2025-06", "after_first_month": "2025-07",
         "before_margin_pct": 40, "after_margin_pct": 25, "margin_drop_pts": 15,
         "margin_direction": "fell",
-        "before_discount_pct": 3, "after_discount_pct": 18,
+        "before_discount_pct": 3, "after_discount_pct": 18, "discount_change_pts": 15,
         "before_freight_per_unit": 0, "after_freight_per_unit": 5,
         "freight_increase_pct": None,
         "missing_cost_count": 0, "missing_discount_count": 0, "missing_revenue_count": 0,
@@ -1805,8 +1846,12 @@ def test_undefined_metric_preserves_other_metric(unavailable_metric, unavailable
                             and unavailable_period in (period, "both") else 10) if metric == "discount" else 5
                 assert row[f"{period}_{column}"] == expected
                 assert f"{period}_{column}" in cited_columns
-        if metric == "freight" and unavailable_metric == "freight":
-            assert "change: unavailable" in rendered
+        if metric == unavailable_metric:
+            if metric == "discount":
+                assert row["discount_change_pts"] is None
+                assert "change from unrounded rates: unavailable" in rendered
+            else:
+                assert "change: unavailable" in rendered
     assert result["dropped_count"] == 0
 
 
@@ -1860,7 +1905,7 @@ def test_undefined_metric_does_not_hide_other_movement(missing_metric, missing_p
                for part in missing["parts"] if "value" in part)
     if missing_metric == "freight":
         assert "change: unavailable" in render(missing).lower()
-        assert render(available) == "Average discount: before 10.0%; after 10.0%."
+        assert render(available) == "Average discount: before 10.0%; after 10.0%; change from unrounded rates: 0.0 percentage points."
     else:
         assert render(available) == "Freight per unit: before $5.0; after $8.0; change: 60.0%."
     assert all(supported(part, result["evidence"]) for claim in (missing, available)
@@ -1874,7 +1919,7 @@ def policy_rows(monkeypatch):
         "region_name": "West", "first_month": "2025-01", "last_month": "2025-09",
         "before_last_month": "2025-06", "after_first_month": "2025-07",
         "before_margin_pct": 40, "after_margin_pct": 25, "margin_drop_pts": 15,
-        "margin_direction": "fell", "before_discount_pct": 3, "after_discount_pct": 18,
+        "margin_direction": "fell", "before_discount_pct": 3, "after_discount_pct": 18, "discount_change_pts": 15,
         "before_freight_per_unit": 5, "after_freight_per_unit": 8,
         "freight_increase_pct": 60,
         "missing_cost_count": 0, "missing_discount_count": 0, "missing_revenue_count": 0,
@@ -2003,7 +2048,7 @@ def retrieved_policy_rows(monkeypatch):
         "region_name": "West", "first_month": "2025-01", "last_month": "2025-09",
         "before_last_month": "2025-06", "after_first_month": "2025-07",
         "before_margin_pct": 40, "after_margin_pct": 25, "margin_drop_pts": 15,
-        "margin_direction": "fell", "before_discount_pct": 3, "after_discount_pct": 18,
+        "margin_direction": "fell", "before_discount_pct": 3, "after_discount_pct": 18, "discount_change_pts": 15,
         "before_freight_per_unit": 5, "after_freight_per_unit": 8,
         "freight_increase_pct": 60,
         "missing_cost_count": 0, "missing_discount_count": 0, "missing_revenue_count": 0,
@@ -2894,7 +2939,7 @@ def test_numeric_buttons_describe_cited_metric_period_and_units(monkeypatch):
          "before_last_month": "2025-06", "after_first_month": "2025-07",
          "last_month": "2025-09", "before_margin_pct": 5,
          "after_margin_pct": 5, "before_discount_pct": 5,
-         "after_discount_pct": 5, "before_freight_per_unit": 5,
+         "after_discount_pct": 5, "discount_change_pts": 0, "before_freight_per_unit": 5,
          "after_freight_per_unit": 5, "margin_drop_pts": 0,
          "freight_increase_pct": 0},
     ]
@@ -2904,6 +2949,7 @@ def test_numeric_buttons_describe_cited_metric_period_and_units(monkeypatch):
         (1, "after_margin_pct", "%", ("after", "margin", "%")),
         (1, "before_discount_pct", "%", ("before", "discount", "%")),
         (1, "after_discount_pct", "%", ("after", "discount", "%")),
+        (1, "discount_change_pts", " percentage points", ("discount", "change", "percentage points")),
         (1, "before_freight_per_unit", "", ("before", "freight", "per unit")),
         (1, "after_freight_per_unit", "", ("after", "freight", "per unit")),
         (1, "margin_drop_pts", " percentage points", ("margin", "drop", "percentage points")),
@@ -2950,7 +2996,7 @@ def test_numeric_buttons_describe_cited_metric_period_and_units(monkeypatch):
             assert rows[row]["first_month"] in label and rows[row]["before_last_month"] in label
         elif column in ("after_margin_pct", "after_discount_pct", "after_freight_per_unit"):
             assert rows[row]["after_first_month"] in label and rows[row]["last_month"] in label
-        elif column in ("margin_drop_pts", "freight_increase_pct"):
+        elif column in ("margin_drop_pts", "discount_change_pts", "freight_increase_pct"):
             for endpoint in ("first_month", "before_last_month", "after_first_month", "last_month"):
                 assert rows[row][endpoint] in label
         elif column in ("first_month", "after_first_month"):
@@ -2958,7 +3004,7 @@ def test_numeric_buttons_describe_cited_metric_period_and_units(monkeypatch):
         else:
             assert "last" in label or "end" in label
     assert parser.buttons[1]["aria-label"] != parser.buttons[2]["aria-label"]
-    assert parser.buttons[5]["aria-label"] != parser.buttons[6]["aria-label"]
+    assert parser.buttons[6]["aria-label"] != parser.buttons[7]["aria-label"]
 def test_evidence_dialog_focuses_cited_cell(monkeypatch):
     result = {
         "region": "West", "claims": [],

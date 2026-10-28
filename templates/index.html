@@ -72,7 +72,7 @@
       'before_margin_pct': 'gross margin', 'after_margin_pct': 'gross margin',
       'before_discount_pct': 'average discount', 'after_discount_pct': 'average discount',
       'before_freight_per_unit': 'freight', 'after_freight_per_unit': 'freight',
-      'margin_drop_pts': 'signed gross margin drop', 'freight_increase_pct': 'freight change'
+      'margin_drop_pts': 'signed gross margin drop', 'discount_change_pts': 'discount change', 'freight_increase_pct': 'freight change'
     } %}
     {% if result.dropped_count %}
     <p class="error" role="alert" data-notice>{{ result.dropped_count }} claim{{ 's' if result.dropped_count != 1 else '' }} {{ 'were' if result.dropped_count != 1 else 'was' }} omitted because they failed verification.</p>
@@ -86,7 +86,7 @@
           <button type="button" class="number" data-evidence="{{ part.evidence }}" data-row="{{ part.row }}" data-column="{{ part.column }}" aria-label="Evidence for {{ row.region_name }} {{ metric_names.get(part.column, part.column | replace('_', ' ')) }}
             {%- if part.column.startswith('before_') and part.column != 'before_last_month' -%}, before ({{ row.first_month }} through {{ row.before_last_month }})
             {%- elif part.column.startswith('after_') and part.column != 'after_first_month' -%}, after ({{ row.after_first_month }} through {{ row.last_month }})
-            {%- elif part.column in ('margin_drop_pts', 'freight_increase_pct') -%}, before ({{ row.first_month }} through {{ row.before_last_month }}) {{ 'minus' if part.column == 'margin_drop_pts' else 'to' }} after ({{ row.after_first_month }} through {{ row.last_month }})
+            {%- elif part.column in ('margin_drop_pts', 'discount_change_pts', 'freight_increase_pct') -%}, before ({{ row.first_month }} through {{ row.before_last_month }}) {{ 'minus' if part.column == 'margin_drop_pts' else 'to' }} after ({{ row.after_first_month }} through {{ row.last_month }})
             {%- endif -%}: {% if part.column in ('before_freight_per_unit', 'after_freight_per_unit') %}${% endif %}{{ part.value }}{{ part.suffix }}{% if part.column in ('before_freight_per_unit', 'after_freight_per_unit') %} per unit{% endif %}">{{ part.value }}{{ part.suffix }}</button>{%- endif -%}
       {%- endfor -%}
       {% for id in claim.policy_ids %}<button type="button" class="citation" data-evidence="{{ id }}" aria-label="{{ id }}: {{ result.evidence[id].rows[0].doc }}">{{ id }}</button>{% endfor %}

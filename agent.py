@@ -108,6 +108,7 @@ def summary_sql():
         f"CASE WHEN ({raw['before']['margin_pct']}) IS NULL OR ({raw['after']['margin_pct']}) IS NULL THEN NULL "
         f"WHEN ({raw['before']['margin_pct']}) > ({raw['after']['margin_pct']}) THEN 'fell' WHEN ({raw['before']['margin_pct']}) < ({raw['after']['margin_pct']}) THEN 'rose' ELSE 'was unchanged' END AS margin_direction",
         f"ROUND(({raw['before']['margin_pct']})-({raw['after']['margin_pct']}),2) AS margin_drop_pts",
+        f"ROUND(({raw['after']['discount_pct']})-({raw['before']['discount_pct']}),2) AS discount_change_pts",
         f"ROUND(100*(({raw['after']['freight_per_unit']})/NULLIF(({raw['before']['freight_per_unit']}),0)-1),2) AS freight_increase_pct",
         "MIN(s.sale_month) AS first_month", "MAX(s.sale_month) AS last_month",
         "MIN(CASE WHEN s.sale_month >= :cutoff THEN s.sale_month END) AS after_first_month",
@@ -246,7 +247,8 @@ def answer_question(question):
             parts.extend([text(f"{period} revenue is "), number(f"{period}_revenue")])
         claim("finding", parts + [text(".")])
     claim("finding", [text("Average discount: before ")] + metric("before_discount_pct", suffix="%")
-        + [text("; after ")] + metric("after_discount_pct", suffix="%") + [text(".")])
+        + [text("; after ")] + metric("after_discount_pct", suffix="%")
+        + [text("; change from unrounded rates: ")] + metric("discount_change_pts", suffix=" percentage points") + [text(".")])
     claim("finding", [text("Freight per unit: before ")] + metric("before_freight_per_unit", prefix="$")
         + [text("; after ")] + metric("after_freight_per_unit", prefix="$")
         + [text("; change: ")] + metric("freight_increase_pct", suffix="%") + [text(".")])
