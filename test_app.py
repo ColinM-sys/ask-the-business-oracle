@@ -1,11 +1,13 @@
 """Unit checks and live integration against the existing local Oracle tables."""
 import copy
+import csv
 import hashlib
 import json
 import re
 import runpy
 import subprocess
 import sqlite3
+from collections import Counter
 from contextlib import nullcontext
 from decimal import Decimal
 import threading
@@ -113,10 +115,39 @@ def test_readme_documents_reference_dataset_for_integration_tests():
     assert "`data/*.csv`" in setup
     assert "fresh Oracle schema" in setup
     assert "python load.py" in setup
+    assert "git restore --source=HEAD -- data/ load.py" in setup
     test_instructions = readme.split("python -m pytest -q test_app.py", 1)[1]
     assert "West metric ranges" in test_instructions
     assert "`13.36`" in test_instructions
     assert "depend on the unmodified reference dataset" in test_instructions
+
+
+def test_reference_loader_matches_csvs(monkeypatch):
+    root = Path(__file__).parent
+    con = sqlite3.connect(":memory:")
+    try:
+        monkeypatch.setattr(db, "connect", lambda: con)
+        runpy.run_path(str(root / "load.py"), run_name="__main__")
+        for table in ("costs", "customers", "discounts", "products", "regions", "sales"):
+            columns = con.execute(f"PRAGMA table_info({table})").fetchall()
+            types = [column[2] for column in columns]
+
+            def normalize(row):
+                return tuple(None if value is None or value == "" else
+                             Decimal(str(value)) if kind == "NUMBER" else str(value)
+                             for value, kind in zip(row, types))
+
+            with (root / "data" / f"{table}.csv").open(encoding="utf-8", newline="") as source:
+                rows = csv.reader(source)
+                assert next(rows) == [column[1] for column in columns]
+                expected = Counter(map(normalize, rows))
+            assert expected, f"{table} reference dataset is empty"
+            actual = Counter(map(normalize, con.execute(f"SELECT * FROM {table}")))
+            assert actual == expected
+    finally:
+        con.close()
+
+
 def test_readme_documents_supported_year_range():
     readme = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
     assert ("a full month name plus year or `YYYY-MM`. "

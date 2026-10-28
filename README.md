@@ -23,6 +23,10 @@ data. In a fresh Oracle schema without the six business tables (sales, costs,
 customers, discounts, products and regions), run `python load.py` only once to create
 and load them; skip it if the tables are already loaded.
 
+If these files are missing from a Git checkout, run
+`git restore --source=HEAD -- data/ load.py` to restore the tracked copies. This
+replaces any local changes under `data/` and in `load.py`.
+
 ```powershell
 python -m pip install -r requirements.txt
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
