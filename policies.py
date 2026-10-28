@@ -13,6 +13,7 @@ from db import connect
 
 DOCS = Path(__file__).parent / "docs"
 _lock = threading.Lock()
+_probe_lock = threading.Lock()
 _logger = logging.getLogger(__name__)
 _model_identifier = re.compile(r"[A-Z][A-Z0-9_$#]*")
 _probe_cache = {}
@@ -38,9 +39,30 @@ def embed(cursor, text, backend):
     ).fetchone()[0]
 
 
+def _sources():
+    sources = [(p.name, p.read_text(encoding="utf-8")) for p in sorted(DOCS.glob("*.md"))]
+    if not sources:
+        raise RuntimeError("No policy documents found")
+    return sources
+
+
+def _models(cur):
+    return cur.execute(
+        """SELECT m.model_name, m.creation_date, o.object_id, o.last_ddl_time
+            FROM user_mining_models m
+            LEFT JOIN user_objects o ON o.object_name=m.model_name
+                AND o.object_type='MINING MODEL' AND o.subobject_name IS NULL
+            WHERE m.mining_function='EMBEDDING' AND EXISTS (
+                SELECT 1 FROM user_mining_model_attributes a
+                WHERE a.model_name=m.model_name AND a.attribute_type='TEXT'
+                AND a.data_type IN ('VARCHAR2', 'CLOB', 'NVARCHAR2', 'NCLOB')
+            ) ORDER BY m.model_name"""
+    ).fetchall()
+
+
 def ensure_policies():
     """Refresh only on source/model changes; never modify the business tables."""
-    with _lock:
+    while True:
         with connect() as con:
             cur = con.cursor()
             if not cur.execute("SELECT table_name FROM user_tables WHERE table_name='POLICY_CHUNKS'").fetchone():
@@ -52,34 +74,23 @@ def ensure_policies():
                     # Another process may have created the table after our check.
                     if not exc.args or getattr(exc.args[0], "code", None) != 955:
                         raise
-            # DDL commits implicitly, so acquire the transaction lock only after setup.
-            cur.execute("LOCK TABLE policy_chunks IN EXCLUSIVE MODE WAIT 5")
-            sources = [(p.name, p.read_text(encoding="utf-8")) for p in sorted(DOCS.glob("*.md"))]
-            if not sources:
-                raise RuntimeError("No policy documents found")
+            sources = _sources()
             # Refresh cached chunks when the chunking algorithm changes.
             source_hash = hashlib.sha256(repr(("chunk-v2", sources)).encode()).hexdigest()
             backend = "hash-v1-512"
             model_version = (backend,)
-            models = cur.execute(
-                """SELECT m.model_name, m.creation_date, o.object_id, o.last_ddl_time
-                    FROM user_mining_models m
-                    LEFT JOIN user_objects o ON o.object_name=m.model_name
-                        AND o.object_type='MINING MODEL' AND o.subobject_name IS NULL
-                    WHERE m.mining_function='EMBEDDING' AND EXISTS (
-                        SELECT 1 FROM user_mining_model_attributes a
-                        WHERE a.model_name=m.model_name AND a.attribute_type='TEXT'
-                        AND a.data_type IN ('VARCHAR2', 'CLOB', 'NVARCHAR2', 'NCLOB')
-                    ) ORDER BY m.model_name"""
-            ).fetchall()
-            for stale in _probe_cache.keys() - set(models):
-                del _probe_cache[stale]
+            models = _models(cur)
+            with _probe_lock:
+                for stale in _probe_cache.keys() - set(models):
+                    del _probe_cache[stale]
             for model_key in models:
                 model = model_key[0]
                 if not _model_identifier.fullmatch(model):
                     _logger.warning("Skipping unsupported embedding model %r", model)
                     continue
-                if model_key not in _probe_cache:
+                with _probe_lock:
+                    compatible = _probe_cache.get(model_key)
+                if compatible is None:
                     try:
                         vector = embed(cur, "Business policy", model)
                     except oracledb.DatabaseError as exc:
@@ -89,12 +100,14 @@ def ensure_policies():
                         if code != 40290:
                             raise
                         _logger.warning("Embedding model %r incompatible (ORA-%05d)", model, code)
-                        _probe_cache[model_key] = False
+                        compatible = False
                     else:
                         if vector is None:
                             _logger.warning("Embedding model %r returned no vector", model)
-                        _probe_cache[model_key] = vector is not None
-                if _probe_cache[model_key]:
+                        compatible = vector is not None
+                    with _probe_lock:
+                        _probe_cache[model_key] = compatible
+                if compatible:
                     backend = model
                     model_version = model_key
                     break
@@ -144,13 +157,22 @@ def ensure_policies():
                 if key not in vectors_by_chunk:
                     vectors_by_chunk[key] = embed(cur, chunk, backend)
                 vectors.append(vectors_by_chunk[key])
-            cur.execute("DELETE FROM policy_chunks")
-            for index, ((doc, chunk), vector) in enumerate(zip(chunks, vectors), 1):
-                cur.execute("""INSERT INTO policy_chunks (id,doc,chunk,embedding,backend,source_hash)
-                    VALUES (:id,:doc,:chunk,:vector,:backend,:fingerprint)""",
-                    id=index, doc=doc, chunk=chunk, vector=vector, backend=backend, fingerprint=fingerprint)
-            con.commit()
-            return backend
+            # Serialize only publication; readers can continue using the committed rows.
+            # DDL commits implicitly, so the transaction lock follows table setup.
+            with _lock:
+                cur.execute("LOCK TABLE policy_chunks IN EXCLUSIVE MODE WAIT 5")
+                if sources != _sources() or models != _models(cur):
+                    continue
+                existing = cur.execute("SELECT DISTINCT backend, source_hash FROM policy_chunks").fetchall()
+                if existing == [(backend, fingerprint)]:
+                    return backend
+                cur.execute("DELETE FROM policy_chunks")
+                for index, ((doc, chunk), vector) in enumerate(zip(chunks, vectors), 1):
+                    cur.execute("""INSERT INTO policy_chunks (id,doc,chunk,embedding,backend,source_hash)
+                        VALUES (:id,:doc,:chunk,:vector,:backend,:fingerprint)""",
+                        id=index, doc=doc, chunk=chunk, vector=vector, backend=backend, fingerprint=fingerprint)
+                con.commit()
+                return backend
 
 
 if __name__ == "__main__":

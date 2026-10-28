@@ -535,7 +535,7 @@ def test_policy_probe_fallback_is_explicit_and_sanitized(
     connection.__enter__.return_value = connection
     cursor = connection.cursor.return_value
     cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
-    cursor.execute.return_value.fetchall.side_effect = [models, []]
+    cursor.execute.return_value.fetchall.side_effect = [models, [], models, []]
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
     monkeypatch.setattr("policies._probe_cache", {})
@@ -566,7 +566,7 @@ def test_policy_probe_skips_unsupported_names(unsupported, later_model, tmp_path
     cursor = connection.cursor.return_value
     cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
     models = [(unsupported, "created", 1, "modified")] + ([(later_model, "created", 2, "modified")] if later_model else [])
-    cursor.execute.return_value.fetchall.side_effect = [models, []]
+    cursor.execute.return_value.fetchall.side_effect = [models, [], models, []]
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
     monkeypatch.setattr("policies._probe_cache", {})
@@ -637,7 +637,9 @@ def test_policy_refresh_replaces_legacy_chunks_once(tmp_path, monkeypatch):
     connection.__enter__.return_value = connection
     cursor = connection.cursor.return_value
     cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
-    cursor.execute.return_value.fetchall.side_effect = [[], [("hash-v1-512", legacy_hash)]]
+    cursor.execute.return_value.fetchall.side_effect = [
+        [], [("hash-v1-512", legacy_hash)], [], [("hash-v1-512", legacy_hash)]
+    ]
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
 
@@ -819,6 +821,55 @@ def test_policy_refresh_reuses_chunk_embeddings_by_model(tmp_path, monkeypatch):
     assert connection.commit.call_count == commits
 
 
+def test_policy_refresh_retries_when_model_changes_during_embedding(tmp_path, monkeypatch):
+    content = "Policy content"
+    (tmp_path / "policy.md").write_text(content, encoding="utf-8")
+    first = ("MODEL", "created", 10, "v1")
+    second = ("MODEL", "created", 11, "v2")
+    current = [first]
+    embeddings = []
+    rows = []
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.fetchone.return_value = ("POLICY_CHUNKS",)
+
+    def execute(sql, **params):
+        if "FROM user_mining_models" in sql:
+            cursor.fetchall.return_value = list(current)
+        elif sql.startswith("SELECT DISTINCT backend, source_hash"):
+            cursor.fetchall.return_value = [(row["backend"], row["fingerprint"]) for row in rows]
+        elif sql.startswith("DELETE FROM policy_chunks"):
+            rows.clear()
+        elif sql.lstrip().startswith("INSERT INTO policy_chunks"):
+            rows.append(params)
+        return cursor
+
+    def embedding(cur, text, backend):
+        if text == "Business policy":
+            return "probe"
+        embeddings.append(current[0])
+        if current[0] == first:
+            current[0] = second
+            return "old vector"
+        return "new vector"
+
+    cursor.execute.side_effect = execute
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+    monkeypatch.setattr("policies.embed", embedding)
+    monkeypatch.setattr("policies._probe_cache", {})
+
+    assert ensure_policies() == "MODEL"
+    assert embeddings == [first, second]
+    version = "v" + hashlib.sha256(repr(second).encode()).hexdigest()[:31]
+    source_hash = hashlib.sha256(repr(("chunk-v2", [("policy.md", content)])).encode()).hexdigest()
+    assert [(row["vector"], row["fingerprint"]) for row in rows] == [
+        ("new vector", version + source_hash[:32])
+    ]
+    connection.commit.assert_called_once()
+
+
 def test_delayed_policy_refresh_preserves_newer_content(tmp_path, monkeypatch):
     document = tmp_path / "policy.md"
     document.write_text("Old policy", encoding="utf-8")
@@ -995,6 +1046,149 @@ def test_concurrent_policy_refreshes_do_not_overwrite_newer_content(tmp_path, mo
         assert new.result(timeout=10) == "hash-v1-512"
 
     assert [row["chunk"] for row in rows] == ["Updated policy"]
+
+
+def test_unchanged_policy_search_does_not_wait_for_refresh(tmp_path, monkeypatch):
+    import policies
+
+    old_dir, new_dir = tmp_path / "old", tmp_path / "new"
+    old_dir.mkdir()
+    new_dir.mkdir()
+    for directory, content in ((old_dir, "Old policy"), (new_dir, "Updated policy")):
+        (directory / "policy.md").write_text(content, encoding="utf-8")
+
+    backend = "hash-v1-512"
+    version = "v" + hashlib.sha256(repr((backend,)).encode()).hexdigest()[:31]
+    source_hash = hashlib.sha256(repr(("chunk-v2", [("policy.md", "Old policy")])).encode()).hexdigest()
+    rows = [{"id": 1, "doc": "policy.md", "chunk": "Old policy",
+             "vector": hash_embedding("Old policy"), "backend": backend,
+             "fingerprint": version + source_hash[:32]}]
+    worker = threading.local()
+    database_lock = threading.Lock()
+    rows_lock = threading.Lock()
+    embedding_started = threading.Event()
+    resume_embedding = threading.Event()
+    search_lock_attempts = []
+
+    class Sources:
+        def glob(self, pattern):
+            return (new_dir if worker.name == "refresh" else old_dir).glob(pattern)
+
+    class Connection:
+        def __init__(self):
+            self.locked = False
+            self.pending = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.release()
+
+        def release(self):
+            if self.locked:
+                self.locked = False
+                database_lock.release()
+
+        def cursor(self):
+            return Cursor(self)
+
+        def commit(self):
+            if self.pending is not None:
+                with rows_lock:
+                    rows[:] = self.pending
+            self.release()
+
+    class Cursor:
+        def __init__(self, connection):
+            self.connection = connection
+            self.result = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def execute(self, sql, *args, **params):
+            sql = " ".join(sql.upper().split())
+            if sql.startswith("SELECT TABLE_NAME FROM USER_TABLES"):
+                self.result = [("POLICY_CHUNKS",)]
+            elif sql.startswith("LOCK TABLE POLICY_CHUNKS"):
+                if worker.name == "search":
+                    search_lock_attempts.append(sql)
+                    raise AssertionError("An unchanged search must not acquire the publication lock")
+                assert database_lock.acquire(timeout=10), "Database lock was not released"
+                self.connection.locked = True
+            elif sql.startswith("SELECT M.MODEL_NAME, M.CREATION_DATE,"):
+                self.result = []
+            elif sql.startswith("SELECT DISTINCT BACKEND, SOURCE_HASH FROM POLICY_CHUNKS"):
+                with rows_lock:
+                    self.result = list({(row["backend"], row["fingerprint"]) for row in rows})
+            elif sql.startswith("SELECT CHUNK, EMBEDDING FROM POLICY_CHUNKS"):
+                with rows_lock:
+                    self.result = [(row["chunk"], row["vector"]) for row in rows
+                                   if row["backend"] == params["backend"]
+                                   and row["fingerprint"].startswith(params["version"])]
+            elif sql.startswith("DELETE FROM POLICY_CHUNKS"):
+                self.connection.pending = []
+            elif sql.startswith("INSERT INTO POLICY_CHUNKS"):
+                self.connection.pending.append(params)
+            elif sql.startswith("SET TRANSACTION READ ONLY"):
+                pass
+            elif sql.startswith("SELECT BACKEND FROM POLICY_CHUNKS"):
+                with rows_lock:
+                    self.result = [(rows[0]["backend"],)] if rows else []
+            elif sql.startswith("SELECT ID, DOC, CHUNK, VECTOR_DISTANCE"):
+                with rows_lock:
+                    self.result = [(row["id"], row["doc"], row["chunk"], 0.0) for row in rows]
+            else:
+                pytest.fail(f"Unexpected SQL: {sql}")
+            return self
+
+        def fetchone(self):
+            return self.result[0] if self.result else None
+
+        def fetchall(self):
+            return self.result
+
+    def embedding(cur, text, selected_backend):
+        if text == "Updated policy":
+            embedding_started.set()
+            assert resume_embedding.wait(20), "Refresh embedding was not released"
+        return hash_embedding(text)
+
+    def refresh():
+        worker.name = "refresh"
+        return ensure_policies()
+
+    def search():
+        worker.name = "search"
+        return tools.search_policies("Old policy")
+
+    monkeypatch.setattr(policies, "DOCS", Sources())
+    monkeypatch.setattr(policies, "connect", Connection)
+    monkeypatch.setattr(tools, "connect", Connection)
+    monkeypatch.setattr(policies, "embed", embedding)
+    monkeypatch.setattr(policies, "_lock", threading.Lock(), raising=False)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        refreshing = executor.submit(refresh)
+        held_by_test = False
+        try:
+            assert embedding_started.wait(10), "Refresh did not start embedding"
+            # Simulate another process holding the publication lock. The original
+            # implementation already holds it while embedding; otherwise acquire it.
+            held_by_test = database_lock.acquire(blocking=False)
+            searching = executor.submit(search)
+            result = searching.result(timeout=5)
+            assert result["rows"] == [{"id": 1, "doc": "policy.md", "chunk": "Old policy", "distance": 0.0}]
+            assert not search_lock_attempts
+        finally:
+            resume_embedding.set()
+            if held_by_test:
+                database_lock.release()
+        assert refreshing.result(timeout=10) == backend
 
 
 @pytest.mark.parametrize("code", [955, 1031])
