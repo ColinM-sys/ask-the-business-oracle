@@ -652,14 +652,20 @@ def test_missing_region_has_descriptive_validation_error(monkeypatch, rows):
     response = app.test_client().post("/", data={"question": "West"})
     assert response.status_code == 400
     assert b"No sales/cost data found for West" in response.data
-@pytest.mark.parametrize("before,after,direction,below_precision", [
-    (25.001, 25.004, "rose", True),
-    (25.004, 25.001, "fell", True),
-    (25.001, 25.001, "was unchanged", False),
-    (25, 26, "rose", False),
-    (26, 25, "fell", False),
+@pytest.mark.parametrize("before,after,direction,below_precision,displayed,rounding_note", [
+    (25.001, 25.004, "rose", True, (25, 25, 0), False),
+    (25.004, 25.001, "fell", True, (25, 25, 0), False),
+    (25.001, 25.001, "was unchanged", False, (25, 25, 0), False),
+    (25, 26, "rose", False, (25, 26, -1), False),
+    (26, 25, "fell", False, (26, 25, 1), False),
+    (25.004, 24.996, "fell", False, (25, 25, 0.01), True),
+    (24.996, 25.004, "rose", False, (25, 25, -0.01), True),
+    (25.006, 25.004, "fell", True, (25.01, 25, 0), True),
+    (25.014, 24.996, "fell", False, (25.01, 25, 0.02), True),
+    (25.28, 25.29, "rose", False, (25.28, 25.29, -0.01), False),
 ])
-def test_margin_direction_uses_unrounded_sql(before, after, direction, below_precision, monkeypatch, policy_rows):
+def test_margin_direction_uses_unrounded_sql(before, after, direction, below_precision, displayed,
+                                              rounding_note, monkeypatch, policy_rows):
     # Execute the production aggregation over controlled rows without changing Oracle data.
     with sqlite3.connect(":memory:") as con:
         con.row_factory = sqlite3.Row
@@ -677,6 +683,7 @@ def test_margin_direction_uses_unrounded_sql(before, after, direction, below_pre
         tools.validate_select(sql)
         rows = [dict(row) for row in con.execute(sql, {"cutoff": "2025-07"})]
 
+    assert tuple(rows[0][key] for key in ("before_margin_pct", "after_margin_pct", "margin_drop_pts")) == displayed
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
         "sql": sql, "params": params or {}, "rows": rows})
     result = answer_question("West since July 2025")
@@ -685,6 +692,7 @@ def test_margin_direction_uses_unrounded_sql(before, after, direction, below_pre
                        for p in finding["parts"])
     assert rendered.startswith(f"West gross margin {direction} from ")
     assert ("below display precision" in rendered) == below_precision
+    assert ("The displayed margins and change are independently rounded from unrounded aggregates." in rendered) == rounding_note
     reason = next(c for c in result["claims"] if c["kind"] == "reason")
     explanation = "".join(p["text"] for p in reason["parts"])
     if direction == "fell":
