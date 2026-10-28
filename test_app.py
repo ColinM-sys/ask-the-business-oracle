@@ -66,6 +66,24 @@ def test_critic_refuses_invalid_cell_references(sample_evidence, change):
     assert not supported(part, sample_evidence)
 
 
+@pytest.mark.parametrize("prefix", ["Margin: -", "Margin: +", "Margin: \u2212", "Margin: - "])
+@pytest.mark.parametrize("split", [False, True])
+def test_critic_refuses_signs_outside_cited_value(sample_evidence, prefix, split):
+    texts = [{"text": prefix}]
+    if split:
+        texts = [{"text": prefix[:-1]}, {"text": prefix[-1:]}, {"text": ""}]
+    claim = {"parts": texts + [
+        {"value": 25.53, "evidence": "E1", "row": 0, "column": "margin"}]}
+    assert critique([claim], sample_evidence) == ([], [claim])
+
+
+def test_critic_preserves_cited_negative_value(sample_evidence):
+    sample_evidence["E1"]["rows"][0]["margin"] = -25.53
+    claim = {"parts": [{"text": "Margin: "},
+        {"value": -25.53, "suffix": "%", "evidence": "E1", "row": 0, "column": "margin"}]}
+    assert critique([claim], sample_evidence) == ([claim], [])
+
+
 def test_hashing_is_stable_and_normalized():
     first = hash_embedding("West freight contract")
     assert first == hash_embedding("West freight contract")
