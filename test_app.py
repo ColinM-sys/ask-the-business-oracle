@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 
 import oracledb
 import pytest
+from packaging.requirements import Requirement
 
 import db
 import tools
@@ -73,6 +74,20 @@ def test_pooled_connection_cleans_up_transaction(monkeypatch, fail):
     finally:
         if db._pool is not None:
             db._pool.close(force=True)
+def test_readme_requirements_include_compatible_dependencies():
+    root = Path(__file__).parent
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    assert "python -m pip install -r requirements.txt" in readme
+    requirements = [Requirement(line) for line in
+                    (root / "requirements.txt").read_text(encoding="utf-8").splitlines()
+                    if line.strip() and not line.lstrip().startswith("#")]
+    by_name = {requirement.name.lower(): requirement for requirement in requirements}
+    assert {"flask", "oracledb", "sqlglot", "pytest"} <= by_name.keys()
+    # VECTOR column support for generally available Oracle 23ai starts at 2.2.
+    assert "2.1" not in by_name["oracledb"].specifier
+    assert "2.2" in by_name["oracledb"].specifier
+
+
 def test_readme_documents_node_test_prerequisite():
     readme = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
     test_instructions = readme.split("python -m pytest -q test_app.py", 1)[1]
