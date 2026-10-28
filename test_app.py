@@ -699,15 +699,75 @@ def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
 
     result = answer_question("Why did West margin fall since July 2025?")
 
-    finding = next(c for c in result["claims"]
-                   if c["parts"][0].get("text") == "Average discount moved from ")
-    assert "".join(p.get("text", str(p.get("value", "")) + p.get("suffix", ""))
-                   for p in finding["parts"]) == (
-        "Average discount moved from 3% to 18%. Freight per unit moved from $0 to $5.")
+    findings = [c for c in result["claims"] if c["kind"] == "finding"]
+    discount = next(c for c in findings if "discount" in c["parts"][0].get("text", "").lower())
+    freight = next(c for c in findings if "freight" in c["parts"][0].get("text", "").lower())
+    render = lambda claim: "".join(p.get("text", str(p.get("value", "")) + p.get("suffix", ""))
+                                   for p in claim["parts"])
+    assert "3%" in render(discount) and "18%" in render(discount)
+    assert "$0" in render(freight) and "$5" in render(freight)
+    assert "change" in render(freight).lower() and "unavailable" in render(freight).lower()
     assert result["dropped_count"] == 0
-    for part in finding["parts"]:
-        if "value" in part:
-            assert supported(part, result["evidence"])
+    for finding in (discount, freight):
+        for part in finding["parts"]:
+            if "value" in part:
+                assert supported(part, result["evidence"])
+
+
+@pytest.mark.parametrize("unavailable_metric", ["discount", "freight"])
+@pytest.mark.parametrize("unavailable_period", ["before", "after", "both"])
+def test_undefined_metric_preserves_other_metric(unavailable_metric, unavailable_period, monkeypatch):
+    # Returns can zero either denominator without making the other metric undefined.
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+        """)
+        for period, month in (("before", "2025-06"), ("after", "2025-07")):
+            if period != unavailable_period and unavailable_period != "both":
+                sales = [(90, 1, 100, 10)]
+            elif unavailable_metric == "freight":
+                sales = [(160, 1, 200, 20), (-90, -1, 100, 10)]
+            else:
+                sales = [(160, 2, 100, 20), (-100, -1, 200, 50)]
+            con.executemany("INSERT INTO sales VALUES (1, 1, ?, ?, ?, ?, ?)",
+                            [(month, *sale) for sale in sales])
+            con.execute("INSERT INTO costs VALUES (1, 1, ?, 60, 5)", (month,))
+
+        def run_sql(sql, params=None):
+            return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
+                con.execute(tools.validate_select(sql), params or {})]}
+
+        monkeypatch.setattr("agent.run_sql", run_sql)
+        monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
+        result = answer_question("West since July 2025")
+
+    row = result["evidence"]["E2"]["rows"][0]
+    columns = {"discount": "discount_pct", "freight": "freight_per_unit"}
+    findings = [c for c in result["claims"] if c["kind"] == "finding"]
+    for metric, column in columns.items():
+        finding = next(c for c in findings if metric in c["parts"][0].get("text", "").lower())
+        rendered = "".join(p.get("text", str(p.get("value", "")) + p.get("suffix", ""))
+                           for p in finding["parts"]).lower()
+        cited_columns = {p["column"] for p in finding["parts"] if "value" in p
+                         and supported(p, result["evidence"])}
+        for period in ("before", "after"):
+            if metric == unavailable_metric and unavailable_period in (period, "both"):
+                assert row[f"{period}_{column}"] is None
+                assert f"{period} unavailable" in rendered
+            else:
+                assert row[f"{period}_{column}"] is not None
+                expected = (30 if unavailable_metric == "freight"
+                            and unavailable_period in (period, "both") else 10) if metric == "discount" else 5
+                assert row[f"{period}_{column}"] == expected
+                assert f"{period}_{column}" in cited_columns
+        if metric == "freight" and unavailable_metric == "freight":
+            assert "change: unavailable" in rendered
+    assert result["dropped_count"] == 0
 
 
 @pytest.fixture
@@ -764,7 +824,7 @@ def test_policy_filenames_do_not_prove_claims(policy_rows, filename, contradicti
         assert not any(claim["kind"] == "reason" for claim in result["claims"])
     else:
         assert not any(claim["kind"] == "action" for claim in result["claims"])
-    assert len([claim for claim in result["claims"] if claim["kind"] == "finding"]) == 2
+    assert len([claim for claim in result["claims"] if claim["kind"] == "finding"]) == 3
     assert result["dropped_count"] == 0
 
 

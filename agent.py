@@ -145,6 +145,10 @@ def answer_question(question):
         return {"value": rows[row_index][column], "evidence": "E2", "row": row_index,
                 "column": column, "suffix": suffix}
 
+    def metric(column, prefix="", suffix=""):
+        return ([text(prefix), number(column, suffix)] if row[column] is not None
+                else [text("unavailable")])
+
     def policy_ids(filename):
         # Verify the whole source too: an old chunk may survive a contradictory addendum.
         try:
@@ -180,12 +184,11 @@ def answer_question(question):
     claim("finding", [text(f"{region} gross margin {direction} from "), number("before_margin_pct", "%"),
         text(" to "), number("after_margin_pct", "%"), text("; the signed margin drop is "),
         number("margin_drop_pts", " percentage points"), text("." + precision_note)])
-    freight_parts = [text("Average discount moved from "), number("before_discount_pct", "%"),
-        text(" to "), number("after_discount_pct", "%"), text(". Freight per unit moved from $"),
-        number("before_freight_per_unit"), text(" to $"), number("after_freight_per_unit")]
-    if row["freight_increase_pct"] is not None:
-        freight_parts.extend([text(" (change: "), number("freight_increase_pct", "%"), text(")")])
-    claim("finding", freight_parts + [text(".")])
+    claim("finding", [text("Average discount: before ")] + metric("before_discount_pct", suffix="%")
+        + [text("; after ")] + metric("after_discount_pct", suffix="%") + [text(".")])
+    claim("finding", [text("Freight per unit: before ")] + metric("before_freight_per_unit", prefix="$")
+        + [text("; after ")] + metric("after_freight_per_unit", prefix="$")
+        + [text("; change: ")] + metric("freight_increase_pct", suffix="%") + [text(".")])
     for other_index, other in enumerate(rows):
         if other_index != index:
             claim("comparison", [text(f"{other['region_name']} margin: "),
