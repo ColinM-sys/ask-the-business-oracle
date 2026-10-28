@@ -8,6 +8,7 @@ import sqlite3
 from contextlib import nullcontext
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from hashlib import sha256
 from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +17,7 @@ from unittest.mock import MagicMock
 import oracledb
 import pytest
 
+import agent
 import db
 import tools
 from db import connect
@@ -93,6 +95,50 @@ def test_readme_documents_required_oracle_configuration():
         assert name in example
         is_empty = not example[name].strip()
         assert is_empty, f"{name} must be blank in .env.example"
+
+
+def test_readme_documents_setup_for_an_empty_database():
+    readme = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
+    setup = readme.split("```powershell", 1)[1].split("```", 1)[0]
+    assert "python -m pip install -r requirements.txt" in setup
+    assert "Copy-Item .env.example .env" in setup
+    assert setup.index("docker start oracle-free") < setup.index("python load.py")
+    assert setup.index("python load.py") < setup.index("python policies.py")
+    assert "only once" in readme.lower() and "skip it" in readme.lower()
+    for name in ("freight_contract_memo.md", "pricing_policy.md",
+                 "regional_playbook.md", "west_q3_volume_push.md"):
+        assert name in readme
+
+
+def test_shipped_setup_files_support_policy_ingestion(monkeypatch):
+    root = Path(__file__).parent
+    requirements = (root / "requirements.txt").read_text(encoding="utf-8")
+    packages = {match.group().lower() for line in requirements.splitlines()
+                if (match := re.match(r"[A-Za-z0-9_.-]+", line.strip()))}
+    assert {"flask", "openai", "oracledb", "pytest", "sqlglot"} <= packages
+    assert (root / ".env.example").is_file()
+
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
+    cursor.execute.return_value.fetchall.return_value = []
+    monkeypatch.setattr("policies.connect", lambda: connection)
+
+    assert ensure_policies() == "hash-v1-512"
+    inserted = [call.kwargs for call in cursor.execute.call_args_list
+                if call.args[0].lstrip().startswith("INSERT INTO policy_chunks")]
+    expected = {"freight_contract_memo.md", "pricing_policy.md",
+                "regional_playbook.md", "west_q3_volume_push.md"}
+    assert expected <= {row["doc"] for row in inserted}
+    for name in expected:
+        chunks = [row["chunk"] for row in inserted if row["doc"] == name]
+        assert len(chunks) == 1
+        source = (root / "docs" / name).read_text(encoding="utf-8").strip()
+        assert sha256(source.encode("utf-8")).hexdigest() == agent.POLICY_SHA256[name]
+        normalized = " ".join(chunks[0].split())
+        assert sha256(normalized.encode("utf-8")).hexdigest() == agent.REVIEWED_POLICY_HASHES[name]
+    connection.commit.assert_called_once()
 
 
 @pytest.mark.parametrize("sql", [
