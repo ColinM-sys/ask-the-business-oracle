@@ -222,7 +222,7 @@ def test_policy_probe_propagates_unexpected_failures(failure, tmp_path, monkeypa
     connection.__enter__.return_value = connection
     cursor = connection.cursor.return_value
     cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
-    cursor.execute.return_value.fetchall.side_effect = [[("BROKEN_MODEL",)], []]
+    cursor.execute.return_value.fetchall.side_effect = [[("BROKEN_MODEL", "created", 1)], []]
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
 
@@ -253,7 +253,8 @@ def test_policy_probe_fallback_is_explicit_and_sanitized(
     connection.__enter__.return_value = connection
     cursor = connection.cursor.return_value
     cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
-    cursor.execute.return_value.fetchall.side_effect = [models, []]
+    cursor.execute.return_value.fetchall.side_effect = [
+        [(name, "created", i) for i, (name,) in enumerate(models)], []]
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
 
@@ -283,7 +284,8 @@ def test_policy_probe_skips_unsupported_names(unsupported, later_model, tmp_path
     cursor = connection.cursor.return_value
     cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
     models = [(unsupported,)] + ([(later_model,)] if later_model else [])
-    cursor.execute.return_value.fetchall.side_effect = [models, []]
+    cursor.execute.return_value.fetchall.side_effect = [
+        [(name, "created", i) for i, (name,) in enumerate(models)], []]
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
 
@@ -337,6 +339,91 @@ def test_empty_policy_documents_preserve_existing_rows(tmp_path, monkeypatch):
     assert not any(call.args[0].lstrip().startswith(("DELETE", "INSERT"))
                    for call in cursor.execute.call_args_list)
     connection.commit.assert_not_called()
+
+
+def test_policy_refresh_reuses_chunk_embeddings_by_model(tmp_path, monkeypatch):
+    documents = [tmp_path / name for name in ("a.md", "b.md", "c.md")]
+    for document, content in zip(documents, ("Old policy", "Shared policy", "Shared policy")):
+        document.write_text(content, encoding="utf-8")
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.fetchone.return_value = ("POLICY_CHUNKS",)
+    # Legacy rows have no recorded model revision and must be refreshed once.
+    rows = [{"backend": "MODEL_V1", "fingerprint": "0" * 64,
+             "chunk": "Shared policy", "vector": "legacy vector"}]
+    model = ["MODEL_V1", "created", 100]
+    embedding_calls = []
+
+    def execute(sql, **params):
+        if sql.startswith("SELECT model_name"):
+            cursor.fetchall.return_value = [tuple(model)]
+        elif sql.startswith("SELECT DISTINCT backend, source_hash"):
+            cursor.fetchall.return_value = list({(row["backend"], row["fingerprint"]) for row in rows})
+        elif sql.startswith("SELECT chunk, embedding FROM policy_chunks"):
+            cursor.fetchall.return_value = [(row["chunk"], row["vector"]) for row in rows
+                                           if row["backend"] == params["backend"]
+                                           and row["fingerprint"].startswith(params["version"])]
+        elif sql.startswith("DELETE FROM policy_chunks"):
+            rows.clear()
+        elif sql.startswith("INSERT INTO policy_chunks"):
+            rows.append(params)
+        return cursor
+
+    def embedding(cur, text, backend):
+        if text == "Business policy":  # The model compatibility probe is not a chunk.
+            return "probe"
+        embedding_calls.append((backend, text))
+        if text == "Rejected policy":
+            raise RuntimeError("embedding failed")
+        return f"{backend}:{model[2]}:{text}"
+
+    cursor.execute.side_effect = execute
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+    monkeypatch.setattr("policies.embed", embedding)
+
+    assert ensure_policies() == "MODEL_V1"
+    initial_calls = embedding_calls[:]
+    original_shared_vector = rows[1]["vector"]
+    original_fingerprint = rows[0]["fingerprint"]
+    embedding_calls.clear()
+    commits = connection.commit.call_count
+    assert ensure_policies() == "MODEL_V1"
+    assert not embedding_calls
+    assert connection.commit.call_count == commits
+    documents[0].write_text("Updated policy", encoding="utf-8")
+
+    assert ensure_policies() == "MODEL_V1"
+    assert embedding_calls == [("MODEL_V1", "Updated policy")]
+    assert initial_calls == [("MODEL_V1", "Old policy"), ("MODEL_V1", "Shared policy")]
+    assert [(row["id"], row["doc"], row["chunk"], row["vector"]) for row in rows] == [
+        (1, "a.md", "Updated policy", "MODEL_V1:100:Updated policy"),
+        (2, "b.md", "Shared policy", original_shared_vector),
+        (3, "c.md", "Shared policy", original_shared_vector),
+    ]
+    assert len({row["fingerprint"] for row in rows}) == 1
+    assert rows[0]["fingerprint"] != original_fingerprint
+
+    model[2] = 101  # Replacing a model can keep its name but changes its object ID.
+    embedding_calls.clear()
+    assert ensure_policies() == "MODEL_V1"
+    assert embedding_calls == [("MODEL_V1", "Updated policy"), ("MODEL_V1", "Shared policy")]
+    assert all(row["vector"] == f'MODEL_V1:101:{row["chunk"]}' for row in rows)
+
+    model[0] = "MODEL_V2"
+    embedding_calls.clear()
+    assert ensure_policies() == "MODEL_V2"
+    assert embedding_calls == [("MODEL_V2", "Updated policy"), ("MODEL_V2", "Shared policy")]
+    assert all(row["vector"] == f'MODEL_V2:101:{row["chunk"]}' for row in rows)
+
+    previous_rows = copy.deepcopy(rows)
+    commits = connection.commit.call_count
+    documents[0].write_text("Rejected policy", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="embedding failed"):
+        ensure_policies()
+    assert rows == previous_rows
+    assert connection.commit.call_count == commits
 
 
 def test_delayed_policy_refresh_preserves_newer_content(tmp_path, monkeypatch):
