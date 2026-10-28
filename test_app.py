@@ -77,6 +77,30 @@ def test_question_scope():
         parse_question("West and East")
 
 
+def test_zero_freight_baseline_preserves_discount_and_freight(monkeypatch):
+    row = {
+        "region_name": "West", "first_month": "2025-01", "last_month": "2025-09",
+        "before_last_month": "2025-06", "after_first_month": "2025-07",
+        "before_margin_pct": 40, "after_margin_pct": 25, "margin_drop_pts": 15,
+        "before_discount_pct": 3, "after_discount_pct": 18,
+        "before_freight_per_unit": 0, "after_freight_per_unit": 5,
+        "freight_increase_pct": None,
+    }
+    monkeypatch.setattr("agent.run_sql", lambda *args: {"rows": [row]})
+    monkeypatch.setattr("agent.search_policies", lambda *args: {"rows": []})
+
+    result = answer_question("Why did West margin fall since July 2025?")
+
+    assert result["dropped_count"] == 0
+    parts = [part for claim in result["claims"] for part in claim["parts"]
+             if "value" in part]
+    for column in ("before_discount_pct", "after_discount_pct",
+                   "before_freight_per_unit", "after_freight_per_unit"):
+        assert any(part["column"] == column and part["value"] == row[column]
+                   and supported(part, result["evidence"]) for part in parts)
+    assert all(part["column"] != "freight_increase_pct" for part in parts)
+
+
 @pytest.fixture(scope="module")
 def west_answer():
     return answer_question("Why did West margin fall since July 2025?")

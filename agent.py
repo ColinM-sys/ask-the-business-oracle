@@ -104,10 +104,12 @@ def answer_question(question):
     claim("finding", [text(f"{region} gross margin {direction} from "), number("before_margin_pct", "%"),
         text(" to "), number("after_margin_pct", "%"), text("; the signed margin drop is "),
         number("margin_drop_pts", " percentage points"), text(".")])
-    claim("finding", [text("Average discount moved from "), number("before_discount_pct", "%"),
+    freight_parts = [text("Average discount moved from "), number("before_discount_pct", "%"),
         text(" to "), number("after_discount_pct", "%"), text(". Freight per unit moved from $"),
-        number("before_freight_per_unit"), text(" to $"), number("after_freight_per_unit"),
-        text(" (change: "), number("freight_increase_pct", "%"), text(").")])
+        number("before_freight_per_unit"), text(" to $"), number("after_freight_per_unit")]
+    if row["freight_increase_pct"] is not None:
+        freight_parts.extend([text(" (change: "), number("freight_increase_pct", "%"), text(")")])
+    claim("finding", freight_parts + [text(".")])
     for other_index, other in enumerate(rows):
         if other_index != index:
             claim("comparison", [text(f"{other['region_name']} margin: "),
