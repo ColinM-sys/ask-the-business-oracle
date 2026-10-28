@@ -31,8 +31,15 @@ def embed(cursor, text, backend):
         return hash_embedding(text)
     if not _model_identifier.fullmatch(backend):
         raise ValueError("Invalid embedding model name")
+    row = cursor.execute(
+        "SELECT attribute_name FROM user_mining_model_attributes "
+        "WHERE model_name=:model AND attribute_type='TEXT' ORDER BY attribute_name",
+        model=backend,
+    ).fetchone()
+    if not row or not _model_identifier.fullmatch(row[0]):
+        raise ValueError("Invalid embedding model input")
     return cursor.execute(
-        f"SELECT VECTOR_EMBEDDING({backend} USING :text AS DATA) FROM dual",
+        f'SELECT VECTOR_EMBEDDING({backend} USING :text AS "{row[0]}") FROM dual',
         text=text,
     ).fetchone()[0]
 
@@ -51,11 +58,14 @@ def ensure_policies():
                     id NUMBER PRIMARY KEY, doc VARCHAR2(255), chunk VARCHAR2(4000),
                     embedding VECTOR(*, FLOAT32), backend VARCHAR2(128), source_hash VARCHAR2(64))""")
             backend = "hash-v1-512"
-            for (model,) in cur.execute(
-                "SELECT model_name FROM user_mining_models WHERE mining_function='EMBEDDING' ORDER BY model_name"
+            for model, attribute in cur.execute(
+                "SELECT m.model_name, a.attribute_name FROM user_mining_models m "
+                "JOIN user_mining_model_attributes a ON a.model_name=m.model_name "
+                "WHERE m.mining_function='EMBEDDING' AND a.attribute_type='TEXT' "
+                "ORDER BY m.model_name, a.attribute_name"
             ).fetchall():
-                if not _model_identifier.fullmatch(model):
-                    _logger.warning("Skipping unsupported embedding model %r", model)
+                if not _model_identifier.fullmatch(model) or not _model_identifier.fullmatch(attribute):
+                    _logger.warning("Skipping unsupported embedding model %r input %r", model, attribute)
                     continue
                 try:
                     embed(cur, "Business policy", model)

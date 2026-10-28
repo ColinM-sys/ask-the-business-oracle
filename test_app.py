@@ -22,7 +22,7 @@ from db import connect
 from agent import answer_question, parse_question, summary_sql
 from app import app
 from critic import critique, supported
-from policies import ensure_policies, hash_embedding
+from policies import embed, ensure_policies, hash_embedding
 
 
 @pytest.mark.parametrize("wallet", [None, "test-wallet"])
@@ -211,6 +211,64 @@ def test_hashing_is_stable_and_normalized():
     assert abs(sum(v*v for v in first) - 1) < 0.000001
 
 
+@pytest.mark.parametrize("valid_model", [True, False])
+def test_policy_embeddings_use_valid_text_attribute(valid_model, tmp_path, monkeypatch):
+    (tmp_path / "policy.md").write_text("Business policy", encoding="utf-8")
+    attributes = [
+        ("B_IMAGE_MODEL", "PIXELS", "VECTOR"),
+        ("C_UNSAFE_MODEL", 'BAD") FROM dual; DELETE FROM sales--', "TEXT"),
+    ]
+    if valid_model:
+        attributes.extend([("A_TEXT_MODEL", "INPUT_STRING", "TEXT"),
+                           ("A_TEXT_MODEL", "ORA$ONNXTARGET", "VECTOR")])
+
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+
+    def execute(sql, **params):
+        query = " ".join(sql.upper().split())
+        rows = []
+        if "FROM USER_TABLES" in query:
+            rows = [("POLICY_CHUNKS",)]
+        elif "FROM USER_MINING_MODELS" in query:
+            if "USER_MINING_MODEL_ATTRIBUTES" not in query:
+                rows = [(model,) for model in sorted({model for model, _, _ in attributes})]
+            else:
+                has_text_filter = "ATTRIBUTE_TYPE" in query and (
+                    "'TEXT'" in query or "TEXT" in params.values())
+                rows = sorted((model, name) for model, name, kind in attributes
+                              if not has_text_filter or kind == "TEXT")
+        elif "USER_MINING_MODEL_ATTRIBUTES" in query:
+            has_text_filter = "ATTRIBUTE_TYPE" in query and (
+                "'TEXT'" in query or "TEXT" in params.values())
+            rows = [(name,) for model, name, kind in attributes
+                    if model == params["model"] and (not has_text_filter or kind == "TEXT")]
+        elif "VECTOR_EMBEDDING" in query:
+            match = re.search(r'VECTOR_EMBEDDING\(\s*(\w+)\s+USING\s+:text\s+AS\s+"?([^"\s)]+)"?\s*\)',
+                              sql, re.IGNORECASE)
+            if not match or (match.group(1), match.group(2), "TEXT") not in attributes:
+                raise oracledb.DatabaseError(SimpleNamespace(code=54421, message="wrong model input"))
+            rows = [(hash_embedding(params["text"]),)]
+        result = MagicMock()
+        result.fetchall.return_value = rows
+        result.fetchone.return_value = rows[0] if rows else None
+        return result
+
+    cursor.execute.side_effect = execute
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+
+    backend = ensure_policies()
+    assert backend == ("A_TEXT_MODEL" if valid_model else "hash-v1-512")
+    embed(cursor, "Search question", backend)
+    embedding_sql = [call.args[0] for call in cursor.execute.call_args_list
+                     if "VECTOR_EMBEDDING" in call.args[0]]
+    assert embedding_sql == (['SELECT VECTOR_EMBEDDING(A_TEXT_MODEL USING :text AS "INPUT_STRING") FROM dual'] * 3
+                             if valid_model else [])
+    connection.commit.assert_called_once()
+
+
 @pytest.mark.parametrize("failure", [
     RuntimeError("private-driver-details"),
     oracledb.DatabaseError(SimpleNamespace(code=3113, message="private-driver-details")),
@@ -222,7 +280,7 @@ def test_policy_probe_propagates_unexpected_failures(failure, tmp_path, monkeypa
     connection.__enter__.return_value = connection
     cursor = connection.cursor.return_value
     cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
-    cursor.execute.return_value.fetchall.side_effect = [[("BROKEN_MODEL",)], []]
+    cursor.execute.return_value.fetchall.side_effect = [[("BROKEN_MODEL", "DATA")], []]
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
 
@@ -243,8 +301,8 @@ def test_policy_probe_propagates_unexpected_failures(failure, tmp_path, monkeypa
 
 @pytest.mark.parametrize("models, expected", [
     ([], "hash-v1-512"),
-    ([("INCOMPATIBLE_MODEL",)], "hash-v1-512"),
-    ([("INCOMPATIBLE_MODEL",), ("GOOD_MODEL",)], "GOOD_MODEL"),
+    ([("INCOMPATIBLE_MODEL", "DATA")], "hash-v1-512"),
+    ([("INCOMPATIBLE_MODEL", "DATA"), ("GOOD_MODEL", "DATA")], "GOOD_MODEL"),
 ])
 def test_policy_probe_fallback_is_explicit_and_sanitized(
         models, expected, tmp_path, monkeypatch, caplog):
@@ -282,8 +340,13 @@ def test_policy_probe_skips_unsupported_names(unsupported, later_model, tmp_path
     connection.__enter__.return_value = connection
     cursor = connection.cursor.return_value
     cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
-    models = [(unsupported,)] + ([(later_model,)] if later_model else [])
+    models = [(unsupported, "DATA")] + ([(later_model, "DATA")] if later_model else [])
     cursor.execute.return_value.fetchall.side_effect = [models, []]
+    attribute_result = MagicMock()
+    attribute_result.fetchone.return_value = ("DATA",)
+    cursor.execute.side_effect = lambda sql, **params: (
+        attribute_result if "user_mining_model_attributes" in sql.lower()
+        and "user_mining_models" not in sql.lower() else cursor.execute.return_value)
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
 
@@ -291,7 +354,7 @@ def test_policy_probe_skips_unsupported_names(unsupported, later_model, tmp_path
     assert ensure_policies() == expected
     embedding_sql = [call.args[0] for call in cursor.execute.call_args_list
                      if "VECTOR_EMBEDDING" in call.args[0]]
-    assert embedding_sql == (["SELECT VECTOR_EMBEDDING(GOOD_MODEL USING :text AS DATA) FROM dual"] * 2
+    assert embedding_sql == (['SELECT VECTOR_EMBEDDING(GOOD_MODEL USING :text AS "DATA") FROM dual'] * 2
                              if later_model else [])
     inserted = [call.kwargs for call in cursor.execute.call_args_list
                 if call.args[0].lstrip().startswith("INSERT INTO policy_chunks")]
@@ -364,7 +427,7 @@ def test_delayed_policy_refresh_preserves_newer_content(tmp_path, monkeypatch):
     rows = []
 
     def execute(sql, **params):
-        if sql.startswith("SELECT model_name"):
+        if "user_mining_models" in sql.lower():
             cursor.fetchall.return_value = []
         elif sql.startswith("SELECT DISTINCT backend, source_hash"):
             cursor.fetchall.return_value = [(row["backend"], row["fingerprint"]) for row in rows]
