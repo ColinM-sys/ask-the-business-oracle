@@ -51,7 +51,7 @@ def index():
                              "Correct missing, incomplete, or duplicate monthly cost records, then retry."), 503
         except MissingDiscountInputsError:
             error, status = (f"Analysis unavailable. {MissingDiscountInputsError.message} "
-                             "Correct missing discount, quantity, or unit price inputs, then retry."), 503
+                             "Correct missing quantities for sales, then retry."), 503
         except DiscountDataQualityError:
             error, status = "Analysis unavailable. Correct missing discount, quantity, or unit price inputs, then retry.", 503
         except RevenueDataQualityError:

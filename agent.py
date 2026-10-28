@@ -28,10 +28,10 @@ class DiscountDataQualityError(DataQualityError):
 
 
 class MissingDiscountInputsError(DiscountDataQualityError):
-    """The sales data lacks inputs needed to calculate discounts."""
+    """The sales data lacks quantities needed for the analysis."""
 
-    message = ("Missing discount inputs for some sales. "
-               "Check discount, quantity, and unit price values in the sales table.")
+    message = ("Missing quantities for some sales. "
+               "Check quantity values in the sales table.")
 
 
 class RevenueDataQualityError(DataQualityError):
@@ -63,8 +63,9 @@ JOIN = """FROM sales s LEFT JOIN
         GROUP BY region_id, product_id, cost_month HAVING COUNT(*)=1) c ON c.region_id=s.region_id
     AND c.product_id=s.product_id AND c.cost_month=s.sale_month
     JOIN regions r ON r.region_id=s.region_id"""
-MISSING_DISCOUNT_COUNT = """SUM(CASE WHEN s.discount_pct IS NULL OR s.quantity IS NULL
-    OR s.unit_price IS NULL THEN 1 ELSE 0 END)"""
+MISSING_DISCOUNT_INPUTS = "s.discount_pct IS NULL OR s.quantity IS NULL OR s.unit_price IS NULL"
+MISSING_DISCOUNT_COUNT = f"SUM(CASE WHEN {MISSING_DISCOUNT_INPUTS} THEN 1 ELSE 0 END)"
+MISSING_QUANTITY_COUNT = "SUM(CASE WHEN s.quantity IS NULL THEN 1 ELSE 0 END)"
 MISSING_REVENUE_COUNT = "SUM(CASE WHEN s.net_revenue IS NULL THEN 1 ELSE 0 END)"
 MONTHLY_SQL = f"""SELECT r.region_name, s.sale_month,
     ROUND(SUM(s.net_revenue),2) AS revenue,
@@ -78,6 +79,7 @@ MONTHLY_SQL = f"""SELECT r.region_name, s.sale_month,
     ROUND(SUM(s.quantity*c.freight_per_unit)/NULLIF(SUM(s.quantity),0),2) AS freight_per_unit,
     SUM(CASE WHEN c.unit_cogs IS NULL OR c.freight_per_unit IS NULL THEN 1 ELSE 0 END) AS missing_cost_count,
     {MISSING_REVENUE_COUNT} AS missing_revenue_count,
+    {MISSING_QUANTITY_COUNT} AS missing_quantity_count,
     {MISSING_DISCOUNT_COUNT} AS missing_discount_count
     {JOIN} GROUP BY r.region_name,s.sale_month ORDER BY r.region_name,s.sale_month"""
 
@@ -93,7 +95,7 @@ def summary_sql():
         units = total("s.quantity")
         raw[period] = {
             "margin_pct": f"CASE WHEN {MISSING_REVENUE_COUNT}=0 THEN 100*{total('s.net_revenue-s.quantity*(c.unit_cogs+c.freight_per_unit)')}/NULLIF({revenue},0) END",
-            "discount_pct": f"CASE WHEN {MISSING_DISCOUNT_COUNT}=0 THEN {total('s.quantity*s.unit_price*s.discount_pct')}/NULLIF({total('s.quantity*s.unit_price')},0) END",
+            "discount_pct": f"CASE WHEN SUM(CASE WHEN {condition} AND ({MISSING_DISCOUNT_INPUTS}) THEN 1 ELSE 0 END)=0 THEN {total('s.quantity*s.unit_price*s.discount_pct')}/NULLIF({total('s.quantity*s.unit_price')},0) END",
             "freight_per_unit": f"{total('s.quantity*c.freight_per_unit')}/NULLIF({units},0)",
         }
         # Do not present a partial sum as zero revenue when inputs are missing.
@@ -104,6 +106,7 @@ def summary_sql():
     columns.extend([
         "SUM(CASE WHEN c.unit_cogs IS NULL OR c.freight_per_unit IS NULL THEN 1 ELSE 0 END) AS missing_cost_count",
         f"{MISSING_REVENUE_COUNT} AS missing_revenue_count",
+        f"{MISSING_QUANTITY_COUNT} AS missing_quantity_count",
         f"{MISSING_DISCOUNT_COUNT} AS missing_discount_count",
         f"CASE WHEN ({raw['before']['margin_pct']}) IS NULL OR ({raw['after']['margin_pct']}) IS NULL THEN NULL "
         f"WHEN ({raw['before']['margin_pct']}) > ({raw['after']['margin_pct']}) THEN 'fell' WHEN ({raw['before']['margin_pct']}) < ({raw['after']['margin_pct']}) THEN 'rose' ELSE 'was unchanged' END AS margin_direction",
@@ -166,7 +169,7 @@ def answer_question(question):
         raise MissingCostsError(MissingCostsError.message)
     if any(row["missing_revenue_count"] for key in ("E1", "E2") for row in evidence[key]["rows"]):
         raise RevenueDataQualityError("Missing net revenue for some sales; cannot analyze incomplete data.")
-    if any(row["missing_discount_count"] for key in ("E1", "E2") for row in evidence[key]["rows"]):
+    if any(row["missing_quantity_count"] for key in ("E1", "E2") for row in evidence[key]["rows"]):
         raise MissingDiscountInputsError(MissingDiscountInputsError.message)
     row = rows[index]
     if row["before_last_month"] is None or row["after_first_month"] is None:

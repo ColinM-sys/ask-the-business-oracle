@@ -1191,11 +1191,11 @@ def test_missing_net_revenue_rejects_analysis(region_id, month, incomplete_when,
         assert result["dropped_count"] == 0
 
 
-@pytest.mark.parametrize("column", ["discount_pct", "quantity", "unit_price", "net_revenue"])
+@pytest.mark.parametrize("column", ["quantity", "net_revenue"])
 @pytest.mark.parametrize("region_id", [1, 2])
 @pytest.mark.parametrize("month", ["2025-06", "2025-07"])
 @pytest.mark.parametrize("incomplete_when", ["both", "monthly", "summary"])
-def test_missing_sales_inputs_reject_analysis(column, region_id, month, incomplete_when, monkeypatch):
+def test_missing_quantity_or_revenue_rejects_analysis(column, region_id, month, incomplete_when, monkeypatch):
     with sqlite3.connect(":memory:") as con:
         con.row_factory = sqlite3.Row
         con.executescript("""
@@ -1236,7 +1236,7 @@ def test_missing_sales_inputs_reject_analysis(column, region_id, month, incomple
         def set_input(value):
             con.execute(f"UPDATE sales SET {column}=? WHERE rowid=?", (value, sale_id))
 
-        valid_value = {"discount_pct": 0, "quantity": 1, "unit_price": 100.0, "net_revenue": 0}[column]
+        valid_value = {"quantity": 1, "net_revenue": 0}[column]
         if incomplete_when != "summary":
             set_input(None)
         snapshots = []
@@ -1253,33 +1253,113 @@ def test_missing_sales_inputs_reject_analysis(column, region_id, month, incomple
 
         monkeypatch.setattr("agent.run_sql", run_sql)
         error = RevenueDataQualityError if column == "net_revenue" else DiscountDataQualityError
-        message = "Missing net revenue" if column == "net_revenue" else "Missing discount inputs"
+        message = "Missing net revenue" if column == "net_revenue" else "Missing quantit"
         with pytest.raises(error, match=message):
             answer_question("West since July 2025")
         policies.assert_not_called()
         assert len(snapshots) == 2
         for index, snapshot in enumerate(snapshots):
             for row in snapshot["rows"]:
+                incomplete = incomplete_when == "both" or incomplete_when == (
+                    "monthly" if index == 0 else "summary")
+                affected = row["region_name"] == region and (
+                    "sale_month" not in row or row["sale_month"] == month)
                 if column == "net_revenue":
-                    incomplete = incomplete_when == "both" or incomplete_when == (
-                        "monthly" if index == 0 else "summary")
-                    affected = row["region_name"] == region and (
-                        "sale_month" not in row or row["sale_month"] == month)
                     assert row["missing_revenue_count"] == int(incomplete and affected)
-                elif row["missing_discount_count"]:
-                    if "sale_month" in row:
-                        assert row["discount_pct"] is None
-                    else:
-                        assert row[f"{period}_discount_pct"] is None
+                else:
+                    assert row["missing_quantity_count"] == int(incomplete and affected)
+                    if row["missing_discount_count"]:
+                        if "sale_month" in row:
+                            assert row["discount_pct"] is None
+                        else:
+                            assert row[f"{period}_discount_pct"] is None
 
         set_input(None)
         monkeypatch.setattr("agent.run_sql", execute)
         response = app.test_client().post("/", data={"question": "West since July 2025"})
         assert response.status_code == 503
         message = (b"Correct missing net revenue for sales, then retry." if column == "net_revenue"
-                   else b"Correct missing discount, quantity, or unit price inputs, then retry.")
+                   else b"Correct missing quantities for sales, then retry.")
         assert message in response.data
         policies.assert_not_called()
+
+
+@pytest.mark.parametrize("column", ["discount_pct", "unit_price"])
+@pytest.mark.parametrize("region_id", [1, 2])
+@pytest.mark.parametrize("month, period", [("2025-06", "before"), ("2025-07", "after")])
+def test_missing_discount_inputs_preserve_valid_metrics(column, region_id, month, period, monkeypatch):
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West'), (2, 'East');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+        """)
+        for current_region in (1, 2):
+            for current_month, revenue, freight in (("2025-06", 90.0, 5.0), ("2025-07", 80.0, 8.0)):
+                con.executemany("INSERT INTO sales VALUES (?, 1, ?, ?, ?, 100, 10)", [
+                    (current_region, current_month, revenue, 1),
+                    (current_region, current_month, 2 * revenue, 2),
+                ])
+                con.execute("INSERT INTO costs VALUES (?, 1, ?, 30, ?)",
+                            (current_region, current_month, freight))
+        con.execute(f"UPDATE sales SET {column}=NULL WHERE rowid=(SELECT MIN(rowid) FROM sales "
+                    "WHERE region_id=? AND sale_month=?)", (region_id, month))
+
+        def run_sql(sql, params=None):
+            return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
+                con.execute(tools.validate_select(sql), params or {})]}
+
+        monkeypatch.setattr("agent.run_sql", run_sql)
+        monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
+        result = answer_question("West since July 2025")
+        response = app.test_client().post("/", data={"question": "West since July 2025"})
+
+    affected_region = "West" if region_id == 1 else "East"
+    monthly = result["evidence"]["E1"]["rows"]
+    summary = result["evidence"]["E2"]["rows"]
+    affected_month = next(row for row in monthly
+                          if row["region_name"] == affected_region and row["sale_month"] == month)
+    affected_summary = next(row for row in summary if row["region_name"] == affected_region)
+    other_period = "after" if period == "before" else "before"
+    assert affected_month["missing_discount_count"] == 1
+    assert affected_month["missing_quantity_count"] == affected_summary["missing_quantity_count"] == 0
+    assert affected_month["discount_pct"] is None
+    assert all(row["discount_pct"] == 10 for row in monthly if row is not affected_month)
+    assert affected_summary[f"{period}_discount_pct"] is None
+    assert affected_summary[f"{other_period}_discount_pct"] == 10
+    other_summary = next(row for row in summary if row["region_name"] != affected_region)
+    assert other_summary["before_discount_pct"] == other_summary["after_discount_pct"] == 10
+    assert (affected_summary["before_margin_pct"], affected_summary["after_margin_pct"],
+            affected_summary["margin_drop_pts"]) == (61.11, 52.5, 8.61)
+    assert (affected_summary["before_freight_per_unit"], affected_summary["after_freight_per_unit"],
+            affected_summary["freight_increase_pct"]) == (5, 8, 60)
+
+    findings = [claim for claim in result["claims"] if claim["kind"] == "finding"]
+    margin = next(claim for claim in findings if "gross margin" in claim["parts"][0]["text"])
+    discount = next(claim for claim in findings if "discount" in claim["parts"][0]["text"].lower())
+    freight = next(claim for claim in findings if "freight" in claim["parts"][0]["text"].lower())
+    render = lambda claim: "".join(part.get("text", str(part.get("value", "")) + part.get("suffix", ""))
+                                   for part in claim["parts"])
+    assert "61.11%" in render(margin) and "52.5%" in render(margin)
+    assert "$5.0" in render(freight) and "$8.0" in render(freight) and "60.0%" in render(freight)
+    if region_id == 1:
+        assert f"{period} unavailable" in render(discount)
+        assert f"{other_period} 10.0%" in render(discount)
+    else:
+        assert render(discount) == "Average discount: before 10.0%; after 10.0%."
+    for claim in (margin, discount, freight):
+        for part in claim["parts"]:
+            if "value" in part:
+                assert supported(part, result["evidence"])
+    assert result["dropped_count"] == 0
+    assert response.status_code == 200
+    assert b"West gross margin fell from" in response.data
+    assert b"Freight per unit:" in response.data
+    if region_id == 1:
+        assert f"{period} unavailable".encode() in response.data
 
 
 @pytest.mark.parametrize("region_id", [1, 2])
@@ -1594,7 +1674,8 @@ def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
         "before_discount_pct": 3, "after_discount_pct": 18,
         "before_freight_per_unit": 0, "after_freight_per_unit": 5,
         "freight_increase_pct": None,
-        "missing_cost_count": 0, "missing_discount_count": 0, "missing_revenue_count": 0,
+        "missing_cost_count": 0, "missing_discount_count": 0, "missing_quantity_count": 0,
+        "missing_revenue_count": 0,
     }
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
         "sql": sql, "params": params or {}, "rows": [row]})
@@ -1877,7 +1958,8 @@ def policy_rows(monkeypatch):
         "margin_direction": "fell", "before_discount_pct": 3, "after_discount_pct": 18,
         "before_freight_per_unit": 5, "after_freight_per_unit": 8,
         "freight_increase_pct": 60,
-        "missing_cost_count": 0, "missing_discount_count": 0, "missing_revenue_count": 0,
+        "missing_cost_count": 0, "missing_discount_count": 0, "missing_quantity_count": 0,
+        "missing_revenue_count": 0,
     }
     policies = [{"id": i, "doc": path.name, "chunk": path.read_text(encoding="utf-8").strip()}
                 for i, path in enumerate(sorted(Path(__file__).with_name("docs").glob("*.md")), 1)]
@@ -2006,7 +2088,8 @@ def retrieved_policy_rows(monkeypatch):
         "margin_direction": "fell", "before_discount_pct": 3, "after_discount_pct": 18,
         "before_freight_per_unit": 5, "after_freight_per_unit": 8,
         "freight_increase_pct": 60,
-        "missing_cost_count": 0, "missing_discount_count": 0, "missing_revenue_count": 0,
+        "missing_cost_count": 0, "missing_discount_count": 0, "missing_quantity_count": 0,
+        "missing_revenue_count": 0,
     }
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
         "sql": sql, "params": params or {}, "rows": [summary]})
@@ -3141,13 +3224,13 @@ def test_ui_validation_and_safe_error(monkeypatch):
 
 @pytest.mark.parametrize("column, message", [
     ("missing_cost_count", b"Missing monthly costs or duplicate cost rows"),
-    ("missing_discount_count", b"Missing discount inputs"),
+    ("missing_quantity_count", b"Missing quantities"),
 ])
 @pytest.mark.parametrize("incomplete_when", ["monthly", "summary"])
 def test_ui_reports_data_quality_errors(column, message, incomplete_when, monkeypatch):
     def run_sql(sql, params=None):
         row = {"region_name": "West", "missing_cost_count": 0, "missing_discount_count": 0,
-               "missing_revenue_count": 0}
+               "missing_quantity_count": 0, "missing_revenue_count": 0}
         if (params is None) == (incomplete_when == "monthly"):
             row[column] = 1
         return {"sql": sql, "params": params or {}, "rows": [row]}
@@ -3238,7 +3321,7 @@ def test_ui_sanitizes_invalid_policy_encoding(tmp_path, monkeypatch):
     (tmp_path / "policy.md").write_bytes(b"\xff")
     monkeypatch.setattr("policies.DOCS", tmp_path)
     row = {"region_name": "West", "missing_cost_count": 0, "missing_discount_count": 0,
-           "missing_revenue_count": 0,
+           "missing_quantity_count": 0, "missing_revenue_count": 0,
            "before_last_month": "2025-06", "after_first_month": "2025-07",
            "before_margin_pct": 40, "after_margin_pct": 25}
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
