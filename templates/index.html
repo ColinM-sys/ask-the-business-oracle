@@ -86,7 +86,7 @@
     <p id="evidence-description"></p>
     <h3>SQL</h3><pre id="evidence-sql"></pre>
     <h3>Bound parameters</h3><pre id="evidence-params"></pre>
-    <h3>Returned rows</h3><div class="table-wrap" id="evidence-rows"></div>
+    <h3 id="evidence-rows-heading">Returned rows</h3><div class="table-wrap" id="evidence-rows" role="region" aria-labelledby="evidence-rows-heading" tabindex="0"></div>
   </dialog>
   <script>
     const evidence = {{ result.evidence | browser_evidence | tojson }};
