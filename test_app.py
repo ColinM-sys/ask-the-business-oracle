@@ -364,6 +364,80 @@ def test_hashing_is_stable_and_normalized():
     assert abs(sum(v*v for v in first) - 1) < 0.000001
 
 
+@pytest.mark.parametrize("failure_mode", ["incompatible", "null"])
+def test_policy_probe_cache_tracks_model_versions(failure_mode, tmp_path, monkeypatch):
+    (tmp_path / "policy.md").write_text("Distinct policy content", encoding="utf-8")
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.fetchone.return_value = ("POLICY_CHUNKS",)
+    models = [("INCOMPATIBLE_MODEL", "created", 10, "v1"), ("GOOD_MODEL", "created", 20, "v1")]
+    rows, probes, document_embeddings = [], [], []
+    bad_recovers = [False]
+
+    def execute(sql, **params):
+        if "FROM user_mining_models" in sql:
+            cursor.fetchall.return_value = (list(models) if "object_id" in sql.lower()
+                                             else [(model[0],) for model in models])
+        elif sql.startswith("SELECT DISTINCT backend, source_hash"):
+            cursor.fetchall.return_value = [(row["backend"], row["fingerprint"]) for row in rows]
+        elif sql.startswith("DELETE FROM policy_chunks"):
+            rows.clear()
+        elif sql.lstrip().startswith("INSERT INTO policy_chunks"):
+            rows.append(params)
+        return cursor
+
+    def embedding(cur, text, backend):
+        if text == "Business policy":
+            probes.append(next(model for model in models if model[0] == backend))
+            if backend == "INCOMPATIBLE_MODEL" and not bad_recovers[0]:
+                if failure_mode == "null":
+                    return None
+                raise oracledb.DatabaseError(SimpleNamespace(code=40290))
+        else:
+            document_embeddings.append((backend, text))
+        return hash_embedding(text)
+
+    cursor.execute.side_effect = execute
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+    monkeypatch.setattr("policies.embed", embedding)
+    monkeypatch.setattr("policies._probe_cache", {}, raising=False)
+
+    assert ensure_policies() == "GOOD_MODEL"
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        assert list(executor.map(lambda _: ensure_policies(), range(4))) == ["GOOD_MODEL"] * 4
+    assert probes == models
+    assert document_embeddings == [("GOOD_MODEL", "Distinct policy content")]
+
+    models[0] = ("INCOMPATIBLE_MODEL", "created", 11, "v1")
+    assert ensure_policies() == "GOOD_MODEL"
+    assert probes == [("INCOMPATIBLE_MODEL", "created", 10, "v1"), ("GOOD_MODEL", "created", 20, "v1"), models[0]]
+    assert len(document_embeddings) == 1
+
+    old_fingerprint = rows[0]["fingerprint"]
+    models[1] = ("GOOD_MODEL", "created", 21, "v1")
+    assert ensure_policies() == "GOOD_MODEL"
+    assert probes[-1] == models[1]
+    assert len(probes) == 4
+    assert len(document_embeddings) == 2
+    assert rows[0]["fingerprint"] != old_fingerprint
+
+    models[1] = ("GOOD_MODEL", "created", 21, "v2")
+    assert ensure_policies() == "GOOD_MODEL"
+    assert probes[-1] == models[1]
+    assert len(probes) == 5
+    assert len(document_embeddings) == 3
+
+    if failure_mode == "null":
+        # A revised model can recover after the prior null probe was cached.
+        bad_recovers[0] = True
+        models[0] = ("INCOMPATIBLE_MODEL", "created", 11, "v2")
+        assert ensure_policies() == "INCOMPATIBLE_MODEL"
+        assert probes[-1] == models[0]
+        assert document_embeddings[-1] == ("INCOMPATIBLE_MODEL", "Distinct policy content")
+
+
 @pytest.mark.parametrize("text_type", ["VARCHAR2", "CLOB", "NVARCHAR2", "NCLOB"])
 @pytest.mark.parametrize("image, null_model, good_model", [
     (True, False, True),
@@ -379,7 +453,7 @@ def test_policy_probe_selects_usable_text_model(
     metadata.execute("""CREATE TABLE user_mining_model_attributes
         (model_name TEXT, attribute_name TEXT, attribute_type TEXT, data_type TEXT)""")
     metadata.execute("""CREATE TABLE user_objects
-        (object_name TEXT, object_type TEXT, subobject_name TEXT, object_id INTEGER)""")
+        (object_name TEXT, object_type TEXT, subobject_name TEXT, object_id INTEGER, last_ddl_time TEXT)""")
     models = []
     if image:
         models.append(("A_IMAGE", "UNSTRUCTURED", "BLOB"))
@@ -390,9 +464,9 @@ def test_policy_probe_selects_usable_text_model(
     model_versions = {}
     for object_id, (name, attribute_type, data_type) in enumerate(models, 1):
         created = f"created-{name}"
-        model_versions[name] = (name, created, object_id)
+        model_versions[name] = (name, created, object_id, "modified")
         metadata.execute("INSERT INTO user_mining_models VALUES (?, 'EMBEDDING', ?)", (name, created))
-        metadata.execute("INSERT INTO user_objects VALUES (?, 'MINING MODEL', NULL, ?)", (name, object_id))
+        metadata.execute("INSERT INTO user_objects VALUES (?, 'MINING MODEL', NULL, ?, 'modified')", (name, object_id))
         metadata.execute("INSERT INTO user_mining_model_attributes VALUES (?, 'DATA', ?, ?)",
                          (name, attribute_type, data_type))
         metadata.execute("INSERT INTO user_mining_model_attributes VALUES (?, 'ORA$ONNXTARGET', 'VECTOR', 'VECTOR')",
@@ -407,6 +481,7 @@ def test_policy_probe_selects_usable_text_model(
         metadata.execute(sql) if "user_mining_models" in sql.lower() else cursor)
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
+    monkeypatch.setattr("policies._probe_cache", {})
     probed = []
 
     def embedding(cur, text, backend):
@@ -442,29 +517,35 @@ def test_policy_probe_propagates_unexpected_failures(failure, tmp_path, monkeypa
     connection.__enter__.return_value = connection
     cursor = connection.cursor.return_value
     cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
-    cursor.execute.return_value.fetchall.side_effect = [[("BROKEN_MODEL", "created", 1)], []]
+    cursor.execute.return_value.fetchall.side_effect = [[("BROKEN_MODEL", "created", 1, "modified")]] * 2
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
+    monkeypatch.setattr("policies._probe_cache", {})
+
+    attempts = []
 
     def embedding(cur, text, backend):
+        attempts.append(backend)
         if backend == "BROKEN_MODEL":
             raise failure
         return hash_embedding(text)
 
     monkeypatch.setattr("policies.embed", embedding)
 
-    with pytest.raises(type(failure)) as caught:
-        ensure_policies()
+    for _ in range(2):
+        with pytest.raises(type(failure)) as caught:
+            ensure_policies()
 
-    assert caught.value is failure
+        assert caught.value is failure
+    assert attempts == ["BROKEN_MODEL", "BROKEN_MODEL"]
     connection.commit.assert_not_called()
     assert not any(call.args[0].startswith("DELETE") for call in cursor.execute.call_args_list)
 
 
 @pytest.mark.parametrize("models, expected", [
     ([], "hash-v1-512"),
-    ([("INCOMPATIBLE_MODEL",)], "hash-v1-512"),
-    ([("INCOMPATIBLE_MODEL",), ("GOOD_MODEL",)], "GOOD_MODEL"),
+    ([("INCOMPATIBLE_MODEL", "created", 1, "v1")], "hash-v1-512"),
+    ([("INCOMPATIBLE_MODEL", "created", 1, "v1"), ("GOOD_MODEL", "created", 2, "v1")], "GOOD_MODEL"),
 ])
 def test_policy_probe_fallback_is_explicit_and_sanitized(
         models, expected, tmp_path, monkeypatch, caplog):
@@ -473,10 +554,10 @@ def test_policy_probe_fallback_is_explicit_and_sanitized(
     connection.__enter__.return_value = connection
     cursor = connection.cursor.return_value
     cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
-    cursor.execute.return_value.fetchall.side_effect = [
-        [(name, "created", i) for i, (name,) in enumerate(models)], []]
+    cursor.execute.return_value.fetchall.side_effect = [models, []]
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
+    monkeypatch.setattr("policies._probe_cache", {})
 
     def embedding(cur, text, backend):
         if backend == "INCOMPATIBLE_MODEL":
@@ -503,11 +584,11 @@ def test_policy_probe_skips_unsupported_names(unsupported, later_model, tmp_path
     connection.__enter__.return_value = connection
     cursor = connection.cursor.return_value
     cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
-    models = [(unsupported,)] + ([(later_model,)] if later_model else [])
-    cursor.execute.return_value.fetchall.side_effect = [
-        [(name, "created", i) for i, (name,) in enumerate(models)], []]
+    models = [(unsupported, "created", 1, "modified")] + ([(later_model, "created", 2, "modified")] if later_model else [])
+    cursor.execute.return_value.fetchall.side_effect = [models, []]
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
+    monkeypatch.setattr("policies._probe_cache", {})
 
     expected = later_model or "hash-v1-512"
     assert ensure_policies() == expected
@@ -618,7 +699,7 @@ def test_policy_refresh_rechunks_model_versioned_cache(tmp_path, monkeypatch):
     cursor.fetchone.return_value = ("POLICY_CHUNKS",)
 
     def execute(sql, **params):
-        if sql.startswith("SELECT model_name"):
+        if "FROM user_mining_models" in sql:
             cursor.fetchall.return_value = []
         elif sql.startswith("SELECT DISTINCT backend, source_hash"):
             cursor.fetchall.return_value = list({(row["backend"], row["fingerprint"]) for row in rows})
@@ -683,11 +764,11 @@ def test_policy_refresh_reuses_chunk_embeddings_by_model(tmp_path, monkeypatch):
     # Legacy rows have no recorded model revision and must be refreshed once.
     rows = [{"backend": "MODEL_V1", "fingerprint": "0" * 64,
              "chunk": "Shared policy", "vector": "legacy vector"}]
-    model = ["MODEL_V1", "created", 100]
+    model = ["MODEL_V1", "created", 100, "modified"]
     embedding_calls = []
 
     def execute(sql, **params):
-        if sql.startswith("SELECT model_name"):
+        if "FROM user_mining_models" in sql:
             cursor.fetchall.return_value = [tuple(model)]
         elif sql.startswith("SELECT DISTINCT backend, source_hash"):
             cursor.fetchall.return_value = list({(row["backend"], row["fingerprint"]) for row in rows})
@@ -782,7 +863,7 @@ def test_delayed_policy_refresh_preserves_newer_content(tmp_path, monkeypatch):
     rows = []
 
     def execute(sql, **params):
-        if sql.startswith("SELECT model_name"):
+        if "FROM user_mining_models" in sql:
             cursor.fetchall.return_value = []
         elif sql.startswith("SELECT DISTINCT backend, source_hash"):
             cursor.fetchall.return_value = [(row["backend"], row["fingerprint"]) for row in rows]
@@ -866,13 +947,13 @@ def test_concurrent_policy_refreshes_do_not_overwrite_newer_content(tmp_path, mo
             sql = " ".join(sql.upper().split())
             if sql.startswith("SELECT TABLE_NAME FROM USER_TABLES"):
                 self.result = [("POLICY_CHUNKS",)]
-            elif sql == "LOCK TABLE POLICY_CHUNKS IN EXCLUSIVE MODE":
+            elif re.fullmatch(r"LOCK TABLE POLICY_CHUNKS IN EXCLUSIVE MODE WAIT [1-9][0-9]*", sql):
                 if worker.name == "new" and database_lock.locked():
                     second_waiting.set()
                     second_progress.set()
                 assert database_lock.acquire(timeout=10), "Database lock was not released"
                 self.connection.locked = True
-            elif sql.startswith("SELECT MODEL_NAME, CREATION_DATE,"):
+            elif sql.startswith("SELECT M.MODEL_NAME, M.CREATION_DATE,"):
                 self.result = []
             elif sql.startswith("SELECT DISTINCT BACKEND, SOURCE_HASH FROM POLICY_CHUNKS"):
                 with rows_lock:
@@ -956,8 +1037,8 @@ def test_policy_table_creation_race(code, tmp_path, monkeypatch):
 
     if code == 955:
         assert ensure_policies() == "hash-v1-512"
-        assert any(" ".join(call.args[0].upper().split()) ==
-                   "LOCK TABLE POLICY_CHUNKS IN EXCLUSIVE MODE"
+        assert any(re.fullmatch(r"LOCK TABLE POLICY_CHUNKS IN EXCLUSIVE MODE WAIT [1-9][0-9]*",
+                                " ".join(call.args[0].upper().split()))
                    for call in cursor.execute.call_args_list)
         connection.commit.assert_called_once()
     else:
@@ -967,6 +1048,48 @@ def test_policy_table_creation_race(code, tmp_path, monkeypatch):
         assert not any(call.args[0].upper().startswith("LOCK TABLE")
                        for call in cursor.execute.call_args_list)
         connection.commit.assert_not_called()
+
+
+@pytest.mark.parametrize("code", [54, 30006])
+def test_policy_lock_timeout_returns_temporary_failure_and_allows_retry(code, tmp_path, monkeypatch):
+    (tmp_path / "policy.md").write_text("Policy", encoding="utf-8")
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.fetchone.return_value = ("POLICY_CHUNKS",)
+    cursor.fetchall.return_value = []
+    lock_attempts = []
+
+    def execute(sql, **params):
+        normalized = " ".join(sql.upper().split())
+        if normalized.startswith("LOCK TABLE"):
+            lock_attempts.append(normalized)
+            if len(lock_attempts) == 1:
+                raise oracledb.DatabaseError(SimpleNamespace(
+                    code=code, message="private-driver-details"))
+        return cursor
+
+    cursor.execute.side_effect = execute
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+    monkeypatch.setattr("app.answer_question", lambda _: tools.search_policies("Policy"))
+
+    response = app.test_client().post("/", data={"question": "West"})
+
+    assert response.status_code == 503
+    assert b"retry" in response.data
+    assert b"private-driver-details" not in response.data
+    wait = re.fullmatch(r"LOCK TABLE POLICY_CHUNKS IN EXCLUSIVE MODE WAIT ([1-9][0-9]*)",
+                        lock_attempts[0])
+    assert wait and int(wait.group(1)) <= 30
+    connection.__exit__.assert_called_once()
+    connection.commit.assert_not_called()
+    assert not any(call.args[0].lstrip().upper().startswith(("DELETE", "INSERT"))
+                   for call in cursor.execute.call_args_list)
+
+    assert ensure_policies() == "hash-v1-512"
+    assert len(lock_attempts) == 2
+    connection.commit.assert_called_once()
 
 
 def test_policy_search_handles_empty_table(monkeypatch):
@@ -1349,8 +1472,6 @@ def test_missing_region_has_descriptive_validation_error(monkeypatch, rows):
     response = app.test_client().post("/", data={"question": "West"})
     assert response.status_code == 400
     assert b"No sales/cost data found for West" in response.data
-
-
 @pytest.mark.parametrize("cutoff,valid", [
     ("2025-02", False), ("2025-03", False), ("2025-08", True), ("2025-09", False),
 ])
@@ -1385,14 +1506,20 @@ def test_cutoff_error_shows_selected_region_coverage(monkeypatch, cutoff, valid)
             policies.assert_not_called()
 
 
-@pytest.mark.parametrize("before,after,direction,below_precision", [
-    (25.001, 25.004, "rose", True),
-    (25.004, 25.001, "fell", True),
-    (25.001, 25.001, "was unchanged", False),
-    (25, 26, "rose", False),
-    (26, 25, "fell", False),
+@pytest.mark.parametrize("before,after,direction,below_precision,displayed,rounding_note", [
+    (25.001, 25.004, "rose", True, (25, 25, 0), False),
+    (25.004, 25.001, "fell", True, (25, 25, 0), False),
+    (25.001, 25.001, "was unchanged", False, (25, 25, 0), False),
+    (25, 26, "rose", False, (25, 26, -1), False),
+    (26, 25, "fell", False, (26, 25, 1), False),
+    (25.004, 24.996, "fell", False, (25, 25, 0.01), True),
+    (24.996, 25.004, "rose", False, (25, 25, -0.01), True),
+    (25.006, 25.004, "fell", True, (25.01, 25, 0), True),
+    (25.014, 24.996, "fell", False, (25.01, 25, 0.02), True),
+    (25.28, 25.29, "rose", False, (25.28, 25.29, -0.01), False),
 ])
-def test_margin_direction_uses_unrounded_sql(before, after, direction, below_precision, monkeypatch, policy_rows):
+def test_margin_direction_uses_unrounded_sql(before, after, direction, below_precision, displayed,
+                                              rounding_note, monkeypatch, policy_rows):
     # Execute the production aggregation over controlled rows without changing Oracle data.
     with sqlite3.connect(":memory:") as con:
         con.row_factory = sqlite3.Row
@@ -1410,6 +1537,7 @@ def test_margin_direction_uses_unrounded_sql(before, after, direction, below_pre
         tools.validate_select(sql)
         rows = [dict(row) for row in con.execute(sql, {"cutoff": "2025-07"})]
 
+    assert tuple(rows[0][key] for key in ("before_margin_pct", "after_margin_pct", "margin_drop_pts")) == displayed
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
         "sql": sql, "params": params or {}, "rows": rows})
     result = answer_question("West since July 2025")
@@ -1418,6 +1546,7 @@ def test_margin_direction_uses_unrounded_sql(before, after, direction, below_pre
                        for p in finding["parts"])
     assert rendered.startswith(f"West gross margin {direction} from ")
     assert ("below display precision" in rendered) == below_precision
+    assert ("The displayed margins and change are independently rounded from unrounded aggregates." in rendered) == rounding_note
     reason = next(c for c in result["claims"] if c["kind"] == "reason")
     explanation = "".join(p["text"] for p in reason["parts"])
     if direction == "fell":
@@ -1470,6 +1599,7 @@ def test_comparison_keeps_available_margin_when_other_period_is_empty(available_
     assert parts[0]["column"] == f"{available_period}_margin_pct"
     assert parts[0]["evidence"] == "E2"
     assert result["evidence"]["E2"]["rows"][parts[0]["row"]]["region_name"] == "East"
+    assert result["evidence"]["E2"]["rows"][parts[0]["row"]]["margin_direction"] is None
     assert supported(parts[0], result["evidence"])
     assert result["dropped_count"] == 0
 
@@ -1539,6 +1669,8 @@ def test_zero_revenue_preserves_available_metrics(zero_period, monkeypatch):
         assert response.status_code == 200
 
         rows = {row["region_name"]: row for row in result["evidence"]["E2"]["rows"]}
+        assert rows["West"]["margin_direction"] is None
+        assert rows["East"]["margin_direction"] is None
         findings = [claim for claim in result["claims"] if claim["kind"] == "finding"]
         render = lambda claim: "".join(p.get("text", str(p.get("value", "")) + p.get("suffix", ""))
                                        for p in claim["parts"]).lower()
@@ -2121,6 +2253,212 @@ def test_flask_live_brief_and_evidence():
     assert b"evidence-dialog" in response.data
 
 
+def test_download_brief_contains_cited_evidence_and_verification(monkeypatch):
+    question = "Why did West margin fall since July 2025?"
+    result = {
+        "region": "West", "cutoff": "2025-07", "dropped_count": 2,
+        "claims": [
+            {"kind": "scope", "parts": [{"text": "West: compare "},
+                {"value": "2025-06", "suffix": "", "evidence": "E2", "row": 0,
+                 "column": "first_month"}, {"text": " with July."}]},
+            {"kind": "finding", "parts": [
+                {"text": "Margin fell to "},
+                {"value": 25.6, "suffix": "%", "evidence": "E2", "row": 0,
+                 "column": "margin_pct"}, {"text": "."}]},
+            {"kind": "reason", "parts": [{"text": "A volume push affected pricing."}],
+             "policy_ids": ["P1"]},
+            {"kind": "action", "parts": [{"text": "Review discounts."}]},
+        ],
+        "evidence": {
+            "E2": {"kind": "sql", "sql": "SELECT margin_pct, units FROM sales WHERE month >= :cutoff",
+                   "params": {"cutoff": "2025-07"},
+                   "rows": [{"margin_pct": 25.6, "first_month": "2025-06",
+                             "units": 9007199254740993}]},
+            "P1": {"kind": "policy", "sql": "SELECT chunk FROM policy_chunks WHERE id = :policy_id",
+                   "params": {"policy_id": 1}, "rows": [{"id": 1, "doc": "volume_push.md",
+                                                           "chunk": "Discounts increased in West."}]},
+            "E9": {"kind": "sql", "sql": "SELECT uncited FROM sales", "params": {}, "rows": []},
+        },
+    }
+    monkeypatch.setattr("app.answer_question", lambda _: result)
+    client = app.test_client()
+    assert b'id="download-brief"' not in client.get("/").data
+    response = client.post("/", data={"question": question})
+    html = response.get_data(as_text=True)
+    assert response.status_code == 200
+    assert 'id="download-brief"' in html and "Download brief" in html
+
+    class BriefParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.claims, self.notices = [], []
+            self.current = self.button = None
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if "data-claim" in attrs or "data-notice" in attrs:
+                self.current = {"childNodes": [], "textContent": "", "dataset": {
+                    "claimKind": attrs.get("data-claim-kind", "")}}
+                (self.claims if "data-claim" in attrs else self.notices).append(self.current)
+            elif self.current is not None and tag == "button":
+                self.button = {"nodeType": 1, "textContent": "", "dataset": {
+                    key[5:]: value for key, value in attrs.items() if key.startswith("data-")}}
+                self.current["childNodes"].append(self.button)
+
+        def handle_data(self, data):
+            if self.current is not None:
+                self.current["textContent"] += data
+                if self.button is not None:
+                    self.button["textContent"] += data
+                else:
+                    self.current["childNodes"].append({"nodeType": 3, "textContent": data})
+
+        def handle_endtag(self, tag):
+            if tag == "button":
+                self.button = None
+            elif tag == "p":
+                self.current = None
+
+    page = BriefParser()
+    page.feed(html)
+    assert len(page.claims) == len(result["claims"])
+    script = html.split("<script>", 1)[1].split("</script>", 1)[0]
+    dom = json.dumps({"claims": page.claims, "notices": page.notices})
+    check = subprocess.run(["node", "-e", """
+        const assert = require('node:assert/strict');
+        const page = """ + dom + """;
+        const handlers = {};
+        let blob, clicked = false;
+        const anchor = {click() { clicked = true; }, remove() {}};
+        const element = {addEventListener() {}};
+        const button = {addEventListener(event, handler) { handlers[event] = handler; }};
+        global.Node = {TEXT_NODE: 3, ELEMENT_NODE: 1};
+        global.document = {
+            getElementById: id => id === 'download-brief' ? button :
+                id === 'question' ? {value: 'Edited after the analysis'} : element,
+            querySelectorAll: selector => selector === '[data-claim]' ? page.claims :
+                selector === '[data-notice]' ? page.notices : [],
+            createElement: tag => { assert.equal(tag, 'a'); return anchor; },
+            body: {appendChild() {}, append() {}},
+        };
+        URL.createObjectURL = value => { blob = value; return 'blob:brief'; };
+        URL.revokeObjectURL = () => {};
+    """ + script + """
+        assert.equal(typeof handlers.click, 'function');
+        handlers.click();
+        assert.ok(clicked && blob);
+        assert.match(anchor.download, /\\.md$/);
+        assert.match(blob.type, /^text\\/(markdown|plain)/);
+        blob.text().then(text => process.stdout.write(text));
+    """], capture_output=True, text=True, encoding="utf-8")
+    assert check.returncode == 0, check.stderr
+    markdown = check.stdout
+    assert question in markdown and "Edited after the analysis" not in markdown
+    scope = next(line for line in markdown.splitlines() if "West: compare" in line)
+    assert "2025-06" in scope and "E2" in scope and "row 1" in scope
+    assert "first_month" in scope.replace("\\_", "_")
+    finding = next(line for line in markdown.splitlines() if "Margin fell to" in line)
+    assert "25.6%" in finding and "E2" in finding and "row 1" in finding
+    assert "margin_pct" in finding.replace("\\_", "_")
+    reason = next(line for line in markdown.splitlines() if "A volume push affected pricing." in line)
+    assert "P1" in reason
+    assert "Review discounts." in markdown
+    assert "2 claims were omitted because they failed verification." in markdown
+    assert "Numbers in retained claims verified against cited SQL cells." in markdown
+    assert "Policy-backed recommendations are unavailable for this brief." in markdown
+    assert "SELECT margin_pct, units FROM sales WHERE month >= :cutoff" in markdown
+    assert '"cutoff": "2025-07"' in markdown and '"margin_pct": 25.6' in markdown
+    assert "9007199254740993" in markdown
+    assert "SELECT chunk FROM policy_chunks WHERE id = :policy_id" in markdown
+    assert '"policy_id": 1' in markdown
+    assert "volume_push.md" in markdown.replace("\\_", "_") and "Discounts increased in West." in markdown
+    assert "SELECT uncited FROM sales" not in markdown
+@pytest.mark.parametrize("region", ["West", "East"])
+def test_monthly_trend_links_selected_region_to_original_evidence_rows(monkeypatch, region):
+    rows = [
+        {"region_name": "East", "sale_month": "2025-06", "margin_pct": 45,
+         "discount_pct": 2.5, "freight_per_unit": 4.25},
+        {"region_name": "West", "sale_month": "2025-06", "margin_pct": 38.9,
+         "discount_pct": 0, "freight_per_unit": 5.5},
+        {"region_name": "East", "sale_month": "2025-07", "margin_pct": 47,
+         "discount_pct": None, "freight_per_unit": 4.75},
+        {"region_name": "West", "sale_month": "2025-07", "margin_pct": 25.6,
+         "discount_pct": 18, "freight_per_unit": None},
+    ]
+    monkeypatch.setattr("app.answer_question", lambda _: {
+        "region": region, "claims": [],
+        "evidence": {"E1": {"kind": "sql", "sql": "SELECT ...", "params": {}, "rows": rows}},
+    })
+
+    class TrendParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.in_table = self.in_body = self.in_caption = False
+            self.caption = ""
+            self.rows = []
+            self.cell = None
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == "table" and attrs.get("id") == "monthly-trend":
+                self.in_table = True
+            elif self.in_table and tag == "caption":
+                self.in_caption = True
+            elif self.in_table and tag == "tbody":
+                self.in_body = True
+            elif self.in_body and tag == "tr":
+                self.rows.append([])
+            elif self.in_body and tag in ("td", "th"):
+                self.cell = {"text": "", "button": None}
+                self.rows[-1].append(self.cell)
+            elif self.cell is not None and tag == "button":
+                self.cell["button"] = attrs
+
+        def handle_data(self, data):
+            if self.in_caption:
+                self.caption += data
+            if self.cell is not None:
+                self.cell["text"] += data
+
+        def handle_endtag(self, tag):
+            if tag == "caption":
+                self.in_caption = False
+            elif self.in_body and tag in ("td", "th"):
+                self.cell = None
+            elif tag == "tbody":
+                self.in_body = False
+            elif tag == "table":
+                self.in_table = False
+
+    response = app.test_client().post("/", data={"question": region})
+    assert response.status_code == 200
+    parser = TrendParser()
+    parser.feed(response.get_data(as_text=True))
+    assert region in parser.caption
+    selected = [(index, row) for index, row in enumerate(rows) if row["region_name"] == region]
+    assert len(parser.rows) == len(selected)
+    columns = ("sale_month", "margin_pct", "discount_pct", "freight_per_unit")
+    for cells, (index, row) in zip(parser.rows, selected):
+        assert len(cells) == len(columns)
+        for cell, column in zip(cells, columns):
+            value = row[column]
+            if value is None:
+                assert cell["text"].strip().lower() == "unavailable"
+                assert cell["button"] is None
+            else:
+                expected = str(value)
+                if column in ("margin_pct", "discount_pct"):
+                    expected += "%"
+                elif column == "freight_per_unit":
+                    expected = "$" + expected
+                assert cell["text"].strip() == expected
+                button = cell["button"]
+                assert button["data-evidence"] == "E1"
+                assert button["data-row"] == str(index)
+                assert button["data-column"] == column
+                assert region in button["aria-label"] and row["sale_month"] in button["aria-label"]
+
+
 @pytest.mark.parametrize("missing_reason,missing_actions", [
     (False, False), (True, False), (False, True), (True, True),
 ])
@@ -2138,6 +2476,8 @@ def test_ui_discloses_missing_explanation_and_actions(policy_rows, missing_reaso
     assert (b"No verified actions are available for this brief." in response.data) == missing_actions
     assert (b"The policy documents identify a regional volume discount push" in response.data) == (not missing_reason)
     assert (b"Review discount approvals with Sales and Finance" in response.data) == (not missing_actions)
+
+
 def test_brief_shows_selected_region_monthly_trend_with_cell_citations(monkeypatch):
     rows = [
         {"region_name": "East", "sale_month": "2025-06", "margin_pct": 70,
@@ -2205,7 +2545,7 @@ def test_brief_shows_selected_region_monthly_trend_with_cell_citations(monkeypat
             value = rows[evidence_index][column]
             displayed = cell["text"].strip()
             if value is None:
-                assert displayed in ("N/A", "—", "-")
+                assert displayed == "Unavailable"
                 assert not cell["buttons"]
                 continue
             assert len(cell["buttons"]) == 1
@@ -2663,6 +3003,7 @@ def test_evidence_dialog_focuses_cited_cell(monkeypatch):
         };
         const elements = {
             'evidence-dialog': modalStub, 'close-dialog': close,
+            'download-brief': {addEventListener() {}},
             'evidence-description': {}, 'evidence-title': {},
             'evidence-sql': {}, 'evidence-params': {},
             'evidence-rows': {replaceChildren() {}},
