@@ -59,4 +59,3 @@ while not os.path.exists(STOP):
                     "--workers", str(workers()), "--max-fixes", "80", "--start", str(start)], cwd=HERE)
     with open(os.path.join(HERE, "hammer.log"), "a", encoding="utf-8") as f:
         f.write(f"{time.strftime('%H:%M:%S')} round from branch #{start} done in {time.time() - t0:.0f}s\n")
-

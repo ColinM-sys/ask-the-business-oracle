@@ -16,7 +16,7 @@
     label { width: 100%; font-weight: 650; }
     input { flex: 1; min-width: 230px; padding: 16px; border: 1px solid #52736c; border-radius: 10px; font: inherit; background: white; }
     button { font: inherit; cursor: pointer; }
-    .submit { border: 0; border-radius: 10px; background: #1d5c4f; color: white; padding: 16px 24px; font-weight: 650; }
+    .submit, .download { border: 0; border-radius: 10px; background: #1d5c4f; color: white; padding: 16px 24px; font-weight: 650; }
     .card { background: white; border: 1px solid #dbe3d8; border-radius: 16px; padding: 26px; margin: 22px 0; }
     h2 { margin-top: 0; font-size: 1.35rem; }
     p { line-height: 1.7; }
@@ -36,6 +36,8 @@
     table { border-collapse: collapse; font-size: .8rem; width: 100%; }
     td, th { text-align: left; border-bottom: 1px solid #dbe3d8; padding: 10px; min-width: 90px; }
     th { position: sticky; top: 0; background: #e9f4eb; }
+    tbody th { position: static; background: transparent; }
+    caption { text-align: left; font-weight: 700; padding: 10px 0; }
     td { white-space: pre-wrap; max-width: 650px; }
     .selected { background: #fff1c7; }
     details { margin-top: 18px; }
@@ -59,6 +61,7 @@
   <article class="card" aria-live="polite">
     <div class="eyebrow">Business brief · {{ result.region }}</div>
     <h2>What changed, and what to do</h2>
+    <button type="button" class="download" id="download-brief">Download brief</button>
     {% set reasons = result.claims | selectattr('kind', 'equalto', 'reason') | list %}
     {% set actions = result.claims | selectattr('kind', 'equalto', 'action') | list %}
     {% set policy_reasons = reasons | selectattr('policy_ids') | list %}
@@ -72,10 +75,10 @@
       'margin_drop_pts': 'signed gross margin drop', 'freight_increase_pct': 'freight change'
     } %}
     {% if result.dropped_count %}
-    <p class="error" role="alert">{{ result.dropped_count }} claim{{ 's' if result.dropped_count != 1 else '' }} {{ 'were' if result.dropped_count != 1 else 'was' }} omitted because they failed verification.</p>
+    <p class="error" role="alert" data-notice>{{ result.dropped_count }} claim{{ 's' if result.dropped_count != 1 else '' }} {{ 'were' if result.dropped_count != 1 else 'was' }} omitted because they failed verification.</p>
     {% endif %}
     {% for claim in result.claims %}
-      <p class="{{ claim.kind }}">
+      <p class="{{ claim.kind }}" data-claim data-claim-kind="{{ claim.kind }}">
       {%- for part in claim.parts -%}
         {%- if 'text' in part -%}{{ part.text }}
         {%- else -%}
@@ -89,30 +92,31 @@
       {% for id in claim.policy_ids %}<button type="button" class="citation" data-evidence="{{ id }}" aria-label="{{ id }}: {{ result.evidence[id].rows[0].doc }}">{{ id }}</button>{% endfor %}
       </p>
     {% else %}
-    <p>No verified claims are available for this brief.</p>
+    <p data-notice>No verified claims are available for this brief.</p>
     {% endfor %}
     {% if not policy_reasons %}
-    <p class="hint">{% if not reasons %}Explanation unavailable: No verified explanation is available for this brief. {% endif %}Policy-backed explanation is unavailable for this brief.</p>
+    <p class="hint" data-notice>{% if not reasons %}Explanation unavailable: No verified explanation is available for this brief. {% endif %}Policy-backed explanation is unavailable for this brief.</p>
     {% endif %}
     {% if not policy_actions %}
-    <p class="hint">{% if not actions %}Recommendations unavailable: No verified actions are available for this brief. {% endif %}Policy-backed recommendations are unavailable for this brief.</p>
+    <p class="hint" data-notice>{% if not actions %}Recommendations unavailable: No verified actions are available for this brief. {% endif %}Policy-backed recommendations are unavailable for this brief.</p>
     {% endif %}
     {% if result.claims %}
-    <p class="hint">Numbers in retained claims verified against cited SQL cells.{% if policy_reasons %} Policy citations support the qualitative explanation.{% endif %}</p>
+    <p class="hint" data-notice>Numbers in retained claims verified against cited SQL cells.{% if policy_reasons %} Policy citations support the qualitative explanation.{% endif %}</p>
     {% endif %}
     {% set monthly_rows = result.evidence.get('E1', {}).get('rows', []) %}
     {% if monthly_rows | selectattr('region_name', 'defined') | selectattr('region_name', 'equalto', result.region) | list %}
-    <h3>Monthly trend · {{ result.region }}</h3>
     <div class="table-wrap">
-      <table>
+      <table id="monthly-trend">
+        <caption>{{ result.region }} monthly trend</caption>
         <thead><tr><th scope="col">Month</th><th scope="col">Gross margin (%)</th><th scope="col">Discount (%)</th><th scope="col">Freight per unit ($)</th></tr></thead>
         <tbody>
         {% for row in monthly_rows %}
           {% if row.get('region_name') == result.region %}
           {% set row_index = loop.index0 %}
           <tr>
-            {% for column, label, prefix, suffix in [('sale_month', 'Month', '', ''), ('margin_pct', 'Gross margin', '', '%'), ('discount_pct', 'Discount', '', '%'), ('freight_per_unit', 'Freight per unit', '$', '')] %}
-            <td>{% if row.get(column) is not none %}<button type="button" class="number" data-evidence="E1" data-row="{{ row_index }}" data-column="{{ column }}" aria-label="{{ label }}: {{ prefix }}{{ row[column] }}{{ suffix }}">{{ prefix }}{{ row[column] }}{{ suffix }}</button>{% else %}N/A{% endif %}</td>
+            <th scope="row">{% if row.get('sale_month') is not none %}<button type="button" class="number" data-evidence="E1" data-row="{{ row_index }}" data-column="sale_month" aria-label="Evidence for {{ result.region }} {{ row.sale_month }}">{{ row.sale_month }}</button>{% else %}Unavailable{% endif %}</th>
+            {% for column, label, prefix, suffix in [('margin_pct', 'gross margin', '', '%'), ('discount_pct', 'discount', '', '%'), ('freight_per_unit', 'freight per unit', '$', '')] %}
+            <td>{% if row.get(column) is not none %}<button type="button" class="number" data-evidence="E1" data-row="{{ row_index }}" data-column="{{ column }}" aria-label="Evidence for {{ result.region }} {{ row.sale_month }} {{ label }}: {{ prefix }}{{ row[column] }}{{ suffix }}">{{ prefix }}{{ row[column] }}{{ suffix }}</button>{% else %}Unavailable{% endif %}</td>
             {% endfor %}
           </tr>
           {% endif %}
@@ -168,6 +172,53 @@
       selected?.focus({preventScroll: true});
     }));
     document.getElementById('close-dialog').addEventListener('click', () => dialog.close());
+    document.getElementById('download-brief').addEventListener('click', () => {
+      const cited = new Set();
+      const escapeText = value => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/([\\`*_[\]#!|])/g, '\\$1');
+      const block = (value, language = '') => {
+        const text = String(value);
+        const fence = '`'.repeat(Math.max(3, ...Array.from(text.matchAll(/`+/g), match => match[0].length + 1)));
+        return `${fence}${language}\n${text}\n${fence}`;
+      };
+      const claimText = claim => Array.from(claim.childNodes, part => {
+        if (part.nodeType === 3) return escapeText(part.textContent);
+        const id = part.dataset.evidence;
+        cited.add(id);
+        const link = `#${id.toLowerCase()}`;
+        return part.dataset.row === undefined
+          ? ` [${id}](${link})`
+          : `${escapeText(part.textContent)} [${id}, row ${Number(part.dataset.row) + 1}, column ${escapeText(part.dataset.column)}](${link})`;
+      }).join('').replace(/\s+/g, ' ').trim();
+      const claims = Array.from(document.querySelectorAll('[data-claim]'));
+      const scope = claims.filter(claim => claim.dataset.claimKind === 'scope').map(claimText);
+      const findings = claims.filter(claim => claim.dataset.claimKind !== 'scope').map(claimText);
+      const notices = Array.from(document.querySelectorAll('[data-notice]'), notice => escapeText(notice.textContent.trim()));
+      const markdown = [
+        '# Business brief', '## Question', escapeText({{ question | tojson }}),
+        '## Scope', `Region: ${escapeText({{ result.region | tojson }})}`, ...scope,
+        '## Retained claims', ...findings.map(claim => `- ${claim}`),
+        '## Verification notices', ...notices.map(notice => `- ${notice}`),
+        '## Cited evidence',
+      ];
+      cited.forEach(id => {
+        const item = evidence[id];
+        markdown.push(`### ${id}`, '**SQL**', block(item.sql, 'sql'),
+          '**Bound parameters**', block(JSON.stringify(item.params, null, 2), 'json'),
+          '**Returned rows**', block(JSON.stringify(item.rows, null, 2), 'json'));
+        if (item.kind === 'policy') item.rows.forEach(row => {
+          markdown.push(`**Policy document:** ${escapeText(row.doc)}`, '**Source text**', block(row.chunk));
+        });
+      });
+      const url = URL.createObjectURL(new Blob([markdown.join('\n\n') + '\n'], {type: 'text/markdown;charset=utf-8'}));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'business-brief.md';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+    });
   </script>
   {% endif %}
 </main>
