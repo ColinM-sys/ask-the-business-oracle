@@ -2,3 +2,7 @@
 __pycache__/
 wallet/
 .pytest_cache/
+hs_err_pid*.log
+results/
+claims1*.txt
+claims2*.txt

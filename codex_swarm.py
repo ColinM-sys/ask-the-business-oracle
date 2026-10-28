@@ -16,12 +16,15 @@ CODEX = [shutil.which("node"), os.path.join(os.environ["APPDATA"], "npm", "node_
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results", "swarm_live")
 
 
+EXTRA = []
+
+
 def run(i, claim):
     path = os.path.join(OUT, f"agent{i}.jsonl")
     t0 = time.time()
     with open(path, "w", encoding="utf-8") as f:
         subprocess.run(CODEX + ["exec", "--skip-git-repo-check", "-s", "read-only", "-c", "tools.web_search=true",
-                        "--json", PROMPT.format(claim=claim)], stdin=subprocess.DEVNULL, stdout=f,
+                        *EXTRA, "--json", PROMPT.format(claim=claim)], stdin=subprocess.DEVNULL, stdout=f,
                        stderr=subprocess.STDOUT, timeout=900)
     usage, text, searches = {}, "", 0
     for line in open(path, encoding="utf-8", errors="ignore"):
@@ -46,8 +49,11 @@ if __name__ == "__main__":
     ap.add_argument("--claims", default="claims.txt")
     ap.add_argument("--parallel", type=int, default=6)
     ap.add_argument("--out", default="swarm_live")
+    ap.add_argument("--effort", help="model_reasoning_effort: minimal/low/medium/high")
     a = ap.parse_args()
     OUT = os.path.join(os.path.dirname(OUT), a.out)
+    if a.effort:
+        EXTRA += ["-c", f"model_reasoning_effort={a.effort}"]
     os.makedirs(OUT, exist_ok=True)
     claims = [c.strip() for c in open(a.claims, encoding="utf-8") if c.strip() and not c.startswith("#")]
     t0 = time.time()
