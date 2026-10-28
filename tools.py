@@ -13,6 +13,10 @@ TABLES = {"SALES", "COSTS", "CUSTOMERS", "DISCOUNTS", "PRODUCTS", "REGIONS"}
 FUNCTIONS = {"SUM", "MIN", "MAX", "AVG", "COUNT", "ROUND", "NULLIF", "COALESCE", "ABS", "AND", "OR"}
 
 
+class EvidenceLimitError(ValueError):
+    """A query produced more rows than can be retained as evidence."""
+
+
 def _number_to_decimal(cursor, metadata):
     if metadata.type_code is oracledb.DB_TYPE_NUMBER:
         return cursor.var(Decimal, arraysize=cursor.arraysize)
@@ -63,7 +67,7 @@ def run_sql(select, params=None):
                 raise ValueError("SQL result has duplicate column names; use unique aliases")
             rows = cur.fetchmany(1001)
             if len(rows) > 1000:
-                raise ValueError("Evidence exceeds the row limit; aggregate the query")
+                raise EvidenceLimitError("Evidence exceeds the row limit; aggregate the query")
             return {"sql": select, "params": params or {},
                     "rows": [dict(zip(columns, row)) for row in rows]}
 
