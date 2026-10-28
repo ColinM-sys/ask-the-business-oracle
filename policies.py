@@ -1,15 +1,36 @@
 """Idempotent policy ingestion; local hashing fallback needs no API key."""
 from array import array
+from contextlib import contextmanager
 import hashlib
 import math
 from pathlib import Path
 import re
 import threading
 
+from oracledb import DatabaseError
+
 from db import connect
 
 DOCS = Path(__file__).parent / "docs"
 _lock = threading.Lock()
+
+
+@contextmanager
+def _database_lock():
+    # Use a separate session: CREATE TABLE implicitly commits in the refresh
+    # session and must not release the lock protecting initialization.
+    with connect() as con:
+        cur = con.cursor()
+        if not cur.execute("SELECT table_name FROM user_tables WHERE table_name='POLICY_REFRESH_LOCK'").fetchone():
+            try:
+                cur.execute("CREATE TABLE policy_refresh_lock (id NUMBER)")
+            except DatabaseError as exc:
+                # Another worker may have created the lock table while we waited.
+                if exc.args[0].code != 955:
+                    raise
+        cur.execute("LOCK TABLE policy_refresh_lock IN EXCLUSIVE MODE")
+        yield
+        # Closing the dedicated connection releases the lock, including on error.
 
 
 def hash_embedding(text, dimensions=512):
@@ -38,7 +59,7 @@ def ensure_policies():
     if not sources:
         raise RuntimeError("No policy documents found")
     fingerprint = hashlib.sha256(repr(sources).encode()).hexdigest()
-    with _lock, connect() as con:
+    with _lock, _database_lock(), connect() as con:
         cur = con.cursor()
         if not cur.execute("SELECT table_name FROM user_tables WHERE table_name='POLICY_CHUNKS'").fetchone():
             cur.execute("""CREATE TABLE policy_chunks (

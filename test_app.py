@@ -1,9 +1,13 @@
 """Unit checks and live integration against the existing local Oracle tables."""
 import copy
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
+import hashlib
 import json
 import runpy
 from pathlib import Path
 from unittest.mock import MagicMock
+import threading
 
 import pytest
 
@@ -104,6 +108,113 @@ def test_hashing_is_stable_and_normalized():
     first = hash_embedding("West freight contract")
     assert first == hash_embedding("West freight contract")
     assert abs(sum(v*v for v in first) - 1) < 0.000001
+
+
+@pytest.mark.parametrize("table_exists", [False, True])
+def test_policy_refresh_serializes_independent_workers(table_exists, tmp_path, monkeypatch):
+    import policies
+
+    content = "West freight policy"
+    (tmp_path / "policy.md").write_text(content, encoding="utf-8")
+    fingerprint = hashlib.sha256(repr([("policy.md", content)]).encode()).hexdigest()
+    database_lock = threading.Lock()
+    first_refresh = threading.Event()
+    second_waiting = threading.Event()
+    finish_refresh = threading.Event()
+    state = {"table": table_exists, "rows": [], "creates": 0, "replacements": 0}
+
+    def connection():
+        con = MagicMock()
+        con.__enter__.return_value = con
+        locked = False
+        pending = []
+
+        def execute(sql, **params):
+            nonlocal locked
+            result = MagicMock()
+            if "POLICY_REFRESH_LOCK" in sql:
+                result.fetchone.return_value = ("POLICY_REFRESH_LOCK",)
+            elif sql.startswith("LOCK TABLE policy_refresh_lock"):
+                if database_lock.locked():
+                    second_waiting.set()
+                assert database_lock.acquire(timeout=5)
+                locked = True
+            else:
+                assert database_lock.locked(), "Policy state must be checked under the database lock"
+                if "user_tables" in sql:
+                    result.fetchone.return_value = ("POLICY_CHUNKS",) if state["table"] else None
+                elif sql.startswith("CREATE TABLE policy_chunks"):
+                    assert not state["table"]
+                    state["table"] = True
+                    state["creates"] += 1
+                elif "user_mining_models" in sql:
+                    result.fetchall.return_value = []
+                elif "SELECT DISTINCT" in sql:
+                    result.fetchall.return_value = state["rows"][:]
+                elif sql.startswith("DELETE"):
+                    state["replacements"] += 1
+                elif sql.lstrip().startswith("INSERT"):
+                    pending.append((params["backend"], params["fingerprint"]))
+            return result
+
+        def close(*args):
+            if locked:
+                database_lock.release()
+
+        con.cursor.return_value.execute.side_effect = execute
+        con.commit.side_effect = lambda: state.update(rows=pending[:])
+        con.__exit__.side_effect = close
+        return con
+
+    def embed(*args):
+        first_refresh.set()
+        assert finish_refresh.wait(5)
+        return hash_embedding(content)
+
+    monkeypatch.setattr(policies, "DOCS", tmp_path)
+    monkeypatch.setattr(policies, "connect", connection)
+    # Independent processes do not share the Python lock.
+    monkeypatch.setattr(policies, "_lock", nullcontext())
+    monkeypatch.setattr(policies, "embed", embed)
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        first = workers.submit(ensure_policies)
+        try:
+            assert first_refresh.wait(5)
+            second = workers.submit(ensure_policies)
+            assert second_waiting.wait(5)
+            assert not second.done()
+        finally:
+            finish_refresh.set()
+        assert first.result() == second.result() == "hash-v1-512"
+    assert state == {"table": True, "rows": [("hash-v1-512", fingerprint)],
+                     "creates": int(not table_exists), "replacements": 1}
+
+
+@pytest.mark.parametrize("code", [955, 1031])
+def test_policy_lock_table_creation_race(code, monkeypatch):
+    import policies
+    from types import SimpleNamespace
+
+    con = MagicMock()
+    con.__enter__.return_value = con
+    cur = con.cursor.return_value
+    cur.execute.return_value.fetchone.return_value = None
+
+    def execute(sql):
+        if sql.startswith("CREATE TABLE"):
+            raise policies.DatabaseError(SimpleNamespace(code=code))
+        return cur.execute.return_value
+
+    cur.execute.side_effect = execute
+    monkeypatch.setattr(policies, "connect", lambda: con)
+    if code == 955:
+        with policies._database_lock():
+            cur.execute.assert_called_with("LOCK TABLE policy_refresh_lock IN EXCLUSIVE MODE")
+    else:
+        with pytest.raises(policies.DatabaseError):
+            with policies._database_lock():
+                pytest.fail("Unexpected database errors must propagate")
+    con.__exit__.assert_called_once()
 
 
 @pytest.mark.parametrize("character", ["界", "😀"])
