@@ -2327,6 +2327,79 @@ def test_evidence_dialog_identifies_cited_cell(monkeypatch):
     assert html.index("description.textContent = `Cited cell:") < html.index("dialog.showModal()")
 
 
+def test_numeric_buttons_describe_cited_metric_period_and_units(monkeypatch):
+    rows = [
+        {"region_name": "East", "first_month": "2025-02", "before_last_month": "2025-05",
+         "after_first_month": "2025-08", "last_month": "2025-10", "before_margin_pct": 5},
+        {"region_name": 'West & "Co"', "first_month": "2025-01",
+         "before_last_month": "2025-06", "after_first_month": "2025-07",
+         "last_month": "2025-09", "before_margin_pct": 5,
+         "after_margin_pct": 5, "before_discount_pct": 5,
+         "after_discount_pct": 5, "before_freight_per_unit": 5,
+         "after_freight_per_unit": 5, "margin_drop_pts": 0,
+         "freight_increase_pct": 0},
+    ]
+    citations = [
+        (0, "before_margin_pct", "%", ("before", "margin", "%")),
+        (1, "before_margin_pct", "%", ("before", "margin", "%")),
+        (1, "after_margin_pct", "%", ("after", "margin", "%")),
+        (1, "before_discount_pct", "%", ("before", "discount", "%")),
+        (1, "after_discount_pct", "%", ("after", "discount", "%")),
+        (1, "before_freight_per_unit", "", ("before", "freight", "per unit")),
+        (1, "after_freight_per_unit", "", ("after", "freight", "per unit")),
+        (1, "margin_drop_pts", " percentage points", ("margin", "drop", "percentage points")),
+        (1, "freight_increase_pct", "%", ("freight", "%")),
+        (1, "first_month", "", ("before", "month")),
+        (1, "before_last_month", "", ("before", "month")),
+        (1, "after_first_month", "", ("after", "month")),
+        (1, "last_month", "", ("after", "month")),
+    ]
+    result = {
+        "region": rows[1]["region_name"],
+        "claims": [{"kind": "finding", "parts": [
+            {"value": rows[row][column], "suffix": suffix,
+             "evidence": "E2", "row": row, "column": column}
+            for row, column, suffix, _ in citations]}],
+        "evidence": {"E2": {"kind": "sql", "sql": "SELECT ...", "params": {}, "rows": rows}},
+    }
+    monkeypatch.setattr("app.answer_question", lambda _: result)
+
+    class ButtonParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.buttons = []
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == "button" and attrs.get("class") == "number":
+                self.buttons.append(attrs)
+
+    response = app.test_client().post("/", data={"question": "West"})
+    assert response.status_code == 200
+    parser = ButtonParser()
+    parser.feed(response.get_data(as_text=True))
+    assert len(parser.buttons) == len(citations)
+    for button, (row, column, suffix, descriptors) in zip(parser.buttons, citations):
+        label = button.get("aria-label", "").lower()
+        assert rows[row]["region_name"].lower() in label
+        assert str(rows[row][column]).lower() in label
+        for descriptor in descriptors:
+            assert descriptor in label
+        if "freight_per_unit" in column:
+            assert "$" in label or "dollar" in label
+        if column in ("before_margin_pct", "before_discount_pct", "before_freight_per_unit"):
+            assert rows[row]["first_month"] in label and rows[row]["before_last_month"] in label
+        elif column in ("after_margin_pct", "after_discount_pct", "after_freight_per_unit"):
+            assert rows[row]["after_first_month"] in label and rows[row]["last_month"] in label
+        elif column in ("margin_drop_pts", "freight_increase_pct"):
+            for endpoint in ("first_month", "before_last_month", "after_first_month", "last_month"):
+                assert rows[row][endpoint] in label
+        elif column in ("first_month", "after_first_month"):
+            assert "first" in label or "start" in label
+        else:
+            assert "last" in label or "end" in label
+    assert parser.buttons[1]["aria-label"] != parser.buttons[2]["aria-label"]
+    assert parser.buttons[5]["aria-label"] != parser.buttons[6]["aria-label"]
 def test_evidence_dialog_focuses_cited_cell(monkeypatch):
     result = {
         "region": "West", "claims": [],
