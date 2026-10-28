@@ -23,6 +23,12 @@ data. In a fresh Oracle schema without the six business tables (sales, costs,
 customers, discounts, products and regions), run `python load.py` only once to create
 and load them; skip it if the tables are already loaded.
 
+Remote Oracle connections must use TCPS, for example
+`tcps://dbhost:1522/service_name`, with a trusted server certificate matching
+the host or configured certificate DN. Wallet TNS aliases must also use TCPS
+with certificate name matching enabled. TCP is allowed for loopback hosts only;
+use a trusted local listener, since Oracle listeners can redirect connections.
+
 ```powershell
 python -m pip install -r requirements.txt
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }

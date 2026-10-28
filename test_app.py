@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import runpy
+import ssl
 import subprocess
 import sqlite3
 from contextlib import nullcontext
@@ -33,7 +34,7 @@ from policies import ensure_policies, hash_embedding
 def test_connect_reuses_pool_and_preserves_settings(monkeypatch, wallet):
     monkeypatch.setattr(db, "_pool", None, raising=False)
     monkeypatch.setattr(db, "_load_env", lambda: None)
-    settings = {"user": "test-user", "password": "test-password", "dsn": "test-dsn"}
+    settings = {"user": "test-user", "password": "test-password", "dsn": "localhost:1521/service"}
     for key, value in settings.items():
         monkeypatch.setenv("ORACLE_" + key.upper(), value)
     monkeypatch.delenv("ORACLE_WALLET_DIR", raising=False)
@@ -50,9 +51,122 @@ def test_connect_reuses_pool_and_preserves_settings(monkeypatch, wallet):
     for _ in range(4):
         assert connect() is create_pool.return_value.acquire.return_value
 
-    create_pool.assert_called_once_with(**settings)
+    create_pool.assert_called_once()
+    actual_settings = dict(create_pool.call_args.kwargs)
+    params = actual_settings.pop("params")
+    assert isinstance(params, oracledb.PoolParams)
+    assert params.host == "localhost"
+    assert params.protocol == "tcp"
+    assert params.service_name == "service"
+    del settings["dsn"]
+    assert actual_settings == settings
     assert create_pool.return_value.acquire.call_count == 4
     standalone_connect.assert_not_called()
+
+
+def _mock_oracle_pool(monkeypatch, dsn, wallet=None):
+    monkeypatch.setattr(db, "_pool", None)
+    monkeypatch.setattr(db, "_load_env", lambda: None)
+    monkeypatch.setenv("ORACLE_USER", "test-user")
+    monkeypatch.setenv("ORACLE_PASSWORD", "test-password")
+    monkeypatch.setenv("ORACLE_DSN", dsn)
+    monkeypatch.delenv("ORACLE_WALLET_DIR", raising=False)
+    monkeypatch.delenv("ORACLE_WALLET_PASSWORD", raising=False)
+    if wallet is not None:
+        monkeypatch.setenv("ORACLE_WALLET_DIR", str(wallet))
+    create_pool = MagicMock()
+    monkeypatch.setattr(db.oracledb, "create_pool", create_pool)
+    return create_pool
+
+
+@pytest.mark.parametrize("dsn", [
+    "db.example.com:1521/service",
+    "tcp://db.example.com:1521/service",
+    "tcp://localhost.example.com:1521/service",
+    "tcps://db.example.com:1522/service?ssl_server_dn_match=false",
+    "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCPS)(HOST=db.example.com)(PORT=1522))"
+    "(CONNECT_DATA=(SERVICE_NAME=service))(SECURITY=(SSL_SERVER_DN_MATCH=OFF)))",
+    "tcp://localhost,db.example.com:1521/service",
+    "(DESCRIPTION=(ADDRESS_LIST=(ADDRESS=(PROTOCOL=TCP)(HOST=localhost)(PORT=1521))"
+    "(ADDRESS=(PROTOCOL=TCP)(HOST=db.example.com)(PORT=1521)))"
+    "(CONNECT_DATA=(SERVICE_NAME=service)))",
+    "(DESCRIPTION=(ADDRESS_LIST=(ADDRESS=(PROTOCOL=TCPS)(HOST=localhost)(PORT=1522))"
+    "(ADDRESS=(PROTOCOL=TCP)(HOST=db.example.com)(PORT=1521)))"
+    "(CONNECT_DATA=(SERVICE_NAME=service)))",
+    "(DESCRIPTION_LIST=(DESCRIPTION=(ADDRESS=(PROTOCOL=TCPS)(HOST=one.example.com)(PORT=1522))"
+    "(CONNECT_DATA=(SERVICE_NAME=service))(SECURITY=(SSL_SERVER_DN_MATCH=ON)))"
+    "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCPS)(HOST=two.example.com)(PORT=1522))"
+    "(CONNECT_DATA=(SERVICE_NAME=service))(SECURITY=(SSL_SERVER_DN_MATCH=OFF))))",
+])
+def test_connect_rejects_insecure_remote_dsn_before_creating_pool(monkeypatch, dsn):
+    create_pool = _mock_oracle_pool(monkeypatch, dsn)
+    with pytest.raises(ValueError):
+        connect()
+    create_pool.assert_not_called()
+
+
+@pytest.mark.parametrize("dsn, host, protocol", [
+    ("localhost:1521/service", "localhost", "tcp"),
+    ("127.0.0.1:1521/service", "127.0.0.1", "tcp"),
+    ("[::1]:1521/service", "::1", "tcp"),
+    ("tcps://db.example.com:1522/service", "db.example.com", "tcps"),
+])
+def test_connect_allows_local_tcp_and_verified_remote_tcps(monkeypatch, dsn, host, protocol):
+    create_pool = _mock_oracle_pool(monkeypatch, dsn)
+    assert connect() is create_pool.return_value.acquire.return_value
+    params = create_pool.call_args.kwargs["params"]
+    assert params.host == host
+    assert params.protocol == protocol
+    if protocol == "tcps":
+        assert params.ssl_server_dn_match is True
+    assert "dsn" not in create_pool.call_args.kwargs
+
+
+@pytest.mark.parametrize("protocol, match, accepted", [
+    ("TCP", "ON", False),
+    ("TCPS", "OFF", False),
+    ("TCPS", "ON", True),
+])
+def test_connect_checks_tns_alias_before_creating_pool(monkeypatch, tmp_path, protocol, match, accepted):
+    (tmp_path / "tnsnames.ora").write_text(
+        "REMOTE = (DESCRIPTION=(ADDRESS=(PROTOCOL=" + protocol + ")"
+        "(HOST=db.example.com)(PORT=1522))(CONNECT_DATA=(SERVICE_NAME=service))"
+        "(SECURITY=(SSL_SERVER_DN_MATCH=" + match + ")))\n", encoding="utf-8")
+    create_pool = _mock_oracle_pool(monkeypatch, "REMOTE", tmp_path)
+    if not accepted:
+        with pytest.raises(ValueError):
+            connect()
+        create_pool.assert_not_called()
+    else:
+        assert connect() is create_pool.return_value.acquire.return_value
+        params = create_pool.call_args.kwargs["params"]
+        assert params.host == "db.example.com"
+        assert params.protocol == "tcps"
+        assert params.ssl_server_dn_match is True
+        assert "dsn" not in create_pool.call_args.kwargs
+
+
+@pytest.mark.skipif(not hasattr(oracledb, "register_protocol"), reason="driver has no protocol hooks")
+@pytest.mark.parametrize("setting", ["use_eztls", "ssl_context"])
+def test_connect_rejects_protocol_hook_disabling_certificate_validation(monkeypatch, setting):
+    if setting == "use_eztls" and not hasattr(oracledb.PoolParams(), setting):
+        pytest.skip("driver has no ezTLS mode")
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+
+    def configure(protocol, arg, params):
+        params.parse_connect_string("tcps://db.example.com:1522/service")
+        params.set(**{setting: True if setting == "use_eztls" else context})
+
+    oracledb.register_protocol("atbtest", configure)
+    try:
+        create_pool = _mock_oracle_pool(monkeypatch, "atbtest://example")
+        with pytest.raises(ValueError):
+            connect()
+        create_pool.assert_not_called()
+    finally:
+        oracledb.register_protocol("atbtest", None)
 
 
 @pytest.mark.parametrize("fail", [False, True])
