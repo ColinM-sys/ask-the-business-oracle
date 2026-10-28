@@ -2240,11 +2240,11 @@ def test_download_brief_contains_cited_evidence_and_verification(monkeypatch):
         "region": "West", "cutoff": "2025-07", "dropped_count": 2,
         "claims": [
             {"kind": "scope", "parts": [{"text": "West: compare "},
-                {"value": "2025-06", "suffix": "", "evidence": "E2", "row": 0,
+                {"value": "2025-06", "suffix": "", "evidence": "E2", "row": 1,
                  "column": "first_month"}, {"text": " with July."}]},
             {"kind": "finding", "parts": [
                 {"text": "Margin fell to "},
-                {"value": 25.6, "suffix": "%", "evidence": "E2", "row": 0,
+                {"value": "25.60", "suffix": "%", "evidence": "E2", "row": 1,
                  "column": "margin_pct"}, {"text": "."}]},
             {"kind": "reason", "parts": [{"text": "A volume push affected pricing."}],
              "policy_ids": ["P1"]},
@@ -2253,8 +2253,11 @@ def test_download_brief_contains_cited_evidence_and_verification(monkeypatch):
         "evidence": {
             "E2": {"kind": "sql", "sql": "SELECT margin_pct, units FROM sales WHERE month >= :cutoff",
                    "params": {"cutoff": "2025-07"},
-                   "rows": [{"margin_pct": 25.6, "first_month": "2025-06",
-                             "units": 9007199254740993}]},
+                   "rows": [{"region_name": "East", "margin_pct": 49.2, "first_month": "2025-05",
+                             "revenue": 989898, "discount_pct": 18.8, "freight_per_unit": 17.77},
+                            {"region_name": "West", "margin_pct": 25.6, "first_month": "2025-06",
+                             "units": 9007199254740993, "revenue": 121212,
+                             "discount_pct": 8.8, "freight_per_unit": 7.77}]},
             "P1": {"kind": "policy", "sql": "SELECT chunk FROM policy_chunks WHERE id = :policy_id",
                    "params": {"policy_id": 1}, "rows": [{"id": 1, "doc": "volume_push.md",
                                                            "chunk": "Discounts increased in West."}]},
@@ -2274,9 +2277,12 @@ def test_download_brief_contains_cited_evidence_and_verification(monkeypatch):
             super().__init__()
             self.claims, self.notices = [], []
             self.current = self.button = None
+            self.full_option = None
 
         def handle_starttag(self, tag, attrs):
             attrs = dict(attrs)
+            if attrs.get("id") == "include-full-evidence":
+                self.full_option = attrs
             if "data-claim" in attrs or "data-notice" in attrs:
                 self.current = {"childNodes": [], "textContent": "", "dataset": {
                     "claimKind": attrs.get("data-claim-kind", "")}}
@@ -2303,57 +2309,80 @@ def test_download_brief_contains_cited_evidence_and_verification(monkeypatch):
     page = BriefParser()
     page.feed(html)
     assert len(page.claims) == len(result["claims"])
+    assert page.full_option is not None
+    assert page.full_option.get("type") == "checkbox"
+    assert "checked" not in page.full_option
+    assert "full evidence" in html.lower()
     script = html.split("<script>", 1)[1].split("</script>", 1)[0]
     dom = json.dumps({"claims": page.claims, "notices": page.notices})
     check = subprocess.run(["node", "-e", """
         const assert = require('node:assert/strict');
         const page = """ + dom + """;
         const handlers = {};
-        let blob, clicked = false;
-        const anchor = {click() { clicked = true; }, remove() {}};
+        const blobs = [];
+        let clicked = 0;
+        const anchor = {click() { clicked++; }, remove() {}};
         const element = {addEventListener() {}};
         const button = {addEventListener(event, handler) { handlers[event] = handler; }};
+        const fullOption = {checked: false};
         global.Node = {TEXT_NODE: 3, ELEMENT_NODE: 1};
         global.document = {
             getElementById: id => id === 'download-brief' ? button :
+                id === 'include-full-evidence' ? fullOption :
                 id === 'question' ? {value: 'Edited after the analysis'} : element,
             querySelectorAll: selector => selector === '[data-claim]' ? page.claims :
                 selector === '[data-notice]' ? page.notices : [],
             createElement: tag => { assert.equal(tag, 'a'); return anchor; },
             body: {appendChild() {}, append() {}},
         };
-        URL.createObjectURL = value => { blob = value; return 'blob:brief'; };
+        URL.createObjectURL = value => { blobs.push(value); return 'blob:brief'; };
         URL.revokeObjectURL = () => {};
     """ + script + """
         assert.equal(typeof handlers.click, 'function');
         handlers.click();
-        assert.ok(clicked && blob);
+        fullOption.checked = true;
+        handlers.click();
+        assert.equal(clicked, 2);
+        assert.equal(blobs.length, 2);
         assert.match(anchor.download, /\\.md$/);
-        assert.match(blob.type, /^text\\/(markdown|plain)/);
-        blob.text().then(text => process.stdout.write(text));
+        blobs.forEach(blob => assert.match(blob.type, /^text\\/(markdown|plain)/));
+        Promise.all(blobs.map(blob => blob.text())).then(text => process.stdout.write(JSON.stringify(text)));
     """], capture_output=True, text=True, encoding="utf-8")
     assert check.returncode == 0, check.stderr
-    markdown = check.stdout
-    assert question in markdown and "Edited after the analysis" not in markdown
-    scope = next(line for line in markdown.splitlines() if "West: compare" in line)
-    assert "2025-06" in scope and "E2" in scope and "row 1" in scope
-    assert "first_month" in scope.replace("\\_", "_")
-    finding = next(line for line in markdown.splitlines() if "Margin fell to" in line)
-    assert "25.6%" in finding and "E2" in finding and "row 1" in finding
-    assert "margin_pct" in finding.replace("\\_", "_")
-    reason = next(line for line in markdown.splitlines() if "A volume push affected pricing." in line)
-    assert "P1" in reason
-    assert "Review discounts." in markdown
-    assert "2 claims were omitted because they failed verification." in markdown
-    assert "Numbers in retained claims verified against cited SQL cells." in markdown
-    assert "Policy-backed recommendations are unavailable for this brief." in markdown
-    assert "SELECT margin_pct, units FROM sales WHERE month >= :cutoff" in markdown
-    assert '"cutoff": "2025-07"' in markdown and '"margin_pct": 25.6' in markdown
-    assert "9007199254740993" in markdown
-    assert "SELECT chunk FROM policy_chunks WHERE id = :policy_id" in markdown
-    assert '"policy_id": 1' in markdown
-    assert "volume_push.md" in markdown.replace("\\_", "_") and "Discounts increased in West." in markdown
-    assert "SELECT uncited FROM sales" not in markdown
+    summary, full = json.loads(check.stdout)
+    for markdown in (summary, full):
+        assert question in markdown and "Edited after the analysis" not in markdown
+        scope = next(line for line in markdown.splitlines() if "West: compare" in line)
+        assert "2025-06" in scope and "E2" in scope and "row 2" in scope
+        assert "first_month" in scope.replace("\\_", "_")
+        finding = next(line for line in markdown.splitlines() if "Margin fell to" in line)
+        assert "25.60%" in finding and "E2" in finding and "row 2" in finding
+        assert "margin_pct" in finding.replace("\\_", "_")
+        reason = next(line for line in markdown.splitlines() if "A volume push affected pricing." in line)
+        assert "P1" in reason
+        assert "Review discounts." in markdown
+        assert "2 claims were omitted because they failed verification." in markdown
+        assert "Numbers in retained claims verified against cited SQL cells." in markdown
+        assert "Policy-backed recommendations are unavailable for this brief." in markdown
+        assert "volume_push.md" in markdown.replace("\\_", "_")
+        assert "SELECT uncited FROM sales" not in markdown
+        assert "E9" not in markdown
+    normalized_summary = summary.replace("\\_", "_")
+    assert "Row 2, column first_month: 2025-06" in normalized_summary
+    assert "Row 2, column margin_pct: 25.6" in normalized_summary
+    for private in ("9007199254740993", "121212", "8.8", "7.77", "East", "49.2",
+                    "2025-05", "989898", "18.8", "17.77", "SELECT margin_pct, units",
+                    '"cutoff":', "SELECT chunk FROM policy_chunks", '"policy_id":',
+                    "Discounts increased in West."):
+        assert private not in summary
+    assert "SELECT margin_pct, units FROM sales WHERE month >= :cutoff" in full
+    assert '"cutoff": "2025-07"' in full and '"margin_pct": 25.6' in full
+    for value in ("9007199254740993", "121212", "8.8", "7.77", "East", "49.2",
+                  "2025-05", "989898", "18.8", "17.77"):
+        assert value in full
+    assert "SELECT chunk FROM policy_chunks WHERE id = :policy_id" in full
+    assert '"policy_id": 1' in full
+    assert "Discounts increased in West." in full
 @pytest.mark.parametrize("region", ["West", "East"])
 def test_monthly_trend_links_selected_region_to_original_evidence_rows(monkeypatch, region):
     rows = [
