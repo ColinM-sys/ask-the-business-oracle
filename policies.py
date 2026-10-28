@@ -64,9 +64,11 @@ def ensure_policies():
             paragraphs = re.split(r"\n\s*\n", content.strip())
             chunk = ""
             for paragraph in paragraphs:
-                for offset in range(0, len(paragraph), 1500):
-                    part = paragraph[offset:offset + 1500]
-                    if len(chunk) + len(part) + 2 > 1800:
+                # At most four UTF-8 bytes per character; each part fits VARCHAR2(4000 BYTE).
+                for offset in range(0, len(paragraph), 1000):
+                    part = paragraph[offset:offset + 1000]
+                    if chunk and (len(chunk) + len(part) + 2 > 1800
+                                  or len((chunk + "\n\n" + part).encode("utf-8")) > 4000):
                         chunks.append((name, chunk))
                         chunk = ""
                     chunk = (chunk + "\n\n" + part).strip()

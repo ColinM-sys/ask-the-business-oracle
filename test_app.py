@@ -3,6 +3,7 @@ import copy
 import json
 import runpy
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -90,6 +91,28 @@ def test_hashing_is_stable_and_normalized():
     first = hash_embedding("West freight contract")
     assert first == hash_embedding("West freight contract")
     assert abs(sum(v*v for v in first) - 1) < 0.000001
+
+
+@pytest.mark.parametrize("character", ["界", "😀"])
+def test_policy_chunks_fit_byte_limit(character, tmp_path, monkeypatch):
+    content = character * 1500 + "\n\n" + character * 200
+    (tmp_path / "unicode.md").write_text(content, encoding="utf-8")
+    connection = MagicMock()
+    cursor = connection.cursor.return_value
+    cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
+    cursor.execute.return_value.fetchall.return_value = []
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+    connection.__enter__.return_value = connection
+
+    ensure_policies()
+
+    chunks = [call.kwargs["chunk"] for call in cursor.execute.call_args_list
+              if call.args[0].lstrip().startswith("INSERT INTO policy_chunks")]
+    assert chunks
+    assert all(chunk and len(chunk.encode("utf-8")) <= 4000 for chunk in chunks)
+    assert "".join(chunks).replace("\n", "") == content.replace("\n", "")
+    connection.commit.assert_called_once()
 
 
 def test_question_scope():
