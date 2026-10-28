@@ -51,19 +51,26 @@ def validate_select(sql):
     return tree.sql(dialect="oracle", comments=False)
 
 
-def run_sql(select, params=None):
-    executable = validate_select(select)
+def run_sql_many(queries):
+    statements = [(select, params or {}, validate_select(select)) for select, params in queries]
     with connect() as con:
         with con.cursor() as cur:
             cur.execute("SET TRANSACTION READ ONLY")
             cur.outputtypehandler = _number_to_decimal
-            cur.execute(executable, params or {})
-            columns = [d[0].lower() for d in cur.description]
-            rows = cur.fetchmany(1001)
-            if len(rows) > 1000:
-                raise ValueError("Evidence exceeds the row limit; aggregate the query")
-            return {"sql": select, "params": params or {},
-                    "rows": [dict(zip(columns, row)) for row in rows]}
+            results = []
+            for select, params, executable in statements:
+                cur.execute(executable, params)
+                columns = [d[0].lower() for d in cur.description]
+                rows = cur.fetchmany(1001)
+                if len(rows) > 1000:
+                    raise ValueError("Evidence exceeds the row limit; aggregate the query")
+                results.append({"sql": select, "params": params,
+                                "rows": [dict(zip(columns, row)) for row in rows]})
+            return results
+
+
+def run_sql(select, params=None):
+    return run_sql_many([(select, params)])[0]
 
 
 def search_policies(text, k=5):
