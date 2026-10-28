@@ -1839,6 +1839,22 @@ def test_question_month_abbreviations(month):
     assert parse_question(f"West since {month} 2026") == ("West", f"2026-{expected}")
 
 
+@pytest.mark.parametrize("date", [
+    "15 July 2025", "1 July 2025", "15th July 2025", "15th of July 2025",
+    "15th day of July 2025", "15 jul. 2025", "15-Jul 2025", "15/July 2025",
+    "15. July 2025", "July 15, 2025",
+    "2025-07-15",
+])
+def test_question_rejects_day_qualified_dates(date):
+    with pytest.raises(ValueError, match="date"):
+        parse_question(f"West since {date}")
+
+
+def test_question_accepts_numbers_unrelated_to_monthly_cutoff():
+    assert parse_question("West margin fell 15% since July 2025") == ("West", "2025-07")
+    assert parse_question("West since July 2025 with 15% discounts") == ("West", "2025-07")
+
+
 @pytest.mark.parametrize("date", ["2026-13", "2026-00", "2026/07", "2026-07-15",
                                   "Smarch 2026", "2026", "July 26", "July",
                                   "July 2025 and 2026-13"])
