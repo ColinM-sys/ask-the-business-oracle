@@ -18,7 +18,7 @@ def submission_too_large(_):
 @app.route("/", methods=["GET", "POST"])
 def index():
     result, error = None, None
-    question = request.form.get("question", "Why did West margin fall since July 2025?")
+    question = request.form.get("question", "") if request.method == "POST" else "Why did West margin fall since July 2025?"
     status = 200
     if request.method == "POST":
         try:

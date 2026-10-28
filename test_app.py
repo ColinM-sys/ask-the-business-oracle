@@ -286,6 +286,14 @@ def test_ui_discloses_dropped_claims_and_empty_brief(monkeypatch, has_claims, dr
     assert (b"No verified claims are available for this brief." in response.data) == (not has_claims)
     assert (b"Numbers in retained claims verified against cited SQL cells." in response.data) == has_claims
     assert (b"Retained finding." in response.data) == has_claims
+@pytest.mark.parametrize("data", [None, {}, {"unrelated": "value"}, {"question": ""}])
+def test_ui_missing_question_rejected_before_querying(monkeypatch, data):
+    def forbidden_query(*args, **kwargs):
+        pytest.fail("Missing questions must be rejected before querying")
+
+    monkeypatch.setattr("agent.run_sql", forbidden_query)
+    response = app.test_client().post("/", data=data)
+    assert response.status_code == 400
 
 
 def test_ui_validation_and_safe_error(monkeypatch):
