@@ -3,8 +3,10 @@ import copy
 import json
 import runpy
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import oracledb
 import pytest
 
 import tools
@@ -104,6 +106,69 @@ def test_hashing_is_stable_and_normalized():
     first = hash_embedding("West freight contract")
     assert first == hash_embedding("West freight contract")
     assert abs(sum(v*v for v in first) - 1) < 0.000001
+
+
+@pytest.mark.parametrize("failure", [
+    RuntimeError("private-driver-details"),
+    oracledb.DatabaseError(SimpleNamespace(code=3113, message="private-driver-details")),
+    oracledb.DatabaseError(SimpleNamespace(code=40284, message="private-driver-details")),
+])
+def test_policy_probe_propagates_unexpected_failures(failure, tmp_path, monkeypatch):
+    (tmp_path / "policy.md").write_text("Business policy", encoding="utf-8")
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
+    cursor.execute.return_value.fetchall.side_effect = [[("BROKEN_MODEL",)], []]
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+
+    def embedding(cur, text, backend):
+        if backend == "BROKEN_MODEL":
+            raise failure
+        return hash_embedding(text)
+
+    monkeypatch.setattr("policies.embed", embedding)
+
+    with pytest.raises(type(failure)) as caught:
+        ensure_policies()
+
+    assert caught.value is failure
+    connection.commit.assert_not_called()
+    assert not any(call.args[0].startswith("DELETE") for call in cursor.execute.call_args_list)
+
+
+@pytest.mark.parametrize("models, expected", [
+    ([], "hash-v1-512"),
+    ([("INCOMPATIBLE_MODEL",)], "hash-v1-512"),
+    ([("INCOMPATIBLE_MODEL",), ("GOOD_MODEL",)], "GOOD_MODEL"),
+])
+def test_policy_probe_fallback_is_explicit_and_sanitized(
+        models, expected, tmp_path, monkeypatch, caplog):
+    (tmp_path / "policy.md").write_text("Business policy", encoding="utf-8")
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
+    cursor.execute.return_value.fetchall.side_effect = [models, []]
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+
+    def embedding(cur, text, backend):
+        if backend == "INCOMPATIBLE_MODEL":
+            raise oracledb.DatabaseError(SimpleNamespace(
+                code=40290, message="private-driver-details\nforged log entry"))
+        return hash_embedding(text)
+
+    monkeypatch.setattr("policies.embed", embedding)
+    assert ensure_policies() == expected
+    connection.commit.assert_called_once()
+    if models:
+        assert "INCOMPATIBLE_MODEL" in caplog.text
+        assert "40290" in caplog.text
+    assert ("Using hash-v1-512 fallback" in caplog.text) == (expected == "hash-v1-512")
+    assert "private-driver-details" not in caplog.text
+    assert "forged log entry" not in caplog.text
 
 
 @pytest.mark.parametrize("character", ["界", "😀"])

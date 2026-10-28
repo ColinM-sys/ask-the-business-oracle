@@ -1,15 +1,19 @@
 """Idempotent policy ingestion; local hashing fallback needs no API key."""
 from array import array
 import hashlib
+import logging
 import math
 from pathlib import Path
 import re
 import threading
 
+import oracledb
+
 from db import connect
 
 DOCS = Path(__file__).parent / "docs"
 _lock = threading.Lock()
+_logger = logging.getLogger(__name__)
 
 
 def hash_embedding(text, dimensions=512):
@@ -52,9 +56,15 @@ def ensure_policies():
                 embed(cur, "Business policy", model)
                 backend = model
                 break
-            except Exception:
-                # A registered model may not accept text using the DATA attribute.
-                continue
+            except oracledb.DatabaseError as exc:
+                code = getattr(exc.args[0], "code", None) if exc.args else None
+                # ORA-40290: the model is incompatible with this SQL operator.
+                # Other failures indicate broken operations and must stop ingestion.
+                if code != 40290:
+                    raise
+                _logger.warning("Embedding model %r incompatible (ORA-%05d)", model, code)
+        else:
+            _logger.warning("Using hash-v1-512 fallback: no compatible embedding models available")
         existing = cur.execute("SELECT DISTINCT backend, source_hash FROM policy_chunks").fetchall()
         if existing == [(backend, fingerprint)]:
             return backend
