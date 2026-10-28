@@ -38,17 +38,20 @@ JOIN = """FROM sales s LEFT JOIN
     JOIN regions r ON r.region_id=s.region_id"""
 MISSING_DISCOUNT_COUNT = """SUM(CASE WHEN s.discount_pct IS NULL OR s.quantity IS NULL
     OR s.unit_price IS NULL THEN 1 ELSE 0 END)"""
+MISSING_REVENUE_COUNT = "SUM(CASE WHEN s.net_revenue IS NULL THEN 1 ELSE 0 END)"
 MONTHLY_SQL = f"""SELECT r.region_name, s.sale_month,
     ROUND(SUM(s.net_revenue),2) AS revenue,
     SUM(s.quantity) AS units,
-    ROUND(100*SUM(s.net_revenue-s.quantity*(c.unit_cogs+c.freight_per_unit))
-        /NULLIF(SUM(s.net_revenue),0),2) AS margin_pct,
+    CASE WHEN {MISSING_REVENUE_COUNT}=0 THEN
+        ROUND(100*SUM(s.net_revenue-s.quantity*(c.unit_cogs+c.freight_per_unit))
+            /NULLIF(SUM(s.net_revenue),0),2) END AS margin_pct,
     CASE WHEN {MISSING_DISCOUNT_COUNT}=0 THEN
         ROUND(SUM(s.quantity*s.unit_price*s.discount_pct)
             /NULLIF(SUM(s.quantity*s.unit_price),0),2) END AS discount_pct,
     ROUND(SUM(s.quantity*c.freight_per_unit)/NULLIF(SUM(s.quantity),0),2) AS freight_per_unit,
     SUM(CASE WHEN c.unit_cogs IS NULL OR c.freight_per_unit IS NULL THEN 1 ELSE 0 END) AS missing_cost_count,
-    {MISSING_DISCOUNT_COUNT} AS missing_discount_count
+    {MISSING_DISCOUNT_COUNT} AS missing_discount_count,
+    {MISSING_REVENUE_COUNT} AS missing_revenue_count
     {JOIN} GROUP BY r.region_name,s.sale_month ORDER BY r.region_name,s.sale_month"""
 
 
@@ -62,7 +65,7 @@ def summary_sql():
         revenue = total("s.net_revenue")
         units = total("s.quantity")
         raw[period] = {
-            "margin_pct": f"100*{total('s.net_revenue-s.quantity*(c.unit_cogs+c.freight_per_unit)')}/NULLIF({revenue},0)",
+            "margin_pct": f"CASE WHEN {MISSING_REVENUE_COUNT}=0 THEN 100*{total('s.net_revenue-s.quantity*(c.unit_cogs+c.freight_per_unit)')}/NULLIF({revenue},0) END",
             "discount_pct": f"CASE WHEN {MISSING_DISCOUNT_COUNT}=0 THEN {total('s.quantity*s.unit_price*s.discount_pct')}/NULLIF({total('s.quantity*s.unit_price')},0) END",
             "freight_per_unit": f"{total('s.quantity*c.freight_per_unit')}/NULLIF({units},0)",
         }
@@ -71,6 +74,7 @@ def summary_sql():
     columns.extend([
         "SUM(CASE WHEN c.unit_cogs IS NULL OR c.freight_per_unit IS NULL THEN 1 ELSE 0 END) AS missing_cost_count",
         f"{MISSING_DISCOUNT_COUNT} AS missing_discount_count",
+        f"{MISSING_REVENUE_COUNT} AS missing_revenue_count",
         f"CASE WHEN ({raw['before']['margin_pct']}) > ({raw['after']['margin_pct']}) THEN 'fell' WHEN ({raw['before']['margin_pct']}) < ({raw['after']['margin_pct']}) THEN 'rose' ELSE 'was unchanged' END AS margin_direction",
         f"ROUND(({raw['before']['margin_pct']})-({raw['after']['margin_pct']}),2) AS margin_drop_pts",
         f"ROUND(100*(({raw['after']['freight_per_unit']})/NULLIF(({raw['before']['freight_per_unit']}),0)-1),2) AS freight_increase_pct",
@@ -129,6 +133,8 @@ def answer_question(question):
         raise ValueError("Missing monthly costs or duplicate cost rows for some sales; cannot analyze incomplete or ambiguous data.")
     if any(row["missing_discount_count"] for key in ("E1", "E2") for row in evidence[key]["rows"]):
         raise ValueError("Missing discount inputs for some sales; cannot analyze incomplete data.")
+    if any(row["missing_revenue_count"] for key in ("E1", "E2") for row in evidence[key]["rows"]):
+        raise ValueError("Missing net revenue for some sales; cannot analyze incomplete data.")
     row = rows[index]
     if row["before_margin_pct"] is None or row["after_margin_pct"] is None:
         raise QuestionValidationError("The comparison date must have sales both before and after it.")
