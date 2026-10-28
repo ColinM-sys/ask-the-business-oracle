@@ -1,5 +1,7 @@
 """Unit checks and live integration against the existing local Oracle tables."""
 import copy
+import runpy
+from pathlib import Path
 
 import pytest
 
@@ -144,6 +146,28 @@ def test_ui_validation_and_safe_error(monkeypatch):
     response = client.post("/", data={"question": "West"})
     assert response.status_code == 503
     assert b"secret-driver-settings" not in response.data
+
+
+def test_script_starts_and_shows_unavailable_when_setup_fails(monkeypatch):
+    def failure(*args, **kwargs):
+        raise RuntimeError("secret-driver-settings")
+
+    monkeypatch.setattr("policies.ensure_policies", failure)
+    monkeypatch.setattr("tools.connect", failure)
+    started = []
+
+    def run(server, **kwargs):
+        started.append(server)
+        client = server.test_client()
+        assert client.get("/").status_code == 200
+        response = client.post("/", data={"question": "West"})
+        assert response.status_code == 503
+        assert b"Analysis unavailable. Check the local Oracle connection and policy setup, then retry." in response.data
+        assert b"secret-driver-settings" not in response.data
+
+    monkeypatch.setattr("flask.Flask.run", run)
+    runpy.run_path(str(Path(__file__).with_name("app.py")), run_name="__main__")
+    assert len(started) == 1
 
 
 def test_ui_escapes_question():
