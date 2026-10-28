@@ -335,6 +335,27 @@ def test_question_rejects_unsupported_explicit_dates(date):
         parse_question(f"West since {date}")
 
 
+@pytest.mark.parametrize("period", [
+    "last month", "LAST QUARTER", "last year", "this month", "next week",
+    "previous month", "current quarter", "the past 3 months", "the last three months",
+    "two months ago", "yesterday", "today", "tomorrow", "year to date", "YTD",
+    "July 2025 and last month", "2025-07 and this year",
+])
+def test_question_rejects_relative_periods_before_querying(monkeypatch, period):
+    def forbidden_query(*args, **kwargs):
+        pytest.fail("Unsupported periods must be rejected before querying")
+
+    monkeypatch.setattr("agent.run_sql", forbidden_query)
+    question = f"West since {period}"
+    with pytest.raises(ValueError, match="Unsupported date; use YYYY-MM"):
+        parse_question(question)
+    with pytest.raises(ValueError, match="Unsupported date; use YYYY-MM"):
+        answer_question(question)
+    response = app.test_client().post("/", data={"question": question})
+    assert response.status_code == 400
+    assert b"Unsupported date; use YYYY-MM" in response.data
+
+
 def test_question_defaults_only_without_date():
     assert parse_question("Why did West margin fall?") == ("West", "2025-07")
 @pytest.mark.parametrize("region", ["North", "north", "Northeast", "Northwest", "Southeast", "Southwest", "West and North"])
