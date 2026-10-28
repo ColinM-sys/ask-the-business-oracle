@@ -105,6 +105,16 @@ def test_readme_documents_node_test_prerequisite():
     assert "Node.js installed and available as `node` on PATH" in " ".join(test_instructions.split())
 
 
+def test_readme_documents_runtime_policy_refresh():
+    readme = " ".join(Path(__file__).with_name("README.md").read_text(encoding="utf-8").split())
+    assert "`search_policies()` calls `ensure_policies()` on every policy search" in readme
+    assert "including normal POST requests" in readme
+    assert "`CREATE TABLE`" in readme and "tablespace quota" in readme
+    assert "`SELECT`, `DELETE`, and `INSERT` access to `policy_chunks`" in readme
+    assert "source documents or selected embedding backend change" in readme
+    assert "deletes and replaces all rows and commits" in readme
+    assert "shared by requests and other app instances using the same schema" in readme
+    assert "Policy setup is the separate write path" not in readme
 def test_readme_explains_independent_rounding():
     readme = " ".join(Path(__file__).with_name("README.md").read_text(encoding="utf-8").split())
     assert "Changes and margin direction use unrounded aggregates." in readme
@@ -112,10 +122,10 @@ def test_readme_explains_independent_rounding():
     assert "subtracting displayed endpoints may give a different result" in readme
 def test_readme_documents_request_time_policy_writes():
     readme = " ".join(Path(__file__).with_name("README.md").read_text(encoding="utf-8").split())
-    assert "Each `search_policies` call runs `ensure_policies`" in readme
+    assert "`search_policies()` calls `ensure_policies()` on every policy search" in readme
     assert "creates `policy_chunks` if absent" in readme
-    assert "policy documents or the embedding backend change" in readme
-    assert "`CREATE TABLE` and tablespace quota" in readme
+    assert "source documents or selected embedding backend change" in readme
+    assert "`CREATE TABLE`" in readme and "tablespace quota" in readme
     assert "`SELECT`, `DELETE`, and `INSERT` access to `policy_chunks`" in readme
     assert "Running `python policies.py` once does not make SELECT-only runtime permissions sufficient." in readme
 def test_readme_documents_required_oracle_configuration():
