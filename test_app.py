@@ -2012,6 +2012,31 @@ def test_updated_policy_source_invalidates_unchanged_retrieved_chunk(policy_rows
     assert result["dropped_count"] == 0
 
 
+@pytest.mark.parametrize("region,cutoff", [("West", "August 2025"), ("East", "July 2025")])
+@pytest.mark.parametrize("margin_available", [True, False])
+def test_nondefault_comparison_does_not_make_uncited_policy_claims(
+        policy_rows, tmp_path, monkeypatch, region, cutoff, margin_available):
+    import agent
+
+    summary = dict(agent.run_sql("SELECT ...")["rows"][0], region_name=region)
+    if not margin_available:
+        summary.update(after_margin_pct=None, after_revenue=0, margin_direction=None, margin_drop_pts=None)
+    monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
+        "sql": sql, "params": params or {}, "rows": [summary]})
+    for policy in policy_rows:
+        if policy["doc"] == "west_q3_volume_push.md":
+            policy["chunk"] += f"\n\nThe freight contract caused {region} margin to fall since {cutoff}."
+        (tmp_path / policy["doc"]).write_text(policy["chunk"], encoding="utf-8")
+    monkeypatch.setattr("agent.DOCS", tmp_path)
+
+    result = answer_question(f"Why did {region} margin fall since {cutoff}?")
+
+    reason = next(claim for claim in result["claims"] if claim["kind"] == "reason")
+    assert not reason["policy_ids"]
+    assert "no verified policy explanation is available" in reason["parts"][0]["text"].lower()
+    assert "do not establish a cause" not in reason["parts"][0]["text"].lower()
+
+
 @pytest.mark.parametrize("revision", ["unchanged", "superseding", "missing"])
 def test_fixed_policy_claims_require_reviewed_complete_corpus(policy_rows, tmp_path, monkeypatch, revision):
     for policy in policy_rows:
