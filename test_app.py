@@ -144,6 +144,7 @@ def test_readme_documents_required_oracle_configuration():
     "SELECT UTL_HTTP.REQUEST('https://example.com') FROM sales",
     "SELECT * FROM sales UNION ALL SELECT * FROM sales",
     "SELECT * FROM sales FOR UPDATE SKIP LOCKED", "SELECT * FROM sales; COMMIT",
+    "SELECT * FROM \u017fales", "SELECT * FROM d\u0131scounts",
     "SELECT 'unterminated FROM sales",
 ])
 def test_guard_refuses_before_connect(sql, monkeypatch):
@@ -157,6 +158,20 @@ def test_guard_refuses_before_connect(sql, monkeypatch):
 def test_guard_accepts_comments_and_harmless_string():
     tools.validate_select("/* report */ SELECT COUNT(*) FROM sales WHERE sale_month=:month;")
     tools.validate_select("SELECT 'DROP TABLE sales' AS harmless FROM regions")
+
+
+@pytest.mark.parametrize("name", ["sales", "costs", "customers", "discounts", "products", "regions"])
+def test_guard_resolves_oracle_table_names(name, monkeypatch):
+    for identifier in (name, name.upper(), name.capitalize(), f'"{name.upper()}"'):
+        tools.validate_select(f"SELECT * FROM {identifier}")
+
+    def forbidden_connection():
+        pytest.fail("Rejected SQL must never connect")
+
+    monkeypatch.setattr(tools, "connect", forbidden_connection)
+    for identifier in (f'"{name}"', f'"{name.capitalize()}"'):
+        with pytest.raises(ValueError, match="Only governed business tables"):
+            tools.run_sql(f"SELECT * FROM sales JOIN {identifier} ON 1=1")
 
 
 @pytest.fixture
