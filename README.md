@@ -45,8 +45,9 @@ and runs without debug mode; this demo has no production authentication layer.
 python -m pytest -q test_app.py
 ```
 
-Tests include live Oracle integration; start the local database first. They do
-not reload or alter the business tables.
+Tests include live Oracle integration; start the local database first. They also
+require Node.js installed and available as `node` on PATH. Tests do not reload or
+alter the business tables.
 
 Oracle syntax reference: [VECTOR_EMBEDDING](https://docs.oracle.com/en/database/oracle/oracle-database/26/vecse/vector_embedding.html)
 and [Oracle vector search quick start](https://docs.oracle.com/en/database/oracle/oracle-database/26/vecse/sql-quick-start-using-vector-embedding-model-uploaded-database.html).

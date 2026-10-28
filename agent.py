@@ -3,6 +3,7 @@ from hashlib import sha256
 import re
 
 from critic import critique
+from policies import DOCS
 from tools import run_sql, search_policies
 
 # SHA-256 of the complete, whitespace-normalized chunks reviewed for the fixed
@@ -15,7 +16,16 @@ REVIEWED_POLICY_HASHES = {
     "west_q3_volume_push.md": "5dc8fd6cd5ce406fcd582abb8220e16d24dbf5fe7a133eb798c5bf871a3f8c1f",
 }
 
-JOIN = """FROM sales s JOIN costs c ON c.region_id=s.region_id
+# The fixed claims below were reviewed against these complete document versions.
+# Review the claims again before accepting any changed document digest.
+POLICY_SHA256 = {
+    "west_q3_volume_push.md": "f5c98d964fc1b7b6a872152b15fef8044ff7a30797a3a65e1b5891e152bf3b71",
+    "freight_contract_memo.md": "8b73b6dbad7be9dcdc24759e02da963a465420d4a00f1c0c8b0940c4dd6da747",
+    "pricing_policy.md": "79264bb14aae2da366604872c36b2b4e4ae26a27459b7cb801873e0df8f8fac0",
+    "regional_playbook.md": "6a3fd585c58b2528206a9545db63db828c836ce0a265e1fb3fc90525d6ab03d8",
+}
+
+JOIN = """FROM sales s LEFT JOIN costs c ON c.region_id=s.region_id
     AND c.product_id=s.product_id AND c.cost_month=s.sale_month
     JOIN regions r ON r.region_id=s.region_id"""
 MONTHLY_SQL = f"""SELECT r.region_name, s.sale_month,
@@ -46,6 +56,7 @@ def summary_sql():
         for name, expression in raw[period].items():
             columns.append(f"ROUND({expression},2) AS {period}_{name}")
     columns.extend([
+        "COUNT(*)-COUNT(c.cost_month) AS missing_cost_count",
         f"CASE WHEN ({raw['before']['margin_pct']}) > ({raw['after']['margin_pct']}) THEN 'fell' WHEN ({raw['before']['margin_pct']}) < ({raw['after']['margin_pct']}) THEN 'rose' ELSE 'was unchanged' END AS margin_direction",
         f"ROUND(({raw['before']['margin_pct']})-({raw['after']['margin_pct']}),2) AS margin_drop_pts",
         f"ROUND(100*(({raw['after']['freight_per_unit']})/NULLIF(({raw['before']['freight_per_unit']}),0)-1),2) AS freight_increase_pct",
@@ -100,6 +111,8 @@ def answer_question(question):
     index = next((i for i, row in enumerate(rows) if row["region_name"] == region), None)
     if index is None:
         raise ValueError(f"No sales/cost data found for {region}.")
+    if any(row["missing_cost_count"] for row in rows):
+        raise ValueError("Missing monthly costs for some sales; cannot analyze incomplete data.")
     row = rows[index]
     if row["before_margin_pct"] is None or row["after_margin_pct"] is None:
         raise ValueError("The comparison date must have sales both before and after it.")
@@ -116,6 +129,14 @@ def answer_question(question):
                 "column": column, "suffix": suffix}
 
     def policy_ids(filename):
+        # Verify the whole source too: an old chunk may survive a contradictory addendum.
+        try:
+            source = (DOCS / filename).read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError):
+            return []
+        if sha256(source.encode("utf-8")).hexdigest() != POLICY_SHA256[filename]:
+            return []
+        # These reviewed documents each fit in one chunk; partial text is not proof.
         citations = []
         for key, value in evidence.items():
             if value["kind"] != "policy":

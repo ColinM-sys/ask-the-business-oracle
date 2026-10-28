@@ -4,6 +4,8 @@ import json
 import runpy
 import subprocess
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,6 +20,12 @@ from agent import answer_question, parse_question, summary_sql
 from app import app
 from critic import critique, supported
 from policies import ensure_policies, hash_embedding
+
+
+def test_readme_documents_node_test_prerequisite():
+    readme = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
+    test_instructions = readme.split("python -m pytest -q test_app.py", 1)[1]
+    assert "Node.js installed and available as `node` on PATH" in " ".join(test_instructions.split())
 
 
 @pytest.mark.parametrize("sql", [
@@ -227,6 +235,61 @@ def test_empty_policy_documents_preserve_existing_rows(tmp_path, monkeypatch):
     connection.commit.assert_not_called()
 
 
+def test_delayed_policy_refresh_preserves_newer_content(tmp_path, monkeypatch):
+    document = tmp_path / "policy.md"
+    document.write_text("Old policy", encoding="utf-8")
+    waiting = threading.Event()
+    resume = threading.Event()
+    lock = threading.Lock()
+    main_thread = threading.current_thread()
+
+    class DelayedLock:
+        def __enter__(self):
+            if threading.current_thread() is not main_thread:
+                waiting.set()
+                assert resume.wait(10), "Delayed refresh was not released"
+            lock.acquire()
+
+        def __exit__(self, *args):
+            lock.release()
+
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.fetchone.return_value = ("POLICY_CHUNKS",)
+    rows = []
+
+    def execute(sql, **params):
+        if sql.startswith("SELECT model_name"):
+            cursor.fetchall.return_value = []
+        elif sql.startswith("SELECT DISTINCT backend, source_hash"):
+            cursor.fetchall.return_value = [(row["backend"], row["fingerprint"]) for row in rows]
+        elif sql.startswith("DELETE FROM policy_chunks"):
+            rows.clear()
+        elif sql.startswith("INSERT INTO policy_chunks"):
+            rows.append(params)
+        return cursor
+
+    cursor.execute.side_effect = execute
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+    monkeypatch.setattr("policies._lock", DelayedLock())
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        delayed = executor.submit(ensure_policies)
+        try:
+            assert waiting.wait(10), "Delayed refresh did not reach the lock"
+            # Commit updated content while the first refresh is waiting for the lock.
+            document.write_text("Updated policy", encoding="utf-8")
+            assert ensure_policies() == "hash-v1-512"
+        finally:
+            resume.set()
+        assert delayed.result(timeout=10) == "hash-v1-512"
+
+    assert [row["chunk"] for row in rows] == ["Updated policy"]
+    connection.commit.assert_called_once()
+
+
 def test_policy_search_handles_empty_table(monkeypatch):
     connection = MagicMock()
     connection.__enter__.return_value = connection
@@ -248,6 +311,47 @@ def test_question_scope():
     assert parse_question("West since 2025-07") == ("West", "2025-07")
     with pytest.raises(ValueError):
         parse_question("West and East")
+
+
+@pytest.mark.parametrize("region_id", [1, 2])
+@pytest.mark.parametrize("month,product_id", [
+    ("2025-05", 1), ("2025-06", 2), ("2025-08", 1),
+])
+def test_missing_monthly_costs_reject_incomplete_analysis(region_id, month, product_id, monkeypatch):
+    # Missing costs must not hide boundary months or sales within a covered month,
+    # including sales in a comparison region.
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West'), (2, 'East');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+        """)
+        for matched_region in (1, 2):
+            for matched_month in ("2025-06", "2025-07"):
+                con.execute("INSERT INTO sales VALUES (?, 1, ?, 100.0, 1, 100.0, 0)",
+                            (matched_region, matched_month))
+                con.execute("INSERT INTO costs VALUES (?, 1, ?, 60.0, 5.0)",
+                            (matched_region, matched_month))
+        con.execute("INSERT INTO sales VALUES (?, ?, ?, 100.0, 1, 100.0, 0)",
+                    (region_id, product_id, month))
+
+        def run_sql(sql, params=None):
+            return {"sql": sql, "params": params or {}, "rows": [dict(row) for row in
+                con.execute(tools.validate_select(sql), params or {})]}
+
+        policies = MagicMock(return_value={"rows": []})
+        monkeypatch.setattr("agent.run_sql", run_sql)
+        monkeypatch.setattr("agent.search_policies", policies)
+        with pytest.raises(ValueError, match="Missing monthly costs"):
+            answer_question("West since July 2025")
+        policies.assert_not_called()
+
+        con.execute("INSERT INTO costs VALUES (?, ?, ?, 60.0, 5.0)",
+                    (region_id, product_id, month))
+        assert answer_question("West since July 2025")["dropped_count"] == 0
 
 
 @pytest.mark.parametrize("rows", [[], [{"region_name": "East"}]])
@@ -305,6 +409,7 @@ def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
         "before_discount_pct": 3, "after_discount_pct": 18,
         "before_freight_per_unit": 0, "after_freight_per_unit": 5,
         "freight_increase_pct": None,
+        "missing_cost_count": 0,
     }
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
         "sql": sql, "params": params or {}, "rows": [row]})
@@ -321,6 +426,81 @@ def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
     for part in finding["parts"]:
         if "value" in part:
             assert supported(part, result["evidence"])
+
+
+@pytest.fixture
+def policy_rows(monkeypatch):
+    row = {
+        "region_name": "West", "first_month": "2025-01", "last_month": "2025-09",
+        "before_last_month": "2025-06", "after_first_month": "2025-07",
+        "before_margin_pct": 40, "after_margin_pct": 25, "margin_drop_pts": 15,
+        "margin_direction": "fell", "before_discount_pct": 3, "after_discount_pct": 18,
+        "before_freight_per_unit": 5, "after_freight_per_unit": 8,
+        "freight_increase_pct": 60,
+        "missing_cost_count": 0,
+    }
+    policies = [{"id": i, "doc": path.name, "chunk": path.read_text(encoding="utf-8").strip()}
+                for i, path in enumerate(sorted(Path(__file__).with_name("docs").glob("*.md")), 1)]
+    monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
+        "sql": sql, "params": params or {}, "rows": [row]})
+    monkeypatch.setattr("agent.search_policies", lambda _: {
+        "sql": "SELECT policy evidence", "params": {}, "rows": policies})
+    return policies
+
+
+def test_reviewed_policy_text_supports_claims_and_only_matching_citations(policy_rows):
+    policy_rows.extend({**policy, "id": policy["id"] + 10, "chunk": "Unrelated policy text."}
+                       for policy in policy_rows[:])
+    result = answer_question("West since July 2025")
+    claims = [claim for claim in result["claims"] if claim["kind"] in {"reason", "action"}]
+    assert [claim["kind"] for claim in claims] == ["reason", "action", "action", "action"]
+    assert all(claim["policy_ids"] for claim in claims)
+    assert {citation for claim in claims for citation in claim["policy_ids"]} == {"P1", "P2", "P3", "P4"}
+    assert result["dropped_count"] == 0
+
+
+@pytest.mark.parametrize("filename,contradiction", [
+    ("west_q3_volume_push.md", "West cancelled the discount push; Sales and Finance approved every deal."),
+    ("freight_contract_memo.md", "West retained its freight carrier and the existing rates."),
+    ("pricing_policy.md", "Freight surcharges are prohibited on all orders."),
+    ("regional_playbook.md", "Keep broad discount programs; do not re-tender or consolidate freight."),
+])
+@pytest.mark.parametrize("revision", ["missing", "header", "replacement", "addendum"])
+def test_policy_filenames_do_not_prove_claims(policy_rows, filename, contradiction, revision):
+    policy = next(policy for policy in policy_rows if policy["doc"] == filename)
+    original = policy["chunk"]
+    if revision == "missing":
+        del policy["chunk"]
+    else:
+        policy["chunk"] = {"header": original.splitlines()[0], "replacement": contradiction,
+                           "addendum": original + "\n\nCorrection: " + contradiction}[revision]
+
+    result = answer_question("West since July 2025")
+
+    assert all(f"P{policy['id']}" not in claim["policy_ids"] for claim in result["claims"])
+    if filename in {"west_q3_volume_push.md", "freight_contract_memo.md"}:
+        assert not any(claim["kind"] == "reason" for claim in result["claims"])
+    else:
+        assert not any(claim["kind"] == "action" for claim in result["claims"])
+    assert len([claim for claim in result["claims"] if claim["kind"] == "finding"]) == 2
+    assert result["dropped_count"] == 0
+
+
+def test_updated_policy_source_invalidates_unchanged_retrieved_chunk(policy_rows, tmp_path, monkeypatch):
+    for policy in policy_rows:
+        content = policy["chunk"]
+        if policy["doc"] == "west_q3_volume_push.md":
+            content += "\n\nCorrection: the program was cancelled before launch."
+        (tmp_path / policy["doc"]).write_text(content, encoding="utf-8")
+    monkeypatch.setattr("agent.DOCS", tmp_path)
+
+    result = answer_question("West since July 2025")
+
+    assert not any(claim["kind"] == "reason" for claim in result["claims"])
+    assert len([claim for claim in result["claims"] if claim["kind"] == "action"]) == 3
+    assert result["dropped_count"] == 0
+
+
 @pytest.mark.parametrize("month", ["Jul", "jul.", "Sept", "SEP"])
 def test_question_month_abbreviations(month):
     expected = "07" if month.lower().startswith("jul") else "09"
@@ -361,6 +541,7 @@ def retrieved_policy_rows(monkeypatch):
         "margin_direction": "fell", "before_discount_pct": 3, "after_discount_pct": 18,
         "before_freight_per_unit": 5, "after_freight_per_unit": 8,
         "freight_increase_pct": 60,
+        "missing_cost_count": 0,
     }
     monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
         "sql": sql, "params": params or {}, "rows": [summary]})
@@ -539,6 +720,61 @@ def test_ui_restores_submit_button_on_pageshow():
             assert.equal(button.textContent, 'Analyze question');
         }
     """], check=True, capture_output=True, text=True)
+def test_evidence_dialog_preserves_exact_integers(monkeypatch):
+    values = [9007199254740993, -9007199254740993, 10**37 + 1,
+              9007199254740991, 0, 42, 1.25, None, True, False, "text"]
+    result = {
+        "region": "West", "claims": [],
+        "evidence": {"E1": {"kind": "sql", "sql": "SELECT ...", "params": {},
+                            "rows": [{"units": value} for value in values]}},
+    }
+    original = copy.deepcopy(result)
+    monkeypatch.setattr("app.answer_question", lambda _: result)
+    response = app.test_client().post("/", data={"question": "West"})
+    assert response.status_code == 200
+    assert result == original  # Rendering must not change the critic's evidence.
+    script = response.get_data(as_text=True).split("<script>", 1)[1].split("</script>", 1)[0]
+    check = subprocess.run(["node", "-e", """
+        const assert = require('node:assert/strict');
+        const cells = [];
+        let openEvidence;
+        const button = {
+            dataset: {evidence: 'E1'},
+            addEventListener: (_, handler) => { openEvidence = handler; },
+        };
+        const table = {
+            createTHead: () => ({insertRow: () => ({append() {}})}),
+            createTBody: () => ({insertRow: () => ({insertCell: () => {
+                const cell = {};
+                cells.push(cell);
+                return cell;
+            }})}),
+        };
+        const element = {
+            addEventListener() {}, replaceChildren() {}, showModal() {},
+            querySelector: () => null,
+        };
+        global.document = {
+            getElementById: () => element,
+            querySelectorAll: () => [button],
+            createElement: tag => tag === 'table' ? table : {},
+        };
+    """ + script + """
+        openEvidence();
+        assert.deepEqual(cells.map(cell => String(cell.textContent)), [
+            '9007199254740993', '-9007199254740993',
+            '10000000000000000000000000000000000001', '9007199254740991',
+            '0', '42', '1.25', 'NULL', 'true', 'false', 'text',
+        ]);
+        assert.deepEqual(evidence.E1.rows.map(row => row.units), [
+            '9007199254740993', '-9007199254740993',
+            '10000000000000000000000000000000000001', '9007199254740991',
+            '0', '42', 1.25, null, true, false, 'text',
+        ]);
+    """], capture_output=True, text=True)
+    assert check.returncode == 0, check.stderr
+
+
 def test_evidence_dialog_identifies_cited_cell(monkeypatch):
     monkeypatch.setattr("app.answer_question", lambda _: {
         "region": "West", "claims": [], "evidence": {},
