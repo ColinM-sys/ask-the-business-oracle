@@ -1,6 +1,7 @@
 """Unit checks and live integration against the existing local Oracle tables."""
 import copy
 import json
+import re
 import runpy
 import subprocess
 import sqlite3
@@ -882,6 +883,33 @@ def test_ui_missing_question_rejected_before_querying(monkeypatch, data):
     monkeypatch.setattr("agent.run_sql", forbidden_query)
     response = app.test_client().post("/", data=data)
     assert response.status_code == 400
+
+
+def test_focus_indicator_contrasts_with_page_and_cards():
+    html = app.test_client().get("/").get_data(as_text=True)
+
+    def declaration(selector, name):
+        rule = re.search(rf"{re.escape(selector)}\s*\{{([^}}]*)\}}", html)
+        assert rule, f"Missing {selector} rule"
+        value = re.search(rf"(?:^|;)\s*{re.escape(name)}\s*:\s*([^;]+)", rule.group(1))
+        assert value, f"Missing {name} in {selector}"
+        return value.group(1).strip()
+
+    def luminance(color):
+        color = {"white": "#ffffff"}.get(color.lower(), color)
+        assert re.fullmatch(r"#[0-9a-fA-F]{6}", color)
+        channels = [int(color[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+        linear = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+                  for c in channels]
+        return sum(weight * channel for weight, channel in zip((0.2126, 0.7152, 0.0722), linear))
+
+    outline = declaration(":focus-visible", "outline").split()[-1]
+    for surface in (declaration(":root", "background"), declaration(".card", "background")):
+        dark, light = sorted((luminance(outline), luminance(surface)))
+        contrast = (light + 0.05) / (dark + 0.05)
+        assert contrast >= 3, f"Focus outline {outline} has {contrast:.2f}:1 contrast against {surface}"
+
+
 def test_ui_restores_submit_button_on_pageshow():
     html = app.test_client().get("/").get_data(as_text=True)
     script = html.rsplit("<script>", 1)[1].split("</script>", 1)[0]
