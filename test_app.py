@@ -108,6 +108,28 @@ def test_readme_documents_required_oracle_configuration():
     "SELECT * FROM sales UNION ALL SELECT * FROM sales",
     "SELECT * FROM sales FOR UPDATE SKIP LOCKED", "SELECT * FROM sales; COMMIT",
     "SELECT 'unterminated FROM sales",
+    "SELECT DBMS_RANDOM.VALUE FROM sales", 'SELECT DBMS_RANDOM."VALUE" FROM sales',
+    "SELECT DBMS_UTILITY.GET_TIME FROM sales",
+    'SELECT DBMS_UTILITY.GET_TIME FROM sales "dbms_utility"',
+    "SELECT dbms_utility.get_time FROM sales dbms_utility JOIN costs c ON 1=1",
+    "SELECT dbms_utility.get_time FROM sales s WHERE "
+    "(SELECT COUNT(*) FROM costs dbms_utility) > 0",
+    "SELECT * FROM sales dbms_utility JOIN "
+    "(SELECT dbms_utility.get_time FROM costs) c ON 1=1",
+    "SELECT s.sale_id FROM sales s JOIN costs c ON dbms_utility.get_time > 0 "
+    "JOIN (SELECT 1 AS get_time FROM sales) dbms_utility ON 1=1",
+    'SELECT * FROM (sales s JOIN costs c ON dbms_random."VALUE" BETWEEN 0 AND 1 '
+    'JOIN (SELECT 424242 AS "VALUE" FROM regions) dbms_random ON 1=1)',
+    'SELECT * FROM sales s JOIN costs c ON dbms_random."VALUE" BETWEEN 0 AND 1 '
+    'JOIN (sales s2 JOIN (SELECT 424242 AS "VALUE" FROM regions) dbms_random ON 1=1) ON 1=1',
+    'SELECT t."VALUE" FROM sales s CROSS APPLY '
+    '(SELECT dbms_random."VALUE" FROM costs) t '
+    'JOIN (SELECT 424242 AS "VALUE" FROM regions) dbms_random ON 1=1 WHERE t."VALUE" < 1',
+    "SELECT * FROM sales s WHERE (SELECT COUNT(*) FROM "
+    "(SELECT 1 AS get_time FROM sales) dbms_utility JOIN "
+    "(SELECT dbms_utility.get_time FROM costs) c ON 1=1)>0",
+    "SELECT other.sales.quantity FROM sales",
+    'SELECT sys.dbms_random."VALUE" FROM sales dbms_random',
 ])
 def test_guard_refuses_before_connect(sql, monkeypatch):
     def forbidden_connection():
@@ -120,6 +142,21 @@ def test_guard_refuses_before_connect(sql, monkeypatch):
 def test_guard_accepts_comments_and_harmless_string():
     tools.validate_select("/* report */ SELECT COUNT(*) FROM sales WHERE sale_month=:month;")
     tools.validate_select("SELECT 'DROP TABLE sales' AS harmless FROM regions")
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT sales.quantity FROM sales",
+    "SELECT S.quantity FROM sales s",
+    'SELECT "dbms_utility".quantity FROM sales "dbms_utility"',
+    "SELECT dbms_utility.quantity FROM sales dbms_utility JOIN costs c ON 1=1",
+    "SELECT q.quantity FROM (SELECT s.quantity FROM sales s) q",
+    "SELECT s.quantity FROM sales s WHERE s.region_id = "
+    "(SELECT MAX(c.region_id) FROM costs c WHERE c.region_id=s.region_id)",
+    "SELECT * FROM sales s WHERE "
+    "(SELECT COUNT(*) FROM (SELECT s.quantity FROM costs) c) > 0",
+])
+def test_guard_accepts_in_scope_qualified_columns(sql):
+    tools.validate_select(sql)
 
 
 @pytest.fixture

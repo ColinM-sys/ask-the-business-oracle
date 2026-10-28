@@ -1,14 +1,25 @@
 """Constrained, read-only business SQL and Oracle vector policy retrieval."""
+import csv
 import json
+from pathlib import Path
 
 import sqlglot
 from sqlglot import exp
+from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
+from sqlglot.optimizer.qualify import qualify
+from sqlglot.optimizer.scope import ScopeType, traverse_scope
 
 from db import connect
 from policies import embed, ensure_policies
 
 TABLES = {"sales", "costs", "customers", "discounts", "products", "regions"}
 FUNCTIONS = {"SUM", "MIN", "MAX", "AVG", "COUNT", "ROUND", "NULLIF", "COALESCE", "ABS", "AND", "OR"}
+
+# CSV headers describe the governed tables loaded into Oracle.
+SCHEMA = {}
+for table in TABLES:
+    with (Path(__file__).parent / "data" / f"{table}.csv").open(encoding="utf-8-sig", newline="") as source:
+        SCHEMA[table] = {column: "UNKNOWN" for column in next(csv.reader(source))}
 
 
 def validate_select(sql):
@@ -38,6 +49,41 @@ def validate_select(sql):
             raise ValueError("Function is not in the read-only allowlist")
     if tree.find(exp.Dot) or any(c.name.lower() in {"nextval", "currval"} for c in tree.find_all(exp.Column)):
         raise ValueError("Object calls and sequence access are refused")
+    if tree.find(exp.Lateral) or any(table.args.get("joins") for table in tree.find_all(exp.Table)):
+        raise ValueError("Lateral sources and nested joins are refused")
+
+    # Oracle may interpret an unresolved qualified column as a package call,
+    # even when its qualifier matches a table alias. Resolve against each scope
+    # and the governed schema before allowing the database to parse the SQL.
+    scoped_tree = normalize_identifiers(tree.copy(), dialect="oracle")
+    for select in scoped_tree.find_all(exp.Select):
+        joins = select.args.get("joins") or []
+        for index, join in enumerate(joins):
+            later = {item.this.alias_or_name for item in joins[index + 1:]}
+            if any(column.table in later for column in join.find_all(exp.Column)):
+                raise ValueError("Column qualifier is not in scope")
+    for scope in traverse_scope(scoped_tree):
+        for column in scope.find_all(exp.Column):
+            if column.db or column.catalog:
+                raise ValueError("Qualified object calls are refused")
+            if not column.table:
+                continue
+            current = scope
+            while current and column.table not in {name for name, _ in current.references}:
+                if not current.can_be_correlated:
+                    current = None
+                elif current.scope_type == ScopeType.DERIVED_TABLE:
+                    # A derived table cannot see its immediate parent's sources.
+                    parent = current.parent
+                    current = parent.parent if parent and parent.can_be_correlated else None
+                else:
+                    current = current.parent
+            if current is None:
+                raise ValueError("Column qualifier is not in scope")
+    try:
+        qualify(scoped_tree, dialect="oracle", schema=SCHEMA, quote_identifiers=False)
+    except sqlglot.errors.OptimizeError as exc:
+        raise ValueError("Column does not resolve to a governed table") from exc
     return tree.sql(dialect="oracle", comments=False)
 
 
