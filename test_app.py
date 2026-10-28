@@ -3,6 +3,7 @@ import copy
 import json
 import runpy
 import subprocess
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -12,7 +13,7 @@ import pytest
 
 import tools
 from db import connect
-from agent import answer_question, parse_question
+from agent import answer_question, parse_question, summary_sql
 from app import app
 from critic import critique, supported
 from policies import ensure_policies, hash_embedding
@@ -257,6 +258,41 @@ def test_missing_region_has_descriptive_validation_error(monkeypatch, rows):
     response = app.test_client().post("/", data={"question": "West"})
     assert response.status_code == 400
     assert b"No sales/cost data found for West" in response.data
+@pytest.mark.parametrize("before,after,direction,below_precision", [
+    (25.001, 25.004, "rose", True),
+    (25.004, 25.001, "fell", True),
+    (25.001, 25.001, "was unchanged", False),
+    (25, 26, "rose", False),
+    (26, 25, "fell", False),
+])
+def test_margin_direction_uses_unrounded_sql(before, after, direction, below_precision, monkeypatch):
+    # Execute the production aggregation over controlled rows without changing Oracle data.
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE regions (region_id, region_name);
+            INSERT INTO regions VALUES (1, 'West');
+            CREATE TABLE sales (region_id, product_id, sale_month, net_revenue,
+                                quantity, unit_price, discount_pct);
+            CREATE TABLE costs (region_id, product_id, cost_month, unit_cogs, freight_per_unit);
+        """)
+        for month, margin in (("2025-06", before), ("2025-07", after)):
+            con.execute("INSERT INTO sales VALUES (1, 1, ?, 100.0, 1, 100.0, 0)", (month,))
+            con.execute("INSERT INTO costs VALUES (1, 1, ?, ?, 1.0)", (month, 99 - margin))
+        sql = summary_sql()
+        tools.validate_select(sql)
+        rows = [dict(row) for row in con.execute(sql, {"cutoff": "2025-07"})]
+
+    monkeypatch.setattr("agent.run_sql", lambda sql, params=None: {
+        "sql": sql, "params": params or {}, "rows": rows})
+    monkeypatch.setattr("agent.search_policies", lambda _: {"rows": []})
+    result = answer_question("West since July 2025")
+    finding = next(c for c in result["claims"] if c["kind"] == "finding")
+    rendered = "".join(p.get("text", str(p.get("value", "")) + p.get("suffix", ""))
+                       for p in finding["parts"])
+    assert rendered.startswith(f"West gross margin {direction} from ")
+    assert ("below display precision" in rendered) == below_precision
+    assert result["dropped_count"] == 0
 
 
 def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
@@ -264,6 +300,7 @@ def test_zero_baseline_freight_preserves_discount_and_freight(monkeypatch):
         "region_name": "West", "first_month": "2025-01", "last_month": "2025-09",
         "before_last_month": "2025-06", "after_first_month": "2025-07",
         "before_margin_pct": 40, "after_margin_pct": 25, "margin_drop_pts": 15,
+        "margin_direction": "fell",
         "before_discount_pct": 3, "after_discount_pct": 18,
         "before_freight_per_unit": 0, "after_freight_per_unit": 5,
         "freight_increase_pct": None,
