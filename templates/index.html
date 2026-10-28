@@ -40,7 +40,7 @@
     .selected { background: #fff1c7; }
     details { margin-top: 18px; }
     summary { cursor: pointer; }
-    :focus-visible { outline: 3px solid #d99c3a; outline-offset: 3px; }
+    :focus-visible { outline: 3px solid #a56708; outline-offset: 3px; }
   </style>
 </head>
 <body>
@@ -73,8 +73,14 @@
     {% else %}
     <p>No verified claims are available for this brief.</p>
     {% endfor %}
+    {% if not result.claims | selectattr('kind', 'equalto', 'reason') | list %}
+    <p class="hint">Explanation unavailable: no verified explanation is available for this brief.</p>
+    {% endif %}
+    {% if not result.claims | selectattr('kind', 'equalto', 'action') | list %}
+    <p class="hint">Recommendations unavailable: no verified recommendations are available for this brief.</p>
+    {% endif %}
     {% if result.claims %}
-    <p class="hint">Numbers in retained claims verified against cited SQL cells. Policy citations support the qualitative explanation.</p>
+    <p class="hint">Numbers in retained claims verified against cited SQL cells. Policy citations support qualitative claims.</p>
     {% endif %}
     <details><summary>Explore all evidence</summary>
       <p>{% for id in result.evidence %}<button type="button" class="citation" data-evidence="{{ id }}"{% if result.evidence[id].kind == 'policy' %} aria-label="{{ id }}: {{ result.evidence[id].rows[0].doc }}"{% endif %}>{{ id }}</button>{% endfor %}</p>
