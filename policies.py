@@ -38,62 +38,63 @@ def embed(cursor, text, backend):
 
 def ensure_policies():
     """Refresh only on source/model changes; never modify the business tables."""
-    sources = [(p.name, p.read_text(encoding="utf-8")) for p in sorted(DOCS.glob("*.md"))]
-    if not sources:
-        raise RuntimeError("No policy documents found")
-    fingerprint = hashlib.sha256(repr(sources).encode()).hexdigest()
-    with _lock, connect() as con:
-        cur = con.cursor()
-        if not cur.execute("SELECT table_name FROM user_tables WHERE table_name='POLICY_CHUNKS'").fetchone():
-            cur.execute("""CREATE TABLE policy_chunks (
-                id NUMBER PRIMARY KEY, doc VARCHAR2(255), chunk VARCHAR2(4000),
-                embedding VECTOR(*, FLOAT32), backend VARCHAR2(128), source_hash VARCHAR2(64))""")
-        backend = "hash-v1-512"
-        for (model,) in cur.execute(
-            "SELECT model_name FROM user_mining_models WHERE mining_function='EMBEDDING' ORDER BY model_name"
-        ).fetchall():
-            try:
-                embed(cur, "Business policy", model)
-                backend = model
-                break
-            except oracledb.DatabaseError as exc:
-                code = getattr(exc.args[0], "code", None) if exc.args else None
-                # ORA-40290: the model is incompatible with this SQL operator.
-                # Other failures indicate broken operations and must stop ingestion.
-                if code != 40290:
-                    raise
-                _logger.warning("Embedding model %r incompatible (ORA-%05d)", model, code)
-        else:
-            _logger.warning("Using hash-v1-512 fallback: no compatible embedding models available")
-        existing = cur.execute("SELECT DISTINCT backend, source_hash FROM policy_chunks").fetchall()
-        if existing == [(backend, fingerprint)]:
+    with _lock:
+        sources = [(p.name, p.read_text(encoding="utf-8")) for p in sorted(DOCS.glob("*.md"))]
+        if not sources:
+            raise RuntimeError("No policy documents found")
+        fingerprint = hashlib.sha256(repr(sources).encode()).hexdigest()
+        with connect() as con:
+            cur = con.cursor()
+            if not cur.execute("SELECT table_name FROM user_tables WHERE table_name='POLICY_CHUNKS'").fetchone():
+                cur.execute("""CREATE TABLE policy_chunks (
+                    id NUMBER PRIMARY KEY, doc VARCHAR2(255), chunk VARCHAR2(4000),
+                    embedding VECTOR(*, FLOAT32), backend VARCHAR2(128), source_hash VARCHAR2(64))""")
+            backend = "hash-v1-512"
+            for (model,) in cur.execute(
+                "SELECT model_name FROM user_mining_models WHERE mining_function='EMBEDDING' ORDER BY model_name"
+            ).fetchall():
+                try:
+                    embed(cur, "Business policy", model)
+                    backend = model
+                    break
+                except oracledb.DatabaseError as exc:
+                    code = getattr(exc.args[0], "code", None) if exc.args else None
+                    # ORA-40290: the model is incompatible with this SQL operator.
+                    # Other failures indicate broken operations and must stop ingestion.
+                    if code != 40290:
+                        raise
+                    _logger.warning("Embedding model %r incompatible (ORA-%05d)", model, code)
+            else:
+                _logger.warning("Using hash-v1-512 fallback: no compatible embedding models available")
+            existing = cur.execute("SELECT DISTINCT backend, source_hash FROM policy_chunks").fetchall()
+            if existing == [(backend, fingerprint)]:
+                return backend
+            chunks = []
+            for name, content in sources:
+                # Keep headings with their paragraphs; these short documents fit in one chunk.
+                paragraphs = re.split(r"\n\s*\n", content.strip())
+                chunk = ""
+                for paragraph in paragraphs:
+                    # At most four UTF-8 bytes per character; each part fits VARCHAR2(4000 BYTE).
+                    for offset in range(0, len(paragraph), 1000):
+                        part = paragraph[offset:offset + 1000]
+                        if chunk and (len(chunk) + len(part) + 2 > 1800
+                                      or len((chunk + "\n\n" + part).encode("utf-8")) > 4000):
+                            chunks.append((name, chunk))
+                            chunk = ""
+                        chunk = (chunk + "\n\n" + part).strip()
+                if chunk:
+                    chunks.append((name, chunk))
+            if not chunks:
+                raise RuntimeError("No policy content found")
+            vectors = [embed(cur, chunk, backend) for _, chunk in chunks]
+            cur.execute("DELETE FROM policy_chunks")
+            for index, ((doc, chunk), vector) in enumerate(zip(chunks, vectors), 1):
+                cur.execute("""INSERT INTO policy_chunks (id,doc,chunk,embedding,backend,source_hash)
+                    VALUES (:id,:doc,:chunk,:vector,:backend,:fingerprint)""",
+                    id=index, doc=doc, chunk=chunk, vector=vector, backend=backend, fingerprint=fingerprint)
+            con.commit()
             return backend
-        chunks = []
-        for name, content in sources:
-            # Keep headings with their paragraphs; these short documents fit in one chunk.
-            paragraphs = re.split(r"\n\s*\n", content.strip())
-            chunk = ""
-            for paragraph in paragraphs:
-                # At most four UTF-8 bytes per character; each part fits VARCHAR2(4000 BYTE).
-                for offset in range(0, len(paragraph), 1000):
-                    part = paragraph[offset:offset + 1000]
-                    if chunk and (len(chunk) + len(part) + 2 > 1800
-                                  or len((chunk + "\n\n" + part).encode("utf-8")) > 4000):
-                        chunks.append((name, chunk))
-                        chunk = ""
-                    chunk = (chunk + "\n\n" + part).strip()
-            if chunk:
-                chunks.append((name, chunk))
-        if not chunks:
-            raise RuntimeError("No policy content found")
-        vectors = [embed(cur, chunk, backend) for _, chunk in chunks]
-        cur.execute("DELETE FROM policy_chunks")
-        for index, ((doc, chunk), vector) in enumerate(zip(chunks, vectors), 1):
-            cur.execute("""INSERT INTO policy_chunks (id,doc,chunk,embedding,backend,source_hash)
-                VALUES (:id,:doc,:chunk,:vector,:backend,:fingerprint)""",
-                id=index, doc=doc, chunk=chunk, vector=vector, backend=backend, fingerprint=fingerprint)
-        con.commit()
-        return backend
 
 
 if __name__ == "__main__":
