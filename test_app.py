@@ -1,6 +1,7 @@
 """Unit checks and live integration against the existing local Oracle tables."""
 import copy
 import json
+import os
 import runpy
 import subprocess
 import sqlite3
@@ -182,6 +183,174 @@ def test_hashing_is_stable_and_normalized():
     assert abs(sum(v*v for v in first) - 1) < 0.000001
 
 
+@pytest.fixture
+def policy_cache_db(tmp_path, monkeypatch):
+    document = tmp_path / "policy.md"
+    document.write_text("Original policy", encoding="utf-8")
+    state = SimpleNamespace(
+        document=document, models=[("MODEL_A", 101, "v1")], rows=[],
+        statements=[], embeds=[], reads=0, lock_entries=0, commits=0, fail_backend=None,
+    )
+
+    class CountingLock:
+        def __init__(self):
+            self.lock = threading.Lock()
+
+        def __enter__(self):
+            state.lock_entries += 1
+            self.lock.acquire()
+
+        def __exit__(self, *args):
+            self.lock.release()
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def execute(self, sql, params=None, **kwargs):
+            state.statements.append(sql)
+            self.result = []
+            if "user_mining_models" in sql.lower():
+                # The original query requests just the name. The new metadata
+                # query also receives the model identity and modification time.
+                if sql.startswith("SELECT model_name FROM"):
+                    self.result = [(model[0],) for model in state.models]
+                else:
+                    self.result = list(state.models)
+            elif "user_tables" in sql.lower():
+                self.result = [("POLICY_CHUNKS",)]
+            elif sql.startswith("SELECT DISTINCT backend, source_hash"):
+                self.result = list({(row["backend"], row["fingerprint"]) for row in state.rows})
+            elif sql.startswith("SELECT backend FROM policy_chunks"):
+                self.result = [(state.rows[0]["backend"],)] if state.rows else []
+            elif "VECTOR_DISTANCE(" in sql:
+                self.result = [(row["id"], row["doc"], row["chunk"], 0.0) for row in state.rows]
+            elif sql.startswith("DELETE FROM policy_chunks"):
+                state.rows.clear()
+            elif sql.lstrip().startswith("INSERT INTO policy_chunks"):
+                state.rows.append(kwargs)
+            return self
+
+        def fetchone(self):
+            return self.result[0] if self.result else None
+
+        def fetchall(self):
+            return self.result
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def cursor(self):
+            return Cursor()
+
+        def commit(self):
+            state.commits += 1
+
+    def embedding(cursor, text, backend):
+        state.embeds.append((text, backend))
+        if text == "Business policy" and backend == state.fail_backend:
+            raise RuntimeError("Model probe failed")
+        return hash_embedding(text)
+
+    read_text = Path.read_text
+
+    def counted_read_text(path, *args, **kwargs):
+        if path == document:
+            state.reads += 1
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", counted_read_text)
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies._cache", None, raising=False)
+    monkeypatch.setattr("policies._lock", CountingLock())
+    monkeypatch.setattr("policies.connect", Connection)
+    monkeypatch.setattr("policies.embed", embedding)
+    monkeypatch.setattr(tools, "connect", Connection)
+    monkeypatch.setattr(tools, "embed", embedding)
+    return state
+
+
+def test_repeated_policy_search_skips_unchanged_setup(policy_cache_db):
+    state = policy_cache_db
+    first = tools.search_policies("West freight")
+    second = tools.search_policies("West discount")
+
+    assert first["rows"][0]["chunk"] == second["rows"][0]["chunk"] == "Original policy"
+    assert state.reads == 1
+    assert state.lock_entries == 1
+    assert sum("user_tables" in sql.lower() for sql in state.statements) == 1
+    assert state.embeds.count(("Business policy", "MODEL_A")) == 1
+    assert state.commits == 1
+
+
+def test_policy_source_change_refreshes_without_reprobing_model(policy_cache_db):
+    state = policy_cache_db
+    assert ensure_policies() == "MODEL_A"
+    before = state.document.stat()
+    state.document.write_text("Modified policy", encoding="utf-8")
+    os.utime(state.document, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
+
+    assert ensure_policies() == "MODEL_A"
+    assert [row["chunk"] for row in state.rows] == ["Modified policy"]
+    assert state.embeds.count(("Business policy", "MODEL_A")) == 1
+    assert state.commits == 2
+
+
+def test_existing_policy_setup_avoids_model_probe_after_restart(policy_cache_db, monkeypatch):
+    state = policy_cache_db
+    assert ensure_policies() == "MODEL_A"
+    monkeypatch.setattr("policies._cache", None)
+
+    assert ensure_policies() == "MODEL_A"
+    assert state.embeds.count(("Business policy", "MODEL_A")) == 1
+    assert state.commits == 1
+
+
+@pytest.mark.parametrize("replacement", [
+    ("MODEL_A", 102, "v1"),
+    ("MODEL_A", 101, "v2"),
+])
+@pytest.mark.parametrize("restart", [False, True])
+def test_policy_model_replacement_reembeds_even_when_name_is_unchanged(
+        policy_cache_db, replacement, restart, monkeypatch):
+    state = policy_cache_db
+    assert ensure_policies() == "MODEL_A"
+    old_fingerprint = state.rows[0]["fingerprint"]
+    state.models = [replacement]
+    if restart:
+        monkeypatch.setattr("policies._cache", None, raising=False)
+
+    assert ensure_policies() == "MODEL_A"
+    assert state.rows[0]["fingerprint"] != old_fingerprint
+    assert state.embeds.count(("Business policy", "MODEL_A")) == 2
+    assert state.embeds.count(("Original policy", "MODEL_A")) == 2
+    assert state.commits == 2
+
+
+def test_failed_policy_refresh_is_retried(policy_cache_db):
+    state = policy_cache_db
+    assert ensure_policies() == "MODEL_A"
+    state.models = [("MODEL_B", 102, "v2")]
+    state.fail_backend = "MODEL_B"
+
+    with pytest.raises(RuntimeError, match="Model probe failed"):
+        ensure_policies()
+
+    assert state.rows[0]["backend"] == "MODEL_A"
+    state.fail_backend = None
+    assert ensure_policies() == "MODEL_B"
+    assert state.rows[0]["backend"] == "MODEL_B"
+    assert state.embeds.count(("Business policy", "MODEL_B")) == 2
+    assert state.commits == 2
+
+
 @pytest.mark.parametrize("failure", [
     RuntimeError("private-driver-details"),
     oracledb.DatabaseError(SimpleNamespace(code=3113, message="private-driver-details")),
@@ -193,7 +362,10 @@ def test_policy_probe_propagates_unexpected_failures(failure, tmp_path, monkeypa
     connection.__enter__.return_value = connection
     cursor = connection.cursor.return_value
     cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
-    cursor.execute.return_value.fetchall.side_effect = [[("BROKEN_MODEL",)], []]
+    cursor.execute.return_value.fetchall.side_effect = lambda: (
+        [("BROKEN_MODEL", 1, "v1")]
+        if "user_mining_models" in cursor.execute.call_args.args[0].lower() else []
+    )
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
 
@@ -214,8 +386,8 @@ def test_policy_probe_propagates_unexpected_failures(failure, tmp_path, monkeypa
 
 @pytest.mark.parametrize("models, expected", [
     ([], "hash-v1-512"),
-    ([("INCOMPATIBLE_MODEL",)], "hash-v1-512"),
-    ([("INCOMPATIBLE_MODEL",), ("GOOD_MODEL",)], "GOOD_MODEL"),
+    ([("INCOMPATIBLE_MODEL", 1, "v1")], "hash-v1-512"),
+    ([("INCOMPATIBLE_MODEL", 1, "v1"), ("GOOD_MODEL", 2, "v1")], "GOOD_MODEL"),
 ])
 def test_policy_probe_fallback_is_explicit_and_sanitized(
         models, expected, tmp_path, monkeypatch, caplog):
@@ -224,7 +396,9 @@ def test_policy_probe_fallback_is_explicit_and_sanitized(
     connection.__enter__.return_value = connection
     cursor = connection.cursor.return_value
     cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
-    cursor.execute.return_value.fetchall.side_effect = [models, []]
+    cursor.execute.return_value.fetchall.side_effect = lambda: (
+        models if "user_mining_models" in cursor.execute.call_args.args[0].lower() else []
+    )
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
 
@@ -273,7 +447,10 @@ def test_empty_policy_documents_preserve_existing_rows(tmp_path, monkeypatch):
     connection.__enter__.return_value = connection
     cursor = connection.cursor.return_value
     cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
-    cursor.execute.return_value.fetchall.side_effect = [[], [("hash-v1-512", "old-hash")]]
+    cursor.execute.return_value.fetchall.side_effect = lambda: (
+        [] if "user_mining_models" in cursor.execute.call_args.args[0].lower()
+        else [("hash-v1-512", "old-hash")]
+    )
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
 

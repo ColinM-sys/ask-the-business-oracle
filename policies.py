@@ -14,6 +14,7 @@ from db import connect
 DOCS = Path(__file__).parent / "docs"
 _lock = threading.Lock()
 _logger = logging.getLogger(__name__)
+_cache = None
 
 
 def hash_embedding(text, dimensions=512):
@@ -36,39 +37,88 @@ def embed(cursor, text, backend):
     ).fetchone()[0]
 
 
+def _source_state():
+    directory = DOCS.resolve()
+    paths = sorted(directory.glob("*.md"))
+    if not paths:
+        raise RuntimeError("No policy documents found")
+    files = []
+    for path in paths:
+        stat = path.stat()
+        files.append((path.name, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns,
+                      stat.st_dev, stat.st_ino))
+    return directory, tuple(files)
+
+
+def _model_state(cur):
+    return tuple(cur.execute(
+        """SELECT model_name, object_id, last_ddl_time FROM user_mining_models
+           LEFT JOIN user_objects ON object_name = model_name AND object_type = 'MINING MODEL'
+           WHERE mining_function = 'EMBEDDING' ORDER BY model_name"""
+    ).fetchall())
+
+
 def ensure_policies():
     """Refresh only on source/model changes; never modify the business tables."""
-    with _lock:
-        sources = [(p.name, p.read_text(encoding="utf-8")) for p in sorted(DOCS.glob("*.md"))]
-        if not sources:
-            raise RuntimeError("No policy documents found")
-        fingerprint = hashlib.sha256(repr(sources).encode()).hexdigest()
-        with connect() as con:
-            cur = con.cursor()
+    global _cache
+    source_state = _source_state()
+    with connect() as con:
+        cur = con.cursor()
+        database = (connect, getattr(con, "username", None), getattr(con, "dsn", None))
+        cached = _cache
+        if cached and cached[:2] == (database, source_state):
+            models = _model_state(cur)
+            if cached[2] == models:
+                return cached[3]
+
+        with _lock:
+            # A waiting refresh must use current sources and models, not its old snapshot.
+            source_state = _source_state()
+            models = _model_state(cur)
+            cached = _cache
+            if cached and cached[:3] == (database, source_state, models):
+                return cached[3]
+            _cache = None
+            while True:
+                directory, files = source_state
+                sources = [(name, (directory / name).read_text(encoding="utf-8"))
+                           for name, *_ in files]
+                current_state = _source_state()
+                if current_state == source_state:
+                    break
+                source_state = current_state
+            # Include model identity so replacement under the same name refreshes vectors,
+            # including after a process restart.
+            fingerprint = hashlib.sha256(repr((sources, models)).encode()).hexdigest()
             if not cur.execute("SELECT table_name FROM user_tables WHERE table_name='POLICY_CHUNKS'").fetchone():
                 cur.execute("""CREATE TABLE policy_chunks (
                     id NUMBER PRIMARY KEY, doc VARCHAR2(255), chunk VARCHAR2(4000),
                     embedding VECTOR(*, FLOAT32), backend VARCHAR2(128), source_hash VARCHAR2(64))""")
-            backend = "hash-v1-512"
-            for (model,) in cur.execute(
-                "SELECT model_name FROM user_mining_models WHERE mining_function='EMBEDDING' ORDER BY model_name"
-            ).fetchall():
-                try:
-                    embed(cur, "Business policy", model)
-                    backend = model
-                    break
-                except oracledb.DatabaseError as exc:
-                    code = getattr(exc.args[0], "code", None) if exc.args else None
-                    # ORA-40290: the model is incompatible with this SQL operator.
-                    # Other failures indicate broken operations and must stop ingestion.
-                    if code != 40290:
-                        raise
-                    _logger.warning("Embedding model %r incompatible (ORA-%05d)", model, code)
-            else:
-                _logger.warning("Using hash-v1-512 fallback: no compatible embedding models available")
             existing = cur.execute("SELECT DISTINCT backend, source_hash FROM policy_chunks").fetchall()
-            if existing == [(backend, fingerprint)]:
+            if (len(existing) == 1 and existing[0][1] == fingerprint
+                    and (existing[0][0] == "hash-v1-512"
+                         or any(model[0] == existing[0][0] for model in models))):
+                backend = existing[0][0]
+                _cache = (database, source_state, models, backend)
                 return backend
+            if cached and cached[0] == database and cached[2] == models:
+                backend = cached[3]
+            else:
+                backend = "hash-v1-512"
+                for model, _, _ in models:
+                    try:
+                        embed(cur, "Business policy", model)
+                        backend = model
+                        break
+                    except oracledb.DatabaseError as exc:
+                        code = getattr(exc.args[0], "code", None) if exc.args else None
+                        # ORA-40290: the model is incompatible with this SQL operator.
+                        # Other failures indicate broken operations and must stop ingestion.
+                        if code != 40290:
+                            raise
+                        _logger.warning("Embedding model %r incompatible (ORA-%05d)", model, code)
+                else:
+                    _logger.warning("Using hash-v1-512 fallback: no compatible embedding models available")
             chunks = []
             for name, content in sources:
                 # Keep headings with their paragraphs; these short documents fit in one chunk.
@@ -94,6 +144,7 @@ def ensure_policies():
                     VALUES (:id,:doc,:chunk,:vector,:backend,:fingerprint)""",
                     id=index, doc=doc, chunk=chunk, vector=vector, backend=backend, fingerprint=fingerprint)
             con.commit()
+            _cache = (database, source_state, models, backend)
             return backend
 
 
