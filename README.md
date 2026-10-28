@@ -26,6 +26,10 @@ month onward, including later years. It displays those boundaries explicitly.
 Margin includes COGS and freight and is weighted by net revenue; discounts use
 gross-sales weights; freight per unit uses quantity weights. Freight movement
 therefore includes product mix and can differ from the contract's rate change.
+Changes and margin direction use unrounded aggregates. SQL rounds period metrics
+and changes independently to two decimal places, so subtracting displayed
+endpoints may give a different result. For example, margins of 25.004% and
+24.996% both round to 25%, but the drop is 0.01 percentage points.
 The other regions provide context, not a causal decomposition.
 
 Every number in the brief, including dates and SQL-derived differences, names an
