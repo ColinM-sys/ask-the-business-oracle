@@ -1,4 +1,7 @@
-"""Deterministic cell-level grounding for all numbers in the brief."""
+"""Deterministic cell-level grounding for structured numeric parts.
+
+Numbers written as words are unchecked.
+"""
 from decimal import Decimal, InvalidOperation
 import re
 
