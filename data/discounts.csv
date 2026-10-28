@@ -1,0 +1,7 @@
+discount_id,region_id,program_name,start_date,end_date,max_discount_pct,approved_by,approver_level
+1,1,Standard West terms,2024-10-01,2025-06-30,8.0,Dana Ortiz,Regional manager
+2,1,Q3 West volume push,2025-07-01,,22.0,Dana Ortiz,Regional manager
+3,2,Standard Central terms,2024-10-01,,8.0,Sam Patel,Regional manager
+4,3,Standard East terms,2024-10-01,,8.0,Lee Morgan,Regional manager
+5,4,Standard South terms,2024-10-01,,8.0,Ari Brooks,Regional manager
+6,3,East enterprise renewal,2025-11-01,2026-01-31,12.0,VP Sales,VP

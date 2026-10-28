@@ -1,0 +1,9 @@
+product_id,product_name,category,list_price
+101,Industrial Pump P100,Pumps,1200.0
+102,Industrial Pump P200,Pumps,2100.0
+201,Valve Kit V10,Valves,180.0
+202,Valve Kit V20,Valves,340.0
+301,Sensor Pack S1,Sensors,450.0
+302,Sensor Pack S2,Sensors,780.0
+401,Hose Assembly H5,Hoses,95.0
+402,Hose Assembly H9,Hoses,160.0

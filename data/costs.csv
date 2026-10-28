@@ -1,0 +1,769 @@
+cost_month,region_id,product_id,unit_cogs,freight_per_unit,carrier
+2024-10,1,101,720.0,38.12,Norcal Freight
+2024-10,1,102,1260.0,38.2,Norcal Freight
+2024-10,1,201,99.0,5.82,Norcal Freight
+2024-10,1,202,190.0,6.07,Norcal Freight
+2024-10,1,301,230.0,4.87,Norcal Freight
+2024-10,1,302,400.0,4.87,Norcal Freight
+2024-10,1,401,52.0,3.89,Norcal Freight
+2024-10,1,402,88.0,3.96,Norcal Freight
+2024-10,2,101,720.0,38.03,Continental Freight
+2024-10,2,102,1260.0,37.49,Continental Freight
+2024-10,2,201,99.0,5.99,Continental Freight
+2024-10,2,202,190.0,6.01,Continental Freight
+2024-10,2,301,230.0,5.07,Continental Freight
+2024-10,2,302,400.0,5.11,Continental Freight
+2024-10,2,401,52.0,4.02,Continental Freight
+2024-10,2,402,88.0,3.94,Continental Freight
+2024-10,3,101,720.0,37.94,Continental Freight
+2024-10,3,102,1260.0,37.79,Continental Freight
+2024-10,3,201,99.0,5.85,Continental Freight
+2024-10,3,202,190.0,6.06,Continental Freight
+2024-10,3,301,230.0,4.96,Continental Freight
+2024-10,3,302,400.0,4.97,Continental Freight
+2024-10,3,401,52.0,4.09,Continental Freight
+2024-10,3,402,88.0,3.89,Continental Freight
+2024-10,4,101,720.0,38.35,Continental Freight
+2024-10,4,102,1260.0,38.33,Continental Freight
+2024-10,4,201,99.0,5.84,Continental Freight
+2024-10,4,202,190.0,6.08,Continental Freight
+2024-10,4,301,230.0,5.09,Continental Freight
+2024-10,4,302,400.0,4.88,Continental Freight
+2024-10,4,401,52.0,3.93,Continental Freight
+2024-10,4,402,88.0,4.01,Continental Freight
+2024-11,1,101,721.44,37.18,Norcal Freight
+2024-11,1,102,1262.52,37.28,Norcal Freight
+2024-11,1,201,99.2,5.99,Norcal Freight
+2024-11,1,202,190.38,6.13,Norcal Freight
+2024-11,1,301,230.46,4.87,Norcal Freight
+2024-11,1,302,400.8,5.09,Norcal Freight
+2024-11,1,401,52.1,4.09,Norcal Freight
+2024-11,1,402,88.18,3.9,Norcal Freight
+2024-11,2,101,721.44,38.35,Continental Freight
+2024-11,2,102,1262.52,38.09,Continental Freight
+2024-11,2,201,99.2,5.83,Continental Freight
+2024-11,2,202,190.38,5.85,Continental Freight
+2024-11,2,301,230.46,5.08,Continental Freight
+2024-11,2,302,400.8,4.92,Continental Freight
+2024-11,2,401,52.1,3.98,Continental Freight
+2024-11,2,402,88.18,4.0,Continental Freight
+2024-11,3,101,721.44,38.83,Continental Freight
+2024-11,3,102,1262.52,38.92,Continental Freight
+2024-11,3,201,99.2,5.88,Continental Freight
+2024-11,3,202,190.38,5.82,Continental Freight
+2024-11,3,301,230.46,4.97,Continental Freight
+2024-11,3,302,400.8,5.13,Continental Freight
+2024-11,3,401,52.1,4.07,Continental Freight
+2024-11,3,402,88.18,3.95,Continental Freight
+2024-11,4,101,721.44,38.45,Continental Freight
+2024-11,4,102,1262.52,38.53,Continental Freight
+2024-11,4,201,99.2,6.1,Continental Freight
+2024-11,4,202,190.38,6.06,Continental Freight
+2024-11,4,301,230.46,5.0,Continental Freight
+2024-11,4,302,400.8,4.91,Continental Freight
+2024-11,4,401,52.1,3.93,Continental Freight
+2024-11,4,402,88.18,3.89,Continental Freight
+2024-12,1,101,722.88,38.54,Norcal Freight
+2024-12,1,102,1265.04,37.0,Norcal Freight
+2024-12,1,201,99.4,5.93,Norcal Freight
+2024-12,1,202,190.76,5.84,Norcal Freight
+2024-12,1,301,230.92,4.99,Norcal Freight
+2024-12,1,302,401.6,5.13,Norcal Freight
+2024-12,1,401,52.21,4.01,Norcal Freight
+2024-12,1,402,88.35,3.89,Norcal Freight
+2024-12,2,101,722.88,38.02,Continental Freight
+2024-12,2,102,1265.04,38.8,Continental Freight
+2024-12,2,201,99.4,5.84,Continental Freight
+2024-12,2,202,190.76,5.84,Continental Freight
+2024-12,2,301,230.92,5.11,Continental Freight
+2024-12,2,302,401.6,4.97,Continental Freight
+2024-12,2,401,52.21,4.11,Continental Freight
+2024-12,2,402,88.35,4.02,Continental Freight
+2024-12,3,101,722.88,38.18,Continental Freight
+2024-12,3,102,1265.04,36.95,Continental Freight
+2024-12,3,201,99.4,5.85,Continental Freight
+2024-12,3,202,190.76,6.06,Continental Freight
+2024-12,3,301,230.92,5.02,Continental Freight
+2024-12,3,302,401.6,4.94,Continental Freight
+2024-12,3,401,52.21,3.94,Continental Freight
+2024-12,3,402,88.35,4.04,Continental Freight
+2024-12,4,101,722.88,37.58,Continental Freight
+2024-12,4,102,1265.04,37.47,Continental Freight
+2024-12,4,201,99.4,5.87,Continental Freight
+2024-12,4,202,190.76,6.05,Continental Freight
+2024-12,4,301,230.92,4.99,Continental Freight
+2024-12,4,302,401.6,5.13,Continental Freight
+2024-12,4,401,52.21,4.1,Continental Freight
+2024-12,4,402,88.35,3.88,Continental Freight
+2025-01,1,101,724.32,38.28,Norcal Freight
+2025-01,1,102,1267.56,38.14,Norcal Freight
+2025-01,1,201,99.59,5.86,Norcal Freight
+2025-01,1,202,191.14,6.01,Norcal Freight
+2025-01,1,301,231.38,5.0,Norcal Freight
+2025-01,1,302,402.4,4.89,Norcal Freight
+2025-01,1,401,52.31,3.96,Norcal Freight
+2025-01,1,402,88.53,3.9,Norcal Freight
+2025-01,2,101,724.32,37.42,Continental Freight
+2025-01,2,102,1267.56,37.51,Continental Freight
+2025-01,2,201,99.59,5.98,Continental Freight
+2025-01,2,202,191.14,6.02,Continental Freight
+2025-01,2,301,231.38,4.94,Continental Freight
+2025-01,2,302,402.4,5.15,Continental Freight
+2025-01,2,401,52.31,4.07,Continental Freight
+2025-01,2,402,88.53,4.01,Continental Freight
+2025-01,3,101,724.32,38.38,Continental Freight
+2025-01,3,102,1267.56,38.12,Continental Freight
+2025-01,3,201,99.59,6.16,Continental Freight
+2025-01,3,202,191.14,5.86,Continental Freight
+2025-01,3,301,231.38,5.11,Continental Freight
+2025-01,3,302,402.4,4.93,Continental Freight
+2025-01,3,401,52.31,4.09,Continental Freight
+2025-01,3,402,88.53,4.06,Continental Freight
+2025-01,4,101,724.32,37.21,Continental Freight
+2025-01,4,102,1267.56,37.5,Continental Freight
+2025-01,4,201,99.59,5.9,Continental Freight
+2025-01,4,202,191.14,5.94,Continental Freight
+2025-01,4,301,231.38,5.06,Continental Freight
+2025-01,4,302,402.4,5.11,Continental Freight
+2025-01,4,401,52.31,4.0,Continental Freight
+2025-01,4,402,88.53,3.94,Continental Freight
+2025-02,1,101,725.76,38.93,Norcal Freight
+2025-02,1,102,1270.08,36.98,Norcal Freight
+2025-02,1,201,99.79,6.05,Norcal Freight
+2025-02,1,202,191.52,6.12,Norcal Freight
+2025-02,1,301,231.84,4.86,Norcal Freight
+2025-02,1,302,403.2,4.95,Norcal Freight
+2025-02,1,401,52.42,3.91,Norcal Freight
+2025-02,1,402,88.7,4.12,Norcal Freight
+2025-02,2,101,725.76,37.23,Continental Freight
+2025-02,2,102,1270.08,37.87,Continental Freight
+2025-02,2,201,99.79,6.07,Continental Freight
+2025-02,2,202,191.52,6.02,Continental Freight
+2025-02,2,301,231.84,4.88,Continental Freight
+2025-02,2,302,403.2,5.13,Continental Freight
+2025-02,2,401,52.42,4.05,Continental Freight
+2025-02,2,402,88.7,3.92,Continental Freight
+2025-02,3,101,725.76,36.94,Continental Freight
+2025-02,3,102,1270.08,37.7,Continental Freight
+2025-02,3,201,99.79,6.02,Continental Freight
+2025-02,3,202,191.52,5.97,Continental Freight
+2025-02,3,301,231.84,4.86,Continental Freight
+2025-02,3,302,403.2,4.96,Continental Freight
+2025-02,3,401,52.42,4.1,Continental Freight
+2025-02,3,402,88.7,4.11,Continental Freight
+2025-02,4,101,725.76,36.95,Continental Freight
+2025-02,4,102,1270.08,37.68,Continental Freight
+2025-02,4,201,99.79,6.07,Continental Freight
+2025-02,4,202,191.52,6.06,Continental Freight
+2025-02,4,301,231.84,4.96,Continental Freight
+2025-02,4,302,403.2,5.02,Continental Freight
+2025-02,4,401,52.42,4.09,Continental Freight
+2025-02,4,402,88.7,4.11,Continental Freight
+2025-03,1,101,727.2,38.57,Norcal Freight
+2025-03,1,102,1272.6,38.97,Norcal Freight
+2025-03,1,201,99.99,5.91,Norcal Freight
+2025-03,1,202,191.9,5.88,Norcal Freight
+2025-03,1,301,232.3,5.09,Norcal Freight
+2025-03,1,302,404.0,4.9,Norcal Freight
+2025-03,1,401,52.52,3.98,Norcal Freight
+2025-03,1,402,88.88,3.92,Norcal Freight
+2025-03,2,101,727.2,38.97,Continental Freight
+2025-03,2,102,1272.6,38.64,Continental Freight
+2025-03,2,201,99.99,5.97,Continental Freight
+2025-03,2,202,191.9,6.06,Continental Freight
+2025-03,2,301,232.3,5.07,Continental Freight
+2025-03,2,302,404.0,4.92,Continental Freight
+2025-03,2,401,52.52,3.92,Continental Freight
+2025-03,2,402,88.88,4.05,Continental Freight
+2025-03,3,101,727.2,37.73,Continental Freight
+2025-03,3,102,1272.6,36.95,Continental Freight
+2025-03,3,201,99.99,5.99,Continental Freight
+2025-03,3,202,191.9,5.89,Continental Freight
+2025-03,3,301,232.3,5.13,Continental Freight
+2025-03,3,302,404.0,4.95,Continental Freight
+2025-03,3,401,52.52,4.08,Continental Freight
+2025-03,3,402,88.88,4.09,Continental Freight
+2025-03,4,101,727.2,37.37,Continental Freight
+2025-03,4,102,1272.6,38.36,Continental Freight
+2025-03,4,201,99.99,5.96,Continental Freight
+2025-03,4,202,191.9,5.92,Continental Freight
+2025-03,4,301,232.3,4.87,Continental Freight
+2025-03,4,302,404.0,5.08,Continental Freight
+2025-03,4,401,52.52,3.96,Continental Freight
+2025-03,4,402,88.88,4.0,Continental Freight
+2025-04,1,101,728.64,38.41,Norcal Freight
+2025-04,1,102,1275.12,38.78,Norcal Freight
+2025-04,1,201,100.19,5.94,Norcal Freight
+2025-04,1,202,192.28,5.83,Norcal Freight
+2025-04,1,301,232.76,5.11,Norcal Freight
+2025-04,1,302,404.8,4.93,Norcal Freight
+2025-04,1,401,52.62,4.02,Norcal Freight
+2025-04,1,402,89.06,4.12,Norcal Freight
+2025-04,2,101,728.64,36.95,Continental Freight
+2025-04,2,102,1275.12,38.22,Continental Freight
+2025-04,2,201,100.19,5.94,Continental Freight
+2025-04,2,202,192.28,6.1,Continental Freight
+2025-04,2,301,232.76,4.98,Continental Freight
+2025-04,2,302,404.8,5.15,Continental Freight
+2025-04,2,401,52.62,3.91,Continental Freight
+2025-04,2,402,89.06,4.1,Continental Freight
+2025-04,3,101,728.64,37.29,Continental Freight
+2025-04,3,102,1275.12,36.96,Continental Freight
+2025-04,3,201,100.19,5.98,Continental Freight
+2025-04,3,202,192.28,6.01,Continental Freight
+2025-04,3,301,232.76,5.09,Continental Freight
+2025-04,3,302,404.8,5.06,Continental Freight
+2025-04,3,401,52.62,4.11,Continental Freight
+2025-04,3,402,89.06,4.06,Continental Freight
+2025-04,4,101,728.64,37.31,Continental Freight
+2025-04,4,102,1275.12,37.84,Continental Freight
+2025-04,4,201,100.19,6.16,Continental Freight
+2025-04,4,202,192.28,6.15,Continental Freight
+2025-04,4,301,232.76,5.04,Continental Freight
+2025-04,4,302,404.8,5.05,Continental Freight
+2025-04,4,401,52.62,3.91,Continental Freight
+2025-04,4,402,89.06,4.1,Continental Freight
+2025-05,1,101,730.08,38.02,Norcal Freight
+2025-05,1,102,1277.64,38.38,Norcal Freight
+2025-05,1,201,100.39,5.94,Norcal Freight
+2025-05,1,202,192.66,6.07,Norcal Freight
+2025-05,1,301,233.22,5.02,Norcal Freight
+2025-05,1,302,405.6,4.91,Norcal Freight
+2025-05,1,401,52.73,4.04,Norcal Freight
+2025-05,1,402,89.23,3.97,Norcal Freight
+2025-05,2,101,730.08,38.57,Continental Freight
+2025-05,2,102,1277.64,37.26,Continental Freight
+2025-05,2,201,100.39,6.02,Continental Freight
+2025-05,2,202,192.66,5.97,Continental Freight
+2025-05,2,301,233.22,5.1,Continental Freight
+2025-05,2,302,405.6,4.94,Continental Freight
+2025-05,2,401,52.73,3.93,Continental Freight
+2025-05,2,402,89.23,4.07,Continental Freight
+2025-05,3,101,730.08,38.24,Continental Freight
+2025-05,3,102,1277.64,37.59,Continental Freight
+2025-05,3,201,100.39,5.98,Continental Freight
+2025-05,3,202,192.66,6.06,Continental Freight
+2025-05,3,301,233.22,5.0,Continental Freight
+2025-05,3,302,405.6,5.09,Continental Freight
+2025-05,3,401,52.73,4.11,Continental Freight
+2025-05,3,402,89.23,4.06,Continental Freight
+2025-05,4,101,730.08,38.36,Continental Freight
+2025-05,4,102,1277.64,37.51,Continental Freight
+2025-05,4,201,100.39,6.06,Continental Freight
+2025-05,4,202,192.66,6.04,Continental Freight
+2025-05,4,301,233.22,4.88,Continental Freight
+2025-05,4,302,405.6,5.14,Continental Freight
+2025-05,4,401,52.73,3.94,Continental Freight
+2025-05,4,402,89.23,3.95,Continental Freight
+2025-06,1,101,731.52,38.7,Norcal Freight
+2025-06,1,102,1280.16,37.2,Norcal Freight
+2025-06,1,201,100.58,5.84,Norcal Freight
+2025-06,1,202,193.04,6.17,Norcal Freight
+2025-06,1,301,233.68,5.03,Norcal Freight
+2025-06,1,302,406.4,5.08,Norcal Freight
+2025-06,1,401,52.83,3.99,Norcal Freight
+2025-06,1,402,89.41,4.09,Norcal Freight
+2025-06,2,101,731.52,38.17,Continental Freight
+2025-06,2,102,1280.16,38.5,Continental Freight
+2025-06,2,201,100.58,5.96,Continental Freight
+2025-06,2,202,193.04,5.96,Continental Freight
+2025-06,2,301,233.68,4.89,Continental Freight
+2025-06,2,302,406.4,5.06,Continental Freight
+2025-06,2,401,52.83,4.09,Continental Freight
+2025-06,2,402,89.41,4.09,Continental Freight
+2025-06,3,101,731.52,38.88,Continental Freight
+2025-06,3,102,1280.16,38.63,Continental Freight
+2025-06,3,201,100.58,5.9,Continental Freight
+2025-06,3,202,193.04,6.11,Continental Freight
+2025-06,3,301,233.68,5.06,Continental Freight
+2025-06,3,302,406.4,4.99,Continental Freight
+2025-06,3,401,52.83,4.01,Continental Freight
+2025-06,3,402,89.41,4.1,Continental Freight
+2025-06,4,101,731.52,37.14,Continental Freight
+2025-06,4,102,1280.16,37.16,Continental Freight
+2025-06,4,201,100.58,5.99,Continental Freight
+2025-06,4,202,193.04,6.01,Continental Freight
+2025-06,4,301,233.68,5.02,Continental Freight
+2025-06,4,302,406.4,4.95,Continental Freight
+2025-06,4,401,52.83,4.06,Continental Freight
+2025-06,4,402,89.41,3.99,Continental Freight
+2025-07,1,101,732.96,61.95,Pacific Haul Logistics
+2025-07,1,102,1282.68,62.23,Pacific Haul Logistics
+2025-07,1,201,100.78,9.56,Pacific Haul Logistics
+2025-07,1,202,193.42,9.83,Pacific Haul Logistics
+2025-07,1,301,234.14,7.97,Pacific Haul Logistics
+2025-07,1,302,407.2,7.84,Pacific Haul Logistics
+2025-07,1,401,52.94,6.54,Pacific Haul Logistics
+2025-07,1,402,89.58,6.38,Pacific Haul Logistics
+2025-07,2,101,732.96,38.57,Continental Freight
+2025-07,2,102,1282.68,38.77,Continental Freight
+2025-07,2,201,100.78,5.92,Continental Freight
+2025-07,2,202,193.42,6.1,Continental Freight
+2025-07,2,301,234.14,5.0,Continental Freight
+2025-07,2,302,407.2,4.92,Continental Freight
+2025-07,2,401,52.94,3.99,Continental Freight
+2025-07,2,402,89.58,4.05,Continental Freight
+2025-07,3,101,732.96,37.39,Continental Freight
+2025-07,3,102,1282.68,37.63,Continental Freight
+2025-07,3,201,100.78,6.14,Continental Freight
+2025-07,3,202,193.42,5.85,Continental Freight
+2025-07,3,301,234.14,4.9,Continental Freight
+2025-07,3,302,407.2,4.96,Continental Freight
+2025-07,3,401,52.94,3.92,Continental Freight
+2025-07,3,402,89.58,3.93,Continental Freight
+2025-07,4,101,732.96,37.81,Continental Freight
+2025-07,4,102,1282.68,37.61,Continental Freight
+2025-07,4,201,100.78,5.99,Continental Freight
+2025-07,4,202,193.42,5.84,Continental Freight
+2025-07,4,301,234.14,5.1,Continental Freight
+2025-07,4,302,407.2,4.97,Continental Freight
+2025-07,4,401,52.94,4.06,Continental Freight
+2025-07,4,402,89.58,4.11,Continental Freight
+2025-08,1,101,734.4,59.05,Pacific Haul Logistics
+2025-08,1,102,1285.2,62.19,Pacific Haul Logistics
+2025-08,1,201,100.98,9.64,Pacific Haul Logistics
+2025-08,1,202,193.8,9.59,Pacific Haul Logistics
+2025-08,1,301,234.6,8.21,Pacific Haul Logistics
+2025-08,1,302,408.0,7.9,Pacific Haul Logistics
+2025-08,1,401,53.04,6.36,Pacific Haul Logistics
+2025-08,1,402,89.76,6.55,Pacific Haul Logistics
+2025-08,2,101,734.4,38.77,Continental Freight
+2025-08,2,102,1285.2,38.09,Continental Freight
+2025-08,2,201,100.98,6.08,Continental Freight
+2025-08,2,202,193.8,6.11,Continental Freight
+2025-08,2,301,234.6,5.12,Continental Freight
+2025-08,2,302,408.0,5.0,Continental Freight
+2025-08,2,401,53.04,3.95,Continental Freight
+2025-08,2,402,89.76,4.0,Continental Freight
+2025-08,3,101,734.4,37.75,Continental Freight
+2025-08,3,102,1285.2,38.39,Continental Freight
+2025-08,3,201,100.98,6.11,Continental Freight
+2025-08,3,202,193.8,6.08,Continental Freight
+2025-08,3,301,234.6,5.1,Continental Freight
+2025-08,3,302,408.0,5.13,Continental Freight
+2025-08,3,401,53.04,4.12,Continental Freight
+2025-08,3,402,89.76,4.01,Continental Freight
+2025-08,4,101,734.4,38.93,Continental Freight
+2025-08,4,102,1285.2,38.21,Continental Freight
+2025-08,4,201,100.98,6.06,Continental Freight
+2025-08,4,202,193.8,5.85,Continental Freight
+2025-08,4,301,234.6,4.98,Continental Freight
+2025-08,4,302,408.0,5.11,Continental Freight
+2025-08,4,401,53.04,3.92,Continental Freight
+2025-08,4,402,89.76,3.94,Continental Freight
+2025-09,1,101,735.84,60.17,Pacific Haul Logistics
+2025-09,1,102,1287.72,60.63,Pacific Haul Logistics
+2025-09,1,201,101.18,9.51,Pacific Haul Logistics
+2025-09,1,202,194.18,9.82,Pacific Haul Logistics
+2025-09,1,301,235.06,7.89,Pacific Haul Logistics
+2025-09,1,302,408.8,8.22,Pacific Haul Logistics
+2025-09,1,401,53.14,6.37,Pacific Haul Logistics
+2025-09,1,402,89.94,6.53,Pacific Haul Logistics
+2025-09,2,101,735.84,37.93,Continental Freight
+2025-09,2,102,1287.72,38.57,Continental Freight
+2025-09,2,201,101.18,5.84,Continental Freight
+2025-09,2,202,194.18,6.16,Continental Freight
+2025-09,2,301,235.06,4.92,Continental Freight
+2025-09,2,302,408.8,4.87,Continental Freight
+2025-09,2,401,53.14,4.11,Continental Freight
+2025-09,2,402,89.94,3.89,Continental Freight
+2025-09,3,101,735.84,36.93,Continental Freight
+2025-09,3,102,1287.72,37.42,Continental Freight
+2025-09,3,201,101.18,6.12,Continental Freight
+2025-09,3,202,194.18,6.04,Continental Freight
+2025-09,3,301,235.06,4.92,Continental Freight
+2025-09,3,302,408.8,4.99,Continental Freight
+2025-09,3,401,53.14,3.91,Continental Freight
+2025-09,3,402,89.94,4.11,Continental Freight
+2025-09,4,101,735.84,37.92,Continental Freight
+2025-09,4,102,1287.72,37.44,Continental Freight
+2025-09,4,201,101.18,5.95,Continental Freight
+2025-09,4,202,194.18,6.04,Continental Freight
+2025-09,4,301,235.06,5.14,Continental Freight
+2025-09,4,302,408.8,5.07,Continental Freight
+2025-09,4,401,53.14,4.07,Continental Freight
+2025-09,4,402,89.94,3.92,Continental Freight
+2025-10,1,101,737.28,60.11,Pacific Haul Logistics
+2025-10,1,102,1290.24,61.09,Pacific Haul Logistics
+2025-10,1,201,101.38,9.85,Pacific Haul Logistics
+2025-10,1,202,194.56,9.64,Pacific Haul Logistics
+2025-10,1,301,235.52,8.2,Pacific Haul Logistics
+2025-10,1,302,409.6,7.94,Pacific Haul Logistics
+2025-10,1,401,53.25,6.57,Pacific Haul Logistics
+2025-10,1,402,90.11,6.28,Pacific Haul Logistics
+2025-10,2,101,737.28,38.21,Continental Freight
+2025-10,2,102,1290.24,38.75,Continental Freight
+2025-10,2,201,101.38,5.91,Continental Freight
+2025-10,2,202,194.56,6.07,Continental Freight
+2025-10,2,301,235.52,4.94,Continental Freight
+2025-10,2,302,409.6,5.06,Continental Freight
+2025-10,2,401,53.25,4.07,Continental Freight
+2025-10,2,402,90.11,4.07,Continental Freight
+2025-10,3,101,737.28,38.15,Continental Freight
+2025-10,3,102,1290.24,36.95,Continental Freight
+2025-10,3,201,101.38,6.01,Continental Freight
+2025-10,3,202,194.56,6.06,Continental Freight
+2025-10,3,301,235.52,4.87,Continental Freight
+2025-10,3,302,409.6,5.04,Continental Freight
+2025-10,3,401,53.25,3.88,Continental Freight
+2025-10,3,402,90.11,3.98,Continental Freight
+2025-10,4,101,737.28,37.98,Continental Freight
+2025-10,4,102,1290.24,37.85,Continental Freight
+2025-10,4,201,101.38,5.95,Continental Freight
+2025-10,4,202,194.56,6.14,Continental Freight
+2025-10,4,301,235.52,4.99,Continental Freight
+2025-10,4,302,409.6,4.9,Continental Freight
+2025-10,4,401,53.25,3.92,Continental Freight
+2025-10,4,402,90.11,4.01,Continental Freight
+2025-11,1,101,738.72,61.35,Pacific Haul Logistics
+2025-11,1,102,1292.76,61.22,Pacific Haul Logistics
+2025-11,1,201,101.57,9.84,Pacific Haul Logistics
+2025-11,1,202,194.94,9.76,Pacific Haul Logistics
+2025-11,1,301,235.98,7.98,Pacific Haul Logistics
+2025-11,1,302,410.4,8.16,Pacific Haul Logistics
+2025-11,1,401,53.35,6.44,Pacific Haul Logistics
+2025-11,1,402,90.29,6.33,Pacific Haul Logistics
+2025-11,2,101,738.72,37.42,Continental Freight
+2025-11,2,102,1292.76,38.99,Continental Freight
+2025-11,2,201,101.57,5.92,Continental Freight
+2025-11,2,202,194.94,5.98,Continental Freight
+2025-11,2,301,235.98,5.08,Continental Freight
+2025-11,2,302,410.4,5.02,Continental Freight
+2025-11,2,401,53.35,4.04,Continental Freight
+2025-11,2,402,90.29,3.96,Continental Freight
+2025-11,3,101,738.72,37.99,Continental Freight
+2025-11,3,102,1292.76,37.6,Continental Freight
+2025-11,3,201,101.57,6.0,Continental Freight
+2025-11,3,202,194.94,5.95,Continental Freight
+2025-11,3,301,235.98,4.93,Continental Freight
+2025-11,3,302,410.4,4.93,Continental Freight
+2025-11,3,401,53.35,4.02,Continental Freight
+2025-11,3,402,90.29,4.09,Continental Freight
+2025-11,4,101,738.72,38.13,Continental Freight
+2025-11,4,102,1292.76,38.04,Continental Freight
+2025-11,4,201,101.57,5.89,Continental Freight
+2025-11,4,202,194.94,5.91,Continental Freight
+2025-11,4,301,235.98,4.97,Continental Freight
+2025-11,4,302,410.4,5.02,Continental Freight
+2025-11,4,401,53.35,3.94,Continental Freight
+2025-11,4,402,90.29,3.99,Continental Freight
+2025-12,1,101,740.16,61.57,Pacific Haul Logistics
+2025-12,1,102,1295.28,60.61,Pacific Haul Logistics
+2025-12,1,201,101.77,9.32,Pacific Haul Logistics
+2025-12,1,202,195.32,9.48,Pacific Haul Logistics
+2025-12,1,301,236.44,7.95,Pacific Haul Logistics
+2025-12,1,302,411.2,7.88,Pacific Haul Logistics
+2025-12,1,401,53.46,6.46,Pacific Haul Logistics
+2025-12,1,402,90.46,6.35,Pacific Haul Logistics
+2025-12,2,101,740.16,38.12,Continental Freight
+2025-12,2,102,1295.28,37.64,Continental Freight
+2025-12,2,201,101.77,6.18,Continental Freight
+2025-12,2,202,195.32,6.02,Continental Freight
+2025-12,2,301,236.44,4.96,Continental Freight
+2025-12,2,302,411.2,4.99,Continental Freight
+2025-12,2,401,53.46,3.95,Continental Freight
+2025-12,2,402,90.46,3.94,Continental Freight
+2025-12,3,101,740.16,38.5,Continental Freight
+2025-12,3,102,1295.28,37.58,Continental Freight
+2025-12,3,201,101.77,6.09,Continental Freight
+2025-12,3,202,195.32,6.16,Continental Freight
+2025-12,3,301,236.44,5.06,Continental Freight
+2025-12,3,302,411.2,4.91,Continental Freight
+2025-12,3,401,53.46,4.06,Continental Freight
+2025-12,3,402,90.46,3.95,Continental Freight
+2025-12,4,101,740.16,38.2,Continental Freight
+2025-12,4,102,1295.28,38.59,Continental Freight
+2025-12,4,201,101.77,6.03,Continental Freight
+2025-12,4,202,195.32,6.17,Continental Freight
+2025-12,4,301,236.44,5.1,Continental Freight
+2025-12,4,302,411.2,4.94,Continental Freight
+2025-12,4,401,53.46,3.97,Continental Freight
+2025-12,4,402,90.46,3.95,Continental Freight
+2026-01,1,101,741.6,61.56,Pacific Haul Logistics
+2026-01,1,102,1297.8,59.44,Pacific Haul Logistics
+2026-01,1,201,101.97,9.34,Pacific Haul Logistics
+2026-01,1,202,195.7,9.34,Pacific Haul Logistics
+2026-01,1,301,236.9,7.9,Pacific Haul Logistics
+2026-01,1,302,412.0,8.21,Pacific Haul Logistics
+2026-01,1,401,53.56,6.45,Pacific Haul Logistics
+2026-01,1,402,90.64,6.5,Pacific Haul Logistics
+2026-01,2,101,741.6,37.09,Continental Freight
+2026-01,2,102,1297.8,36.89,Continental Freight
+2026-01,2,201,101.97,5.92,Continental Freight
+2026-01,2,202,195.7,5.99,Continental Freight
+2026-01,2,301,236.9,4.95,Continental Freight
+2026-01,2,302,412.0,5.14,Continental Freight
+2026-01,2,401,53.56,3.94,Continental Freight
+2026-01,2,402,90.64,4.09,Continental Freight
+2026-01,3,101,741.6,37.12,Continental Freight
+2026-01,3,102,1297.8,37.01,Continental Freight
+2026-01,3,201,101.97,6.0,Continental Freight
+2026-01,3,202,195.7,6.03,Continental Freight
+2026-01,3,301,236.9,5.06,Continental Freight
+2026-01,3,302,412.0,4.9,Continental Freight
+2026-01,3,401,53.56,4.07,Continental Freight
+2026-01,3,402,90.64,4.11,Continental Freight
+2026-01,4,101,741.6,37.05,Continental Freight
+2026-01,4,102,1297.8,37.43,Continental Freight
+2026-01,4,201,101.97,6.02,Continental Freight
+2026-01,4,202,195.7,5.97,Continental Freight
+2026-01,4,301,236.9,5.03,Continental Freight
+2026-01,4,302,412.0,5.04,Continental Freight
+2026-01,4,401,53.56,4.07,Continental Freight
+2026-01,4,402,90.64,3.97,Continental Freight
+2026-02,1,101,743.04,62.29,Pacific Haul Logistics
+2026-02,1,102,1300.32,60.06,Pacific Haul Logistics
+2026-02,1,201,102.17,9.65,Pacific Haul Logistics
+2026-02,1,202,196.08,9.56,Pacific Haul Logistics
+2026-02,1,301,237.36,8.03,Pacific Haul Logistics
+2026-02,1,302,412.8,7.79,Pacific Haul Logistics
+2026-02,1,401,53.66,6.58,Pacific Haul Logistics
+2026-02,1,402,90.82,6.25,Pacific Haul Logistics
+2026-02,2,101,743.04,38.6,Continental Freight
+2026-02,2,102,1300.32,38.29,Continental Freight
+2026-02,2,201,102.17,5.92,Continental Freight
+2026-02,2,202,196.08,5.85,Continental Freight
+2026-02,2,301,237.36,4.92,Continental Freight
+2026-02,2,302,412.8,5.02,Continental Freight
+2026-02,2,401,53.66,3.92,Continental Freight
+2026-02,2,402,90.82,3.98,Continental Freight
+2026-02,3,101,743.04,38.43,Continental Freight
+2026-02,3,102,1300.32,37.93,Continental Freight
+2026-02,3,201,102.17,5.83,Continental Freight
+2026-02,3,202,196.08,5.92,Continental Freight
+2026-02,3,301,237.36,4.93,Continental Freight
+2026-02,3,302,412.8,5.11,Continental Freight
+2026-02,3,401,53.66,3.9,Continental Freight
+2026-02,3,402,90.82,3.94,Continental Freight
+2026-02,4,101,743.04,37.46,Continental Freight
+2026-02,4,102,1300.32,38.66,Continental Freight
+2026-02,4,201,102.17,6.03,Continental Freight
+2026-02,4,202,196.08,6.11,Continental Freight
+2026-02,4,301,237.36,4.91,Continental Freight
+2026-02,4,302,412.8,4.88,Continental Freight
+2026-02,4,401,53.66,3.93,Continental Freight
+2026-02,4,402,90.82,3.92,Continental Freight
+2026-03,1,101,744.48,59.95,Pacific Haul Logistics
+2026-03,1,102,1302.84,59.49,Pacific Haul Logistics
+2026-03,1,201,102.37,9.35,Pacific Haul Logistics
+2026-03,1,202,196.46,9.77,Pacific Haul Logistics
+2026-03,1,301,237.82,8.05,Pacific Haul Logistics
+2026-03,1,302,413.6,8.16,Pacific Haul Logistics
+2026-03,1,401,53.77,6.56,Pacific Haul Logistics
+2026-03,1,402,90.99,6.38,Pacific Haul Logistics
+2026-03,2,101,744.48,37.93,Continental Freight
+2026-03,2,102,1302.84,37.55,Continental Freight
+2026-03,2,201,102.37,5.96,Continental Freight
+2026-03,2,202,196.46,5.92,Continental Freight
+2026-03,2,301,237.82,5.01,Continental Freight
+2026-03,2,302,413.6,4.98,Continental Freight
+2026-03,2,401,53.77,4.02,Continental Freight
+2026-03,2,402,90.99,4.09,Continental Freight
+2026-03,3,101,744.48,38.53,Continental Freight
+2026-03,3,102,1302.84,38.24,Continental Freight
+2026-03,3,201,102.37,5.83,Continental Freight
+2026-03,3,202,196.46,5.9,Continental Freight
+2026-03,3,301,237.82,5.05,Continental Freight
+2026-03,3,302,413.6,5.11,Continental Freight
+2026-03,3,401,53.77,4.02,Continental Freight
+2026-03,3,402,90.99,3.88,Continental Freight
+2026-03,4,101,744.48,38.6,Continental Freight
+2026-03,4,102,1302.84,38.73,Continental Freight
+2026-03,4,201,102.37,6.03,Continental Freight
+2026-03,4,202,196.46,6.09,Continental Freight
+2026-03,4,301,237.82,4.9,Continental Freight
+2026-03,4,302,413.6,5.01,Continental Freight
+2026-03,4,401,53.77,3.99,Continental Freight
+2026-03,4,402,90.99,3.95,Continental Freight
+2026-04,1,101,745.92,62.61,Pacific Haul Logistics
+2026-04,1,102,1305.36,60.57,Pacific Haul Logistics
+2026-04,1,201,102.56,9.78,Pacific Haul Logistics
+2026-04,1,202,196.84,9.87,Pacific Haul Logistics
+2026-04,1,301,238.28,7.99,Pacific Haul Logistics
+2026-04,1,302,414.4,7.96,Pacific Haul Logistics
+2026-04,1,401,53.87,6.33,Pacific Haul Logistics
+2026-04,1,402,91.17,6.25,Pacific Haul Logistics
+2026-04,2,101,745.92,37.23,Continental Freight
+2026-04,2,102,1305.36,37.8,Continental Freight
+2026-04,2,201,102.56,6.0,Continental Freight
+2026-04,2,202,196.84,6.06,Continental Freight
+2026-04,2,301,238.28,4.97,Continental Freight
+2026-04,2,302,414.4,5.08,Continental Freight
+2026-04,2,401,53.87,3.89,Continental Freight
+2026-04,2,402,91.17,3.9,Continental Freight
+2026-04,3,101,745.92,37.44,Continental Freight
+2026-04,3,102,1305.36,37.12,Continental Freight
+2026-04,3,201,102.56,6.1,Continental Freight
+2026-04,3,202,196.84,6.13,Continental Freight
+2026-04,3,301,238.28,5.1,Continental Freight
+2026-04,3,302,414.4,4.85,Continental Freight
+2026-04,3,401,53.87,4.09,Continental Freight
+2026-04,3,402,91.17,3.99,Continental Freight
+2026-04,4,101,745.92,36.98,Continental Freight
+2026-04,4,102,1305.36,38.04,Continental Freight
+2026-04,4,201,102.56,6.04,Continental Freight
+2026-04,4,202,196.84,6.0,Continental Freight
+2026-04,4,301,238.28,4.98,Continental Freight
+2026-04,4,302,414.4,4.87,Continental Freight
+2026-04,4,401,53.87,3.94,Continental Freight
+2026-04,4,402,91.17,3.91,Continental Freight
+2026-05,1,101,747.36,60.03,Pacific Haul Logistics
+2026-05,1,102,1307.88,62.19,Pacific Haul Logistics
+2026-05,1,201,102.76,9.59,Pacific Haul Logistics
+2026-05,1,202,197.22,9.33,Pacific Haul Logistics
+2026-05,1,301,238.74,8.06,Pacific Haul Logistics
+2026-05,1,302,415.2,8.14,Pacific Haul Logistics
+2026-05,1,401,53.98,6.48,Pacific Haul Logistics
+2026-05,1,402,91.34,6.33,Pacific Haul Logistics
+2026-05,2,101,747.36,36.89,Continental Freight
+2026-05,2,102,1307.88,37.79,Continental Freight
+2026-05,2,201,102.76,5.9,Continental Freight
+2026-05,2,202,197.22,6.12,Continental Freight
+2026-05,2,301,238.74,4.88,Continental Freight
+2026-05,2,302,415.2,5.13,Continental Freight
+2026-05,2,401,53.98,4.04,Continental Freight
+2026-05,2,402,91.34,3.92,Continental Freight
+2026-05,3,101,747.36,38.99,Continental Freight
+2026-05,3,102,1307.88,37.53,Continental Freight
+2026-05,3,201,102.76,6.07,Continental Freight
+2026-05,3,202,197.22,5.97,Continental Freight
+2026-05,3,301,238.74,4.99,Continental Freight
+2026-05,3,302,415.2,4.99,Continental Freight
+2026-05,3,401,53.98,3.99,Continental Freight
+2026-05,3,402,91.34,3.91,Continental Freight
+2026-05,4,101,747.36,37.29,Continental Freight
+2026-05,4,102,1307.88,38.23,Continental Freight
+2026-05,4,201,102.76,6.09,Continental Freight
+2026-05,4,202,197.22,5.87,Continental Freight
+2026-05,4,301,238.74,4.87,Continental Freight
+2026-05,4,302,415.2,5.08,Continental Freight
+2026-05,4,401,53.98,4.09,Continental Freight
+2026-05,4,402,91.34,3.96,Continental Freight
+2026-06,1,101,748.8,61.85,Pacific Haul Logistics
+2026-06,1,102,1310.4,59.95,Pacific Haul Logistics
+2026-06,1,201,102.96,9.31,Pacific Haul Logistics
+2026-06,1,202,197.6,9.73,Pacific Haul Logistics
+2026-06,1,301,239.2,8.16,Pacific Haul Logistics
+2026-06,1,302,416.0,8.04,Pacific Haul Logistics
+2026-06,1,401,54.08,6.46,Pacific Haul Logistics
+2026-06,1,402,91.52,6.54,Pacific Haul Logistics
+2026-06,2,101,748.8,37.88,Continental Freight
+2026-06,2,102,1310.4,37.96,Continental Freight
+2026-06,2,201,102.96,5.94,Continental Freight
+2026-06,2,202,197.6,6.09,Continental Freight
+2026-06,2,301,239.2,4.96,Continental Freight
+2026-06,2,302,416.0,5.13,Continental Freight
+2026-06,2,401,54.08,4.09,Continental Freight
+2026-06,2,402,91.52,4.12,Continental Freight
+2026-06,3,101,748.8,37.4,Continental Freight
+2026-06,3,102,1310.4,37.73,Continental Freight
+2026-06,3,201,102.96,6.13,Continental Freight
+2026-06,3,202,197.6,5.97,Continental Freight
+2026-06,3,301,239.2,4.95,Continental Freight
+2026-06,3,302,416.0,4.99,Continental Freight
+2026-06,3,401,54.08,4.1,Continental Freight
+2026-06,3,402,91.52,3.97,Continental Freight
+2026-06,4,101,748.8,39.11,Continental Freight
+2026-06,4,102,1310.4,38.67,Continental Freight
+2026-06,4,201,102.96,6.05,Continental Freight
+2026-06,4,202,197.6,5.87,Continental Freight
+2026-06,4,301,239.2,5.14,Continental Freight
+2026-06,4,302,416.0,4.89,Continental Freight
+2026-06,4,401,54.08,4.11,Continental Freight
+2026-06,4,402,91.52,3.96,Continental Freight
+2026-07,1,101,750.24,59.34,Pacific Haul Logistics
+2026-07,1,102,1312.92,62.06,Pacific Haul Logistics
+2026-07,1,201,103.16,9.37,Pacific Haul Logistics
+2026-07,1,202,197.98,9.84,Pacific Haul Logistics
+2026-07,1,301,239.66,7.77,Pacific Haul Logistics
+2026-07,1,302,416.8,7.83,Pacific Haul Logistics
+2026-07,1,401,54.18,6.54,Pacific Haul Logistics
+2026-07,1,402,91.7,6.58,Pacific Haul Logistics
+2026-07,2,101,750.24,37.03,Continental Freight
+2026-07,2,102,1312.92,38.64,Continental Freight
+2026-07,2,201,103.16,5.92,Continental Freight
+2026-07,2,202,197.98,6.04,Continental Freight
+2026-07,2,301,239.66,4.97,Continental Freight
+2026-07,2,302,416.8,4.87,Continental Freight
+2026-07,2,401,54.18,3.96,Continental Freight
+2026-07,2,402,91.7,4.04,Continental Freight
+2026-07,3,101,750.24,38.08,Continental Freight
+2026-07,3,102,1312.92,39.04,Continental Freight
+2026-07,3,201,103.16,6.05,Continental Freight
+2026-07,3,202,197.98,6.14,Continental Freight
+2026-07,3,301,239.66,5.0,Continental Freight
+2026-07,3,302,416.8,5.01,Continental Freight
+2026-07,3,401,54.18,4.03,Continental Freight
+2026-07,3,402,91.7,3.94,Continental Freight
+2026-07,4,101,750.24,38.42,Continental Freight
+2026-07,4,102,1312.92,37.52,Continental Freight
+2026-07,4,201,103.16,5.9,Continental Freight
+2026-07,4,202,197.98,5.85,Continental Freight
+2026-07,4,301,239.66,5.14,Continental Freight
+2026-07,4,302,416.8,5.08,Continental Freight
+2026-07,4,401,54.18,4.05,Continental Freight
+2026-07,4,402,91.7,3.9,Continental Freight
+2026-08,1,101,751.68,59.58,Pacific Haul Logistics
+2026-08,1,102,1315.44,60.07,Pacific Haul Logistics
+2026-08,1,201,103.36,9.33,Pacific Haul Logistics
+2026-08,1,202,198.36,9.5,Pacific Haul Logistics
+2026-08,1,301,240.12,7.79,Pacific Haul Logistics
+2026-08,1,302,417.6,7.93,Pacific Haul Logistics
+2026-08,1,401,54.29,6.37,Pacific Haul Logistics
+2026-08,1,402,91.87,6.3,Pacific Haul Logistics
+2026-08,2,101,751.68,37.8,Continental Freight
+2026-08,2,102,1315.44,38.41,Continental Freight
+2026-08,2,201,103.36,5.88,Continental Freight
+2026-08,2,202,198.36,5.88,Continental Freight
+2026-08,2,301,240.12,5.03,Continental Freight
+2026-08,2,302,417.6,4.96,Continental Freight
+2026-08,2,401,54.29,4.04,Continental Freight
+2026-08,2,402,91.87,4.0,Continental Freight
+2026-08,3,101,751.68,38.19,Continental Freight
+2026-08,3,102,1315.44,37.39,Continental Freight
+2026-08,3,201,103.36,6.05,Continental Freight
+2026-08,3,202,198.36,5.99,Continental Freight
+2026-08,3,301,240.12,5.05,Continental Freight
+2026-08,3,302,417.6,5.12,Continental Freight
+2026-08,3,401,54.29,3.99,Continental Freight
+2026-08,3,402,91.87,3.95,Continental Freight
+2026-08,4,101,751.68,38.11,Continental Freight
+2026-08,4,102,1315.44,37.03,Continental Freight
+2026-08,4,201,103.36,6.16,Continental Freight
+2026-08,4,202,198.36,6.18,Continental Freight
+2026-08,4,301,240.12,4.94,Continental Freight
+2026-08,4,302,417.6,5.14,Continental Freight
+2026-08,4,401,54.29,4.05,Continental Freight
+2026-08,4,402,91.87,3.99,Continental Freight
+2026-09,1,101,753.12,60.08,Pacific Haul Logistics
+2026-09,1,102,1317.96,62.62,Pacific Haul Logistics
+2026-09,1,201,103.55,9.8,Pacific Haul Logistics
+2026-09,1,202,198.74,9.37,Pacific Haul Logistics
+2026-09,1,301,240.58,7.94,Pacific Haul Logistics
+2026-09,1,302,418.4,7.93,Pacific Haul Logistics
+2026-09,1,401,54.39,6.32,Pacific Haul Logistics
+2026-09,1,402,92.05,6.48,Pacific Haul Logistics
+2026-09,2,101,753.12,36.91,Continental Freight
+2026-09,2,102,1317.96,38.75,Continental Freight
+2026-09,2,201,103.55,5.96,Continental Freight
+2026-09,2,202,198.74,5.82,Continental Freight
+2026-09,2,301,240.58,5.11,Continental Freight
+2026-09,2,302,418.4,5.08,Continental Freight
+2026-09,2,401,54.39,4.11,Continental Freight
+2026-09,2,402,92.05,4.1,Continental Freight
+2026-09,3,101,753.12,38.56,Continental Freight
+2026-09,3,102,1317.96,38.76,Continental Freight
+2026-09,3,201,103.55,6.15,Continental Freight
+2026-09,3,202,198.74,6.1,Continental Freight
+2026-09,3,301,240.58,4.92,Continental Freight
+2026-09,3,302,418.4,5.09,Continental Freight
+2026-09,3,401,54.39,3.93,Continental Freight
+2026-09,3,402,92.05,3.93,Continental Freight
+2026-09,4,101,753.12,37.43,Continental Freight
+2026-09,4,102,1317.96,38.58,Continental Freight
+2026-09,4,201,103.55,6.1,Continental Freight
+2026-09,4,202,198.74,6.07,Continental Freight
+2026-09,4,301,240.58,4.89,Continental Freight
+2026-09,4,302,418.4,4.88,Continental Freight
+2026-09,4,401,54.39,4.03,Continental Freight
+2026-09,4,402,92.05,3.89,Continental Freight
