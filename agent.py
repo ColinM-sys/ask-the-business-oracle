@@ -38,6 +38,7 @@ JOIN = """FROM sales s LEFT JOIN
     JOIN regions r ON r.region_id=s.region_id"""
 MISSING_DISCOUNT_COUNT = """SUM(CASE WHEN s.discount_pct IS NULL OR s.quantity IS NULL
     OR s.unit_price IS NULL THEN 1 ELSE 0 END)"""
+MISSING_REVENUE_COUNT = "SUM(CASE WHEN s.net_revenue IS NULL THEN 1 ELSE 0 END)"
 MONTHLY_SQL = f"""SELECT r.region_name, s.sale_month,
     ROUND(SUM(s.net_revenue),2) AS revenue,
     SUM(s.quantity) AS units,
@@ -48,6 +49,7 @@ MONTHLY_SQL = f"""SELECT r.region_name, s.sale_month,
             /NULLIF(SUM(s.quantity*s.unit_price),0),2) END AS discount_pct,
     ROUND(SUM(s.quantity*c.freight_per_unit)/NULLIF(SUM(s.quantity),0),2) AS freight_per_unit,
     SUM(CASE WHEN c.unit_cogs IS NULL OR c.freight_per_unit IS NULL THEN 1 ELSE 0 END) AS missing_cost_count,
+    {MISSING_REVENUE_COUNT} AS missing_revenue_count,
     {MISSING_DISCOUNT_COUNT} AS missing_discount_count
     {JOIN} GROUP BY r.region_name,s.sale_month ORDER BY r.region_name,s.sale_month"""
 
@@ -70,6 +72,7 @@ def summary_sql():
             columns.append(f"ROUND({expression},2) AS {period}_{name}")
     columns.extend([
         "SUM(CASE WHEN c.unit_cogs IS NULL OR c.freight_per_unit IS NULL THEN 1 ELSE 0 END) AS missing_cost_count",
+        f"{MISSING_REVENUE_COUNT} AS missing_revenue_count",
         f"{MISSING_DISCOUNT_COUNT} AS missing_discount_count",
         f"CASE WHEN ({raw['before']['margin_pct']}) > ({raw['after']['margin_pct']}) THEN 'fell' WHEN ({raw['before']['margin_pct']}) < ({raw['after']['margin_pct']}) THEN 'rose' ELSE 'was unchanged' END AS margin_direction",
         f"ROUND(({raw['before']['margin_pct']})-({raw['after']['margin_pct']}),2) AS margin_drop_pts",
@@ -127,6 +130,8 @@ def answer_question(question):
         raise QuestionValidationError(f"No sales/cost data found for {region}.")
     if any(row["missing_cost_count"] for key in ("E1", "E2") for row in evidence[key]["rows"]):
         raise ValueError("Missing monthly costs or duplicate cost rows for some sales; cannot analyze incomplete or ambiguous data.")
+    if any(row["missing_revenue_count"] for key in ("E1", "E2") for row in evidence[key]["rows"]):
+        raise ValueError("Missing net revenue for some sales; cannot analyze incomplete data.")
     if any(row["missing_discount_count"] for key in ("E1", "E2") for row in evidence[key]["rows"]):
         raise ValueError("Missing discount inputs for some sales; cannot analyze incomplete data.")
     row = rows[index]
