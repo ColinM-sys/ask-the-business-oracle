@@ -15,26 +15,33 @@ DOCS = Path(__file__).parent / "docs"
 _lock = threading.Lock()
 _logger = logging.getLogger(__name__)
 _model_identifier = re.compile(r"[A-Z][A-Z0-9_$#]*")
+# Changing the tokenizer requires rebuilding stored fallback embeddings.
+_hash_backend = "hash-v2-512"
 
 
 def hash_embedding(text, dimensions=512):
     values = [0.0] * dimensions
-    for word in re.findall(r"[a-z]+", text.lower()):
+    for word in re.findall(r"[^\W_]+", text.lower()):
         digest = hashlib.sha256(word.encode()).digest()
         values[int.from_bytes(digest[:4], "big") % dimensions] += 1
-    norm = math.sqrt(sum(v * v for v in values)) or 1
+    norm = math.sqrt(sum(v * v for v in values))
+    if not norm:
+        raise ValueError("Embedding must have non-zero norm")
     return array("f", (v / norm for v in values))
 
 
 def embed(cursor, text, backend):
-    if backend == "hash-v1-512":
+    if backend == _hash_backend:
         return hash_embedding(text)
     if not _model_identifier.fullmatch(backend):
         raise ValueError("Invalid embedding model name")
-    return cursor.execute(
+    vector = cursor.execute(
         f"SELECT VECTOR_EMBEDDING({backend} USING :text AS DATA) FROM dual",
         text=text,
     ).fetchone()[0]
+    if not any(vector):
+        raise ValueError("Embedding must have non-zero norm")
+    return vector
 
 
 def ensure_policies():
@@ -50,7 +57,7 @@ def ensure_policies():
                 cur.execute("""CREATE TABLE policy_chunks (
                     id NUMBER PRIMARY KEY, doc VARCHAR2(255), chunk VARCHAR2(4000),
                     embedding VECTOR(*, FLOAT32), backend VARCHAR2(128), source_hash VARCHAR2(64))""")
-            backend = "hash-v1-512"
+            backend = _hash_backend
             for (model,) in cur.execute(
                 "SELECT model_name FROM user_mining_models WHERE mining_function='EMBEDDING' ORDER BY model_name"
             ).fetchall():
@@ -69,7 +76,7 @@ def ensure_policies():
                         raise
                     _logger.warning("Embedding model %r incompatible (ORA-%05d)", model, code)
             else:
-                _logger.warning("Using hash-v1-512 fallback: no compatible embedding models available")
+                _logger.warning("Using %s fallback: no compatible embedding models available", _hash_backend)
             existing = cur.execute("SELECT DISTINCT backend, source_hash FROM policy_chunks").fetchall()
             if existing == [(backend, fingerprint)]:
                 return backend
