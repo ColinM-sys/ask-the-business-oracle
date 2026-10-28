@@ -798,6 +798,18 @@ def test_west_live_end_to_end(west_answer):
 
 
 def test_live_evidence_replays(west_answer):
+    policy_sources = [(key, source) for key, source in west_answer["evidence"].items()
+                      if source["kind"] == "policy"]
+    assert len(policy_sources) > 1
+    with connect() as con, con.cursor() as cur:
+        cur.execute("SET TRANSACTION READ ONLY")
+        for key, source in policy_sources:
+            params = json.loads(json.dumps(source["params"]))
+            rows = cur.execute(source["sql"], params).fetchall()
+            columns = [column[0].lower() for column in cur.description]
+            assert [dict(zip(columns, row)) for row in rows] == source["rows"]
+            assert len(source["rows"]) == 1
+            assert key == f"P{source['rows'][0]['id']}"
     for source in west_answer["evidence"].values():
         if source["kind"] == "sql":
             assert tools.run_sql(source["sql"], source["params"])["rows"] == source["rows"]
@@ -992,6 +1004,62 @@ def test_policy_citations_have_descriptive_accessible_names(monkeypatch):
         evidence_id = button["data-evidence"]
         assert evidence_id in button.get("aria-label", "")
         assert documents[evidence_id] in button["aria-label"]
+
+
+def test_question_validation_errors_are_associated_and_focused(monkeypatch):
+    class FormParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.question = None
+            self.alert = None
+            self.alert_text = ""
+            self.in_alert = False
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == "input" and attrs.get("id") == "question":
+                self.question = attrs
+            if tag == "p" and attrs.get("role") == "alert":
+                self.alert = attrs
+                self.in_alert = True
+
+        def handle_data(self, data):
+            if self.in_alert:
+                self.alert_text += data
+
+        def handle_endtag(self, tag):
+            if tag == "p":
+                self.in_alert = False
+
+    def parse(response):
+        parser = FormParser()
+        parser.feed(response.get_data(as_text=True))
+        return parser
+
+    client = app.test_client()
+    for data, status, message in [
+        ({"question": ""}, 400, "Enter a business question"),
+        ({"question": "North"}, 400, "Unsupported region"),
+        ({"question": "x" * (app.config["MAX_CONTENT_LENGTH"] + 1)}, 413,
+         "Submission too large"),
+    ]:
+        response = client.post("/", data=data)
+        assert response.status_code == status
+        page = parse(response)
+        assert page.question.get("aria-invalid") == "true"
+        assert page.question.get("aria-describedby") == page.alert.get("id")
+        assert page.question.get("aria-describedby")
+        assert "autofocus" in page.question
+        assert message in page.alert_text
+
+    def failure(_):
+        raise RuntimeError("unavailable")
+
+    monkeypatch.setattr("app.answer_question", failure)
+    for response in [client.get("/"), client.post("/", data={"question": "West"})]:
+        page = parse(response)
+        assert "aria-invalid" not in page.question
+        assert "autofocus" not in page.question
 
 
 def test_ui_validation_and_safe_error(monkeypatch):

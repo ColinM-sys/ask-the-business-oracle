@@ -24,7 +24,7 @@ def browser_evidence(evidence):
 def submission_too_large(_):
     return render_template(
         "index.html", result=None, question="",
-        error="Submission too large. Shorten your question and try again.",
+        error="Submission too large. Shorten your question and try again.", question_error=True,
     ), 413
 
 
@@ -41,7 +41,8 @@ def index():
         except Exception:
             # Do not expose connection settings, driver errors or credentials.
             error, status = "Analysis unavailable. Check the local Oracle connection and policy setup, then retry.", 503
-    return render_template("index.html", result=result, error=error, question=question), status
+    return render_template("index.html", result=result, error=error, question=question,
+                           question_error=status == 400), status
 
 
 if __name__ == "__main__":
