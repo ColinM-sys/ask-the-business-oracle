@@ -1249,6 +1249,75 @@ def test_evidence_dialog_identifies_cited_cell(monkeypatch):
     assert "td.append(' (Cited cell)');" in html
     assert "td.setAttribute('aria-describedby', 'evidence-description');" in html
     assert html.index("description.textContent = `Cited cell:") < html.index("dialog.showModal()")
+
+
+def test_evidence_dialog_focuses_cited_cell(monkeypatch):
+    monkeypatch.setattr("app.answer_question", lambda _: {
+        "region": "West", "claims": [],
+        "evidence": {"E1": {"kind": "sql", "sql": "SELECT ...", "params": {},
+                            "rows": [{"margin": 38.9}, {"margin": 25.6}]}},
+    })
+    html = app.test_client().post("/", data={"question": "West"}).get_data(as_text=True)
+    script = html.split("<script>", 1)[1].split("</script>", 1)[0]
+    check = subprocess.run(["node", "-e", """
+        const assert = require('node:assert/strict');
+        const buttons = [
+            {dataset: {evidence: 'E1', row: '1', column: 'margin'}},
+            {dataset: {evidence: 'E1'}},
+        ];
+        buttons.forEach(button => button.addEventListener = (_, handler) => button.open = handler);
+        const close = {addEventListener() {}};
+        let cells = [];
+        const rows = {replaceChildren: table => { cells = table.cells; }};
+        const modal = {
+            open: false,
+            showModal() { this.open = true; document.activeElement = close; },
+            close() { this.open = false; },
+            querySelector: () => cells.find(cell => cell.className === 'selected'),
+        };
+        const elements = {
+            'evidence-dialog': modal, 'close-dialog': close, 'evidence-rows': rows,
+            'evidence-description': {}, 'evidence-title': {},
+            'evidence-sql': {}, 'evidence-params': {},
+        };
+        global.document = {
+            getElementById: id => elements[id],
+            querySelectorAll: () => buttons,
+            createElement(tag) {
+                if (tag !== 'table') return {};
+                const table = {
+                    cells: [],
+                    createTHead: () => ({insertRow: () => ({append() {}})}),
+                    createTBody: () => ({insertRow: () => ({insertCell() {
+                        const cell = {
+                            append() {}, setAttribute() {}, scrollIntoView() {},
+                            focus() {
+                                assert.equal(modal.open, true);
+                                document.activeElement = this;
+                            },
+                        };
+                        table.cells.push(cell);
+                        return cell;
+                    }})}),
+                };
+                return table;
+            },
+        };
+    """ + script + """
+        buttons[0].open();
+        const selected = cells[1];
+        assert.equal(selected.className, 'selected');
+        assert.equal(selected.tabIndex, -1);
+        assert.equal(document.activeElement, selected);
+
+        modal.close();
+        buttons[1].open();
+        assert.equal(modal.querySelector('.selected'), undefined);
+        assert.equal(document.activeElement, close);
+    """], capture_output=True, text=True)
+    assert check.returncode == 0, check.stderr
+
+
 def test_policy_citations_have_descriptive_accessible_names(monkeypatch):
     documents = {"P1": "west_q3_volume_push.md", "P2": 'Freight & "carrier" memo.md'}
     result = {
