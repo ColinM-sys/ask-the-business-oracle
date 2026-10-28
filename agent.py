@@ -11,6 +11,14 @@ class QuestionValidationError(ValueError):
     """A user-facing problem with the requested analysis."""
 
 
+class DataQualityError(ValueError):
+    """The underlying business data cannot support a reliable analysis."""
+
+
+class DiscountDataQualityError(DataQualityError):
+    """Discount inputs are missing from the underlying sales data."""
+
+
 # SHA-256 of the complete, whitespace-normalized chunks reviewed for the fixed
 # claims below. Changed or partial chunks require reviewing both the claims and
 # these fingerprints; deriving them from current files would approve edits blindly.
@@ -126,9 +134,9 @@ def answer_question(question):
     if index is None:
         raise QuestionValidationError(f"No sales/cost data found for {region}.")
     if any(row["missing_cost_count"] for key in ("E1", "E2") for row in evidence[key]["rows"]):
-        raise ValueError("Missing monthly costs or duplicate cost rows for some sales; cannot analyze incomplete or ambiguous data.")
+        raise DataQualityError("Missing monthly costs or duplicate cost rows for some sales; cannot analyze incomplete or ambiguous data.")
     if any(row["missing_discount_count"] for key in ("E1", "E2") for row in evidence[key]["rows"]):
-        raise ValueError("Missing discount inputs for some sales; cannot analyze incomplete data.")
+        raise DiscountDataQualityError("Missing discount inputs for some sales; cannot analyze incomplete data.")
     row = rows[index]
     if row["before_margin_pct"] is None or row["after_margin_pct"] is None:
         raise QuestionValidationError(
@@ -195,8 +203,10 @@ def answer_question(question):
     for other_index, other in enumerate(rows):
         if other_index != index:
             claim("comparison", [text(f"{other['region_name']} margin: "),
-                number("before_margin_pct", "%", other_index), text(" before; "),
-                number("after_margin_pct", "%", other_index), text(" after.")])
+                number("before_margin_pct", "%", other_index) if other["before_margin_pct"] is not None
+                else text("unavailable"), text(" before; "),
+                number("after_margin_pct", "%", other_index) if other["after_margin_pct"] is not None
+                else text("unavailable"), text(" after.")])
     if region == "West" and cutoff == "2025-07":
         push, freight = policy_ids("west_q3_volume_push.md"), policy_ids("freight_contract_memo.md")
         if push and freight:
