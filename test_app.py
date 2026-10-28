@@ -2963,23 +2963,32 @@ def test_evidence_dialog_focuses_cited_cell(monkeypatch):
     result = {
         "region": "West", "claims": [],
         "evidence": {"E1": {"kind": "sql", "sql": "SELECT ...", "params": {},
-                            "rows": [{"margin": 38}, {"margin": 25}]}},
+                            "rows": [{"margin": value} for value in range(12)]}},
     }
     monkeypatch.setattr("app.answer_question", lambda _: result)
     html = app.test_client().post("/", data={"question": "West"}).get_data(as_text=True)
     script = html.split("<script>", 1)[1].split("</script>", 1)[0]
     check = subprocess.run(["node", "-e", """
         const assert = require('node:assert/strict');
-        const close = {addEventListener() {}};
+        const close = {addEventListener: (_, handler) => { close.click = handler; }};
         const buttons = [
-            {dataset: {evidence: 'E1', row: '1', column: 'margin'}},
+            {dataset: {evidence: 'E1', row: '10', column: 'margin'}},
+            {dataset: {evidence: 'E1', row: '2', column: 'margin'}},
             {dataset: {evidence: 'E1'}},
         ];
         buttons.forEach(button => button.addEventListener = (_, handler) => button.click = handler);
         let cells = [];
-        let visibleCell = null;
+        let headerHeight = 0;
+        let opens = 0;
+        let isOpen = false;
+        const scroller = {scrollTop: 0, clientHeight: 100, style: {}, replaceChildren() {}};
         const modalStub = {
-            showModal() { document.activeElement = close; visibleCell = null; },
+            showModal() {
+                isOpen = true;
+                headerHeight = [30, 60, 30][opens++];
+                document.activeElement = close;
+            },
+            close() { isOpen = false; },
             querySelector: () => cells.find(cell => cell.className === 'selected'),
         };
         const elements = {
@@ -2987,7 +2996,7 @@ def test_evidence_dialog_focuses_cited_cell(monkeypatch):
             'download-brief': {addEventListener() {}},
             'evidence-description': {}, 'evidence-title': {},
             'evidence-sql': {}, 'evidence-params': {},
-            'evidence-rows': {replaceChildren() {}},
+            'evidence-rows': scroller,
         };
         global.document = {
             getElementById: id => elements[id],
@@ -2996,17 +3005,28 @@ def test_evidence_dialog_focuses_cited_cell(monkeypatch):
                 if (tag !== 'table') return {};
                 cells = [];
                 return {
-                    createTHead: () => ({insertRow: () => ({append() {}})}),
+                    createTHead: () => ({insertRow: () => ({
+                        append() {},
+                        getBoundingClientRect() {
+                            assert.ok(isOpen, 'measure the header after opening the dialog');
+                            return {height: headerHeight};
+                        },
+                    })}),
                     createTBody: () => ({insertRow: () => ({insertCell() {
+                        const row = cells.length;
                         const cell = {
                             attributes: {}, append() {},
                             setAttribute(name, value) { this.attributes[name] = value; },
-                            scrollIntoView() { visibleCell = this; },
+                            scrollIntoView() {
+                                const top = headerHeight + row * 24;
+                                const padding = parseFloat(scroller.style.scrollPaddingTop) || 0;
+                                if (top < scroller.scrollTop + padding) scroller.scrollTop = top - padding;
+                                else if (top + 24 > scroller.scrollTop + scroller.clientHeight)
+                                    scroller.scrollTop = top + 24 - scroller.clientHeight;
+                            },
                             focus(options = {}) {
-                                if (this.attributes.tabindex === '-1') {
-                                    document.activeElement = this;
-                                    if (!options.preventScroll) visibleCell = this;
-                                }
+                                if (this.attributes.tabindex === '-1') document.activeElement = this;
+                                assert.equal(options.preventScroll, true);
                             },
                         };
                         cells.push(cell);
@@ -3017,14 +3037,20 @@ def test_evidence_dialog_focuses_cited_cell(monkeypatch):
         };
     """ + script + """
         buttons[0].click();
-        assert.equal(document.activeElement, cells[1]);
-        assert.equal(visibleCell, cells[1]);
-        assert.equal(cells[1].attributes.tabindex, '-1');
+        assert.equal(document.activeElement, cells[10]);
+        assert.equal(cells[10].attributes.tabindex, '-1');
         assert.equal(cells[0].attributes.tabindex, undefined);
+        assert.ok(scroller.scrollTop > 0);
 
+        close.click();
         buttons[1].click();
+        assert.equal(document.activeElement, cells[2]);
+        assert.ok(headerHeight + 2 * 24 - scroller.scrollTop >= headerHeight,
+                  'the earlier cited cell must be below the sticky header');
+
+        close.click();
+        buttons[2].click();
         assert.equal(document.activeElement, close);
-        assert.equal(visibleCell, null);
     """], capture_output=True, text=True)
     assert check.returncode == 0, check.stderr
 

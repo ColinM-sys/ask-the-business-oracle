@@ -168,6 +168,8 @@
       document.getElementById('evidence-rows').replaceChildren(item.rows.length ? table : 'No rows returned');
       dialog.showModal();
       const selected = dialog.querySelector('.selected');
+      // Allow room for the sticky header and the focus outline with its offset.
+      if (selected) document.getElementById('evidence-rows').style.scrollPaddingTop = `${head.getBoundingClientRect().height + 6}px`;
       selected?.scrollIntoView({block: 'nearest'});
       selected?.focus({preventScroll: true});
     }));
