@@ -13,6 +13,14 @@
 A local Flask app that explains regional margin changes with Oracle SQL evidence
 and policy retrieval. No API key or language model is required.
 
+If you do not already have a complete checkout, clone the repository from a
+parent directory and enter it before setup:
+
+```sh
+git clone https://github.com/ColinM-sys/ask-the-business-oracle.git
+cd ask-the-business-oracle
+```
+
 If `.env` does not exist, copy `.env.example` to `.env`. Set `ORACLE_USER`
 (database user), `ORACLE_PASSWORD` (database password), and `ORACLE_DSN`
 (connection string, such as `host:port/service_name`) in `.env` before running

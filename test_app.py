@@ -175,13 +175,22 @@ def test_readme_documents_required_oracle_configuration():
 def test_setup_files_are_present():
     root = Path(__file__).parent
     for name in (
-        "requirements.txt", ".env.example", "data/oracle_load.sql",
+        "requirements.txt", ".env.example", "load.py", "data/oracle_load.sql",
+        "data/costs.csv", "data/customers.csv", "data/discounts.csv",
+        "data/products.csv", "data/regions.csv", "data/sales.csv",
         "docs/freight_contract_memo.md", "docs/pricing_policy.md",
         "docs/regional_playbook.md", "docs/west_q3_volume_push.md",
     ):
         path = root / name
         assert path.is_file(), f"Missing setup file: {name}"
         assert path.read_text(encoding="utf-8").strip(), f"Empty setup file: {name}"
+
+
+def test_readme_documents_how_to_retrieve_complete_checkout():
+    readme = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
+    clone = "git clone https://github.com/ColinM-sys/ask-the-business-oracle.git"
+    enter = "cd ask-the-business-oracle"
+    assert readme.index(clone) < readme.index(enter) < readme.index("python -m pip install -r requirements.txt")
 
 
 def test_readme_includes_initial_business_data_load():
