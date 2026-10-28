@@ -1,5 +1,6 @@
 """Unit checks and live integration against the existing local Oracle tables."""
 import copy
+import hashlib
 import json
 import re
 import runpy
@@ -211,6 +212,47 @@ def test_hashing_is_stable_and_normalized():
     assert abs(sum(v*v for v in first) - 1) < 0.000001
 
 
+@pytest.mark.parametrize("text", ["2025", "\u897f\u90e8", "\u0627\u0644\u0639\u0631\u0628\u064a\u0629", "\u0662\u0660\u0662\u0665"])
+def test_hashing_supports_unicode_letters_and_numbers(text):
+    vector = hash_embedding(text)
+    assert vector == hash_embedding(text)
+    assert abs(sum(v*v for v in vector) - 1) < 0.000001
+
+
+@pytest.mark.parametrize("first, second", [
+    ("2025", "2026"), ("q3", "q4"), ("\u897f\u90e8", "\u4e1c\u90e8"),
+])
+def test_hashing_distinguishes_searchable_tokens(first, second):
+    assert hash_embedding(first) != hash_embedding(second)
+
+
+@pytest.mark.parametrize("text", ["!!!", "___", "\U0001f600"])
+def test_hashing_rejects_text_without_searchable_tokens(text):
+    with pytest.raises(ValueError, match="searchable"):
+        hash_embedding(text)
+
+
+def test_updated_hash_backend_refreshes_existing_vectors(tmp_path, monkeypatch):
+    content = "Business policy 2025"
+    (tmp_path / "policy.md").write_text(content, encoding="utf-8")
+    fingerprint = hashlib.sha256(repr([("policy.md", content)]).encode()).hexdigest()
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
+    cursor.execute.return_value.fetchall.side_effect = [[], [("hash-v1-512", fingerprint)]]
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+
+    assert ensure_policies() == "hash-v2-512"
+    inserted = [call.kwargs for call in cursor.execute.call_args_list
+                if call.args[0].lstrip().startswith("INSERT INTO policy_chunks")]
+    assert len(inserted) == 1
+    assert inserted[0]["backend"] == "hash-v2-512"
+    assert inserted[0]["vector"] == hash_embedding(content)
+    connection.commit.assert_called_once()
+
+
 @pytest.mark.parametrize("failure", [
     RuntimeError("private-driver-details"),
     oracledb.DatabaseError(SimpleNamespace(code=3113, message="private-driver-details")),
@@ -242,8 +284,8 @@ def test_policy_probe_propagates_unexpected_failures(failure, tmp_path, monkeypa
 
 
 @pytest.mark.parametrize("models, expected", [
-    ([], "hash-v1-512"),
-    ([("INCOMPATIBLE_MODEL",)], "hash-v1-512"),
+    ([], "hash-v2-512"),
+    ([("INCOMPATIBLE_MODEL",)], "hash-v2-512"),
     ([("INCOMPATIBLE_MODEL",), ("GOOD_MODEL",)], "GOOD_MODEL"),
 ])
 def test_policy_probe_fallback_is_explicit_and_sanitized(
@@ -269,7 +311,7 @@ def test_policy_probe_fallback_is_explicit_and_sanitized(
     if models:
         assert "INCOMPATIBLE_MODEL" in caplog.text
         assert "40290" in caplog.text
-    assert ("Using hash-v1-512 fallback" in caplog.text) == (expected == "hash-v1-512")
+    assert ("Using hash-v2-512 fallback" in caplog.text) == (expected == "hash-v2-512")
     assert "private-driver-details" not in caplog.text
     assert "forged log entry" not in caplog.text
 
@@ -287,7 +329,7 @@ def test_policy_probe_skips_unsupported_names(unsupported, later_model, tmp_path
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
 
-    expected = later_model or "hash-v1-512"
+    expected = later_model or "hash-v2-512"
     assert ensure_policies() == expected
     embedding_sql = [call.args[0] for call in cursor.execute.call_args_list
                      if "VECTOR_EMBEDDING" in call.args[0]]
@@ -309,6 +351,7 @@ def test_policy_chunks_fit_byte_limit(character, tmp_path, monkeypatch):
     cursor.execute.return_value.fetchall.return_value = []
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
+    monkeypatch.setattr("policies.embed", lambda cur, text, backend: hash_embedding("policy"))
     connection.__enter__.return_value = connection
 
     ensure_policies()
@@ -332,6 +375,24 @@ def test_empty_policy_documents_preserve_existing_rows(tmp_path, monkeypatch):
     monkeypatch.setattr("policies.connect", lambda: connection)
 
     with pytest.raises(RuntimeError, match="No policy content"):
+        ensure_policies()
+
+    assert not any(call.args[0].lstrip().startswith(("DELETE", "INSERT"))
+                   for call in cursor.execute.call_args_list)
+    connection.commit.assert_not_called()
+
+
+def test_tokenless_policy_documents_preserve_existing_rows(tmp_path, monkeypatch):
+    (tmp_path / "symbols.md").write_text("\U0001f600", encoding="utf-8")
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
+    cursor.execute.return_value.fetchall.side_effect = [[], [("hash-v1-512", "old-hash")]]
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+
+    with pytest.raises(ValueError, match="searchable"):
         ensure_policies()
 
     assert not any(call.args[0].lstrip().startswith(("DELETE", "INSERT"))
@@ -385,10 +446,10 @@ def test_delayed_policy_refresh_preserves_newer_content(tmp_path, monkeypatch):
             assert waiting.wait(10), "Delayed refresh did not reach the lock"
             # Commit updated content while the first refresh is waiting for the lock.
             document.write_text("Updated policy", encoding="utf-8")
-            assert ensure_policies() == "hash-v1-512"
+            assert ensure_policies() == "hash-v2-512"
         finally:
             resume.set()
-        assert delayed.result(timeout=10) == "hash-v1-512"
+        assert delayed.result(timeout=10) == "hash-v2-512"
 
     assert [row["chunk"] for row in rows] == ["Updated policy"]
     connection.commit.assert_called_once()
@@ -408,6 +469,20 @@ def test_policy_search_handles_empty_table(monkeypatch):
         tools.search_policies("West freight")
 
     embedding.assert_not_called()
+
+
+def test_policy_search_rejects_tokenless_fallback_query(monkeypatch):
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value.__enter__.return_value
+    cursor.execute.return_value.fetchone.return_value = ("hash-v2-512",)
+    monkeypatch.setattr(tools, "ensure_policies", lambda: None)
+    monkeypatch.setattr(tools, "connect", lambda: connection)
+
+    with pytest.raises(ValueError, match="searchable"):
+        tools.search_policies("!!!")
+
+    assert not any("VECTOR_DISTANCE" in call.args[0] for call in cursor.execute.call_args_list)
 
 
 def test_question_scope():
