@@ -1,5 +1,7 @@
 """Unit checks and live integration against the existing local Oracle tables."""
 import copy
+from datetime import datetime
+import hashlib
 import json
 import re
 import runpy
@@ -392,6 +394,77 @@ def test_delayed_policy_refresh_preserves_newer_content(tmp_path, monkeypatch):
 
     assert [row["chunk"] for row in rows] == ["Updated policy"]
     connection.commit.assert_called_once()
+
+
+@pytest.mark.parametrize("replacement", [[0.0, 1.0], [0.0, 0.0, 1.0]])
+@pytest.mark.parametrize("legacy_cache", [False, True])
+def test_policy_model_replacement_refreshes_embeddings(
+        replacement, legacy_cache, tmp_path, monkeypatch):
+    (tmp_path / "policy.md").write_text("West freight policy", encoding="utf-8")
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.fetchone.return_value = ("POLICY_CHUNKS",)
+    model = {"revision": 1, "vector": [1.0, 0.0]}
+    rows = []
+    if legacy_cache:
+        old_fingerprint = hashlib.sha256(repr([("policy.md", "West freight policy")]).encode()).hexdigest()
+        rows.append({"backend": "SAME_MODEL", "fingerprint": old_fingerprint,
+                     "vector": [-1.0, 0.0]})
+
+    def execute(sql, **params):
+        normalized = " ".join(sql.lower().split())
+        if "from user_mining_models" in normalized:
+            cursor.fetchall.return_value = [("SAME_MODEL",)]
+        elif "from user_objects" in normalized:
+            # Keep dates equal even across replacement: Oracle DATE has second precision.
+            when = datetime(2025, 1, 1)
+            cursor.fetchone.return_value = (model["revision"], when, when)
+        elif normalized.startswith("select distinct backend, source_hash"):
+            cursor.fetchall.return_value = [(row["backend"], row["fingerprint"]) for row in rows]
+        elif normalized.startswith("delete from policy_chunks"):
+            rows.clear()
+        elif normalized.startswith("insert into policy_chunks"):
+            rows.append(params)
+        return cursor
+
+    cursor.execute.side_effect = execute
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+    monkeypatch.setattr("policies.embed", lambda cur, text, backend:
+                        [0.5, 0.5] if text == "Business policy" else model["vector"][:])
+
+    assert ensure_policies() == "SAME_MODEL"
+    assert rows[0]["vector"] == [1.0, 0.0]
+    assert ensure_policies() == "SAME_MODEL"
+    assert connection.commit.call_count == 1
+
+    model.update(revision=2, vector=replacement)
+    assert ensure_policies() == "SAME_MODEL"
+    assert rows[0]["vector"] == replacement
+    assert connection.commit.call_count == 2
+
+    assert ensure_policies() == "SAME_MODEL"
+    assert connection.commit.call_count == 2
+
+
+def test_policy_refresh_requires_model_metadata(tmp_path, monkeypatch):
+    (tmp_path / "policy.md").write_text("West freight policy", encoding="utf-8")
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.execute.return_value.fetchone.side_effect = [("POLICY_CHUNKS",), None]
+    cursor.execute.return_value.fetchall.return_value = [("SAME_MODEL",)]
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+    monkeypatch.setattr("policies.embed", lambda *args: [1.0, 0.0])
+
+    with pytest.raises(RuntimeError, match="metadata"):
+        ensure_policies()
+
+    assert not any(call.args[0].lstrip().startswith(("DELETE", "INSERT"))
+                   for call in cursor.execute.call_args_list)
+    connection.commit.assert_not_called()
 
 
 def test_policy_search_handles_empty_table(monkeypatch):

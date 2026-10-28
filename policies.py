@@ -43,7 +43,6 @@ def ensure_policies():
         sources = [(p.name, p.read_text(encoding="utf-8")) for p in sorted(DOCS.glob("*.md"))]
         if not sources:
             raise RuntimeError("No policy documents found")
-        fingerprint = hashlib.sha256(repr(sources).encode()).hexdigest()
         with connect() as con:
             cur = con.cursor()
             if not cur.execute("SELECT table_name FROM user_tables WHERE table_name='POLICY_CHUNKS'").fetchone():
@@ -51,6 +50,7 @@ def ensure_policies():
                     id NUMBER PRIMARY KEY, doc VARCHAR2(255), chunk VARCHAR2(4000),
                     embedding VECTOR(*, FLOAT32), backend VARCHAR2(128), source_hash VARCHAR2(64))""")
             backend = "hash-v1-512"
+            revision = None
             for (model,) in cur.execute(
                 "SELECT model_name FROM user_mining_models WHERE mining_function='EMBEDDING' ORDER BY model_name"
             ).fetchall():
@@ -58,7 +58,7 @@ def ensure_policies():
                     _logger.warning("Skipping unsupported embedding model %r", model)
                     continue
                 try:
-                    embed(cur, "Business policy", model)
+                    probe = embed(cur, "Business policy", model)
                     backend = model
                     break
                 except oracledb.DatabaseError as exc:
@@ -70,6 +70,14 @@ def ensure_policies():
                     _logger.warning("Embedding model %r incompatible (ORA-%05d)", model, code)
             else:
                 _logger.warning("Using hash-v1-512 fallback: no compatible embedding models available")
+            if backend != "hash-v1-512":
+                revision = cur.execute("""SELECT object_id, created, last_ddl_time FROM user_objects
+                    WHERE object_name=:model AND object_type='MINING MODEL'""", model=backend).fetchone()
+                if revision is None:
+                    raise RuntimeError("Embedding model metadata is unavailable")
+                # Include the probe as a safeguard if an object ID is reused within a second.
+                revision = (revision, list(probe))
+            fingerprint = hashlib.sha256(repr((sources, revision)).encode()).hexdigest()
             existing = cur.execute("SELECT DISTINCT backend, source_hash FROM policy_chunks").fetchall()
             if existing == [(backend, fingerprint)]:
                 return backend
