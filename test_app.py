@@ -8,6 +8,7 @@ import sqlite3
 from contextlib import nullcontext
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from decimal import Decimal
 from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
@@ -1074,6 +1075,28 @@ def test_real_select_and_bind(ending):
     result = tools.run_sql(sql, {"name": "West"})
     assert result["rows"] == [{"region_name": "West"}]
     assert result["sql"] == sql
+
+
+def test_sql_decimal_amount_is_exact_in_critic_and_browser(monkeypatch):
+    source = {"kind": "sql", **tools.run_sql(
+        "SELECT SUM(100000000000000.01) AS total FROM regions WHERE region_name=:name",
+        {"name": "West"})}
+    evidence = {"E1": source}
+    amount = source["rows"][0]["total"]
+    assert isinstance(amount, Decimal)
+    assert amount == Decimal("100000000000000.01")
+
+    part = {"value": "100000000000000.01", "evidence": "E1", "row": 0, "column": "total"}
+    assert supported(part, evidence)
+    assert not supported({**part, "value": "100000000000000.02"}, evidence)
+
+    monkeypatch.setattr("app.answer_question", lambda _: {
+        "region": "West", "claims": [{"kind": "finding", "parts": [part]}], "evidence": evidence})
+    response = app.test_client().post("/", data={"question": "West"})
+    assert response.status_code == 200
+    serialized = response.get_data(as_text=True).split("const evidence = ", 1)[1].split(";", 1)[0]
+    assert json.loads(serialized)["E1"]["rows"][0]["total"] == "100000000000000.01"
+    assert source["rows"][0]["total"] == amount
 
 
 def test_select_preserves_semicolon_in_string():
