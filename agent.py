@@ -1,4 +1,5 @@
 """Fixed, auditable business analysis; no language model or API key needed."""
+from decimal import Decimal
 from hashlib import sha256
 import re
 
@@ -227,6 +228,9 @@ def answer_question(question):
     if margin_available:
         precision_note = (" The change is below display precision."
                           if row["margin_drop_pts"] == 0 and direction != "was unchanged" else "")
+        if (Decimal(str(row["before_margin_pct"])) - Decimal(str(row["after_margin_pct"]))
+                != Decimal(str(row["margin_drop_pts"]))):
+            precision_note += " The displayed margins and change are independently rounded from unrounded aggregates."
         # The signed drop is kept intact, including for regions whose margin rose.
         claim("finding", [text(f"{region} gross margin {direction} from "), number("before_margin_pct", "%"),
             text(" to "), number("after_margin_pct", "%"), text("; the signed margin drop is "),
