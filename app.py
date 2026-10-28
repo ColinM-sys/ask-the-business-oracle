@@ -1,7 +1,7 @@
 """Local Flask UI: python app.py, then http://127.0.0.1:5055."""
 from flask import Flask, render_template, request
 
-from agent import QuestionValidationError, answer_question
+from agent import DataQualityError, QuestionValidationError, answer_question
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024
@@ -38,8 +38,15 @@ def index():
             result = answer_question(question)
         except QuestionValidationError as exc:
             error, status = str(exc), 400
-        except Exception:
+        except DataQualityError as exc:
+            error, status = str(exc), 503
+        except Exception as exc:
             # Do not expose connection settings, driver errors or credentials.
+            failure_type = type(exc).__name__
+            if failure_type not in {"DatabaseError", "InterfaceError", "OperationalError",
+                                    "ValueError", "RuntimeError", "TypeError", "OSError"}:
+                failure_type = "unexpected error"
+            app.logger.error("Analysis failed: %s", failure_type)
             error, status = "Analysis unavailable. Check the local Oracle connection and policy setup, then retry.", 503
     return render_template("index.html", result=result, error=error, question=question,
                            question_error=status == 400), status

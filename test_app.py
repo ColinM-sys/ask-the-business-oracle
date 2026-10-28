@@ -529,7 +529,8 @@ def test_missing_monthly_costs_reject_incomplete_analysis(region_id, month, prod
         policies.assert_not_called()
         response = app.test_client().post("/", data={"question": "West since July 2025"})
         assert response.status_code == 503
-        assert b"Missing monthly costs" not in response.data
+        assert b"Missing monthly costs or duplicate cost rows" in response.data
+        assert b"Check the local Oracle connection" not in response.data
 
         if cost is None:
             con.execute("INSERT INTO costs VALUES (?, ?, ?, 60.0, 5.0)",
@@ -1348,6 +1349,52 @@ def test_ui_validation_and_safe_error(monkeypatch):
     response = client.post("/", data={"question": "West"})
     assert response.status_code == 503
     assert b"secret-driver-settings" not in response.data
+
+
+@pytest.mark.parametrize("source", ["monthly", "summary"])
+def test_ui_reports_missing_discount_inputs(monkeypatch, source):
+    row = {"region_name": "West", "missing_cost_count": 0, "missing_discount_count": 0}
+    results = iter([
+        {"sql": "monthly", "params": {}, "rows": [
+            {**row, "missing_discount_count": int(source == "monthly")}]},
+        {"sql": "summary", "params": {}, "rows": [
+            {**row, "missing_discount_count": int(source == "summary")}]},
+    ])
+    policies = MagicMock()
+    monkeypatch.setattr("agent.run_sql", lambda *args: next(results))
+    monkeypatch.setattr("agent.search_policies", policies)
+
+    response = app.test_client().post("/", data={"question": "West since July 2025"})
+
+    assert response.status_code == 503
+    assert b"Missing discount inputs for some sales" in response.data
+    assert b"Check the local Oracle connection" not in response.data
+    policies.assert_not_called()
+
+
+@pytest.mark.parametrize("error_type,category", [
+    (RuntimeError, "RuntimeError"), (ValueError, "ValueError"),
+    (oracledb.DatabaseError, "DatabaseError"),
+    (type("private-class-details\nforged log entry", (Exception,), {}), "unexpected error"),
+])
+def test_ui_records_sanitized_unexpected_failure(monkeypatch, caplog, error_type, category):
+    def failure(*args, **kwargs):
+        raise error_type("private-driver-details\nforged log entry")
+
+    monkeypatch.setattr("agent.run_sql", failure)
+    with caplog.at_level("ERROR"):
+        response = app.test_client().post(
+            "/", data={"question": "West private-question-details"})
+
+    assert response.status_code == 503
+    assert b"Check the local Oracle connection" in response.data
+    assert b"private-driver-details" not in response.data
+    assert any(record.getMessage() == f"Analysis failed: {category}" for record in caplog.records)
+    assert "private-driver-details" not in caplog.text
+    assert "private-class-details" not in caplog.text
+    assert "forged log entry" not in caplog.text
+    assert "private-question-details" not in caplog.text
+    assert not any(record.exc_info or record.stack_info for record in caplog.records)
 
 
 def test_ui_sanitizes_invalid_policy_encoding(tmp_path, monkeypatch):
