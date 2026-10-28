@@ -6,6 +6,7 @@ import runpy
 import subprocess
 import sqlite3
 from contextlib import nullcontext
+from decimal import Decimal
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
@@ -1234,6 +1235,36 @@ def test_real_select_and_bind(ending):
     assert result["sql"] == sql
 
 
+def test_fractional_oracle_numbers_remain_exact_in_evidence(monkeypatch):
+    sql = ("SELECT 9007199254740993.25 AS amount, -9007199254740993.25 AS negative_amount, "
+           "0.0000000000000000000000000001 AS tiny, 42 AS whole, NULL AS missing "
+           "FROM regions WHERE region_name=:name")
+    result = tools.run_sql(sql, {"name": "West"})
+    row = result["rows"][0]
+    assert row == {"amount": Decimal("9007199254740993.25"),
+                   "negative_amount": Decimal("-9007199254740993.25"),
+                   "tiny": Decimal("0.0000000000000000000000000001"),
+                   "whole": Decimal("42"), "missing": None}
+    assert all(isinstance(row[column], Decimal)
+               for column in ("amount", "negative_amount", "tiny", "whole"))
+
+    evidence = {"E1": {"kind": "sql", **result}}
+    part = {"value": row["amount"], "evidence": "E1", "row": 0, "column": "amount"}
+    assert supported(part, evidence)
+    assert not supported({**part, "value": "9007199254740994"}, evidence)
+    monkeypatch.setattr("app.answer_question", lambda _: {
+        "region": "West", "claims": [{"kind": "finding", "parts": [part], "policy_ids": []}],
+        "evidence": evidence,
+    })
+    response = app.test_client().post("/", data={"question": "West"})
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert ">9007199254740993.25</button>" in html
+    serialized = json.loads(re.search(r"const evidence = (.*?);", html).group(1))
+    assert serialized["E1"]["rows"][0] == {
+        "amount": "9007199254740993.25", "negative_amount": "-9007199254740993.25",
+        "tiny": "1E-28", "whole": "42", "missing": None,
+    }
 def test_sql_decimal_amount_is_exact_in_critic_and_browser(monkeypatch):
     source = {"kind": "sql", **tools.run_sql(
         "SELECT SUM(100000000000000.01) AS total FROM regions WHERE region_name=:name",
