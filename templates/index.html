@@ -60,7 +60,7 @@
   {% if result %}
   <article class="card" aria-live="polite">
     <div class="eyebrow">Business brief · {{ result.region }}</div>
-    <h2>What changed, and what to do</h2>
+    <h2 tabindex="-1" autofocus>What changed, and what to do</h2>
     <button type="button" class="download" id="download-brief">Download brief</button>
     {% set reasons = result.claims | selectattr('kind', 'equalto', 'reason') | list %}
     {% set actions = result.claims | selectattr('kind', 'equalto', 'action') | list %}
