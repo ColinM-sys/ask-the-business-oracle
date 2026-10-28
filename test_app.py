@@ -855,7 +855,28 @@ def test_updated_policy_source_invalidates_unchanged_retrieved_chunk(policy_rows
     result = answer_question("West since July 2025")
 
     assert not any(claim["kind"] == "reason" for claim in result["claims"])
-    assert len([claim for claim in result["claims"] if claim["kind"] == "action"]) == 3
+    assert not any(claim["kind"] == "action" for claim in result["claims"])
+    assert result["dropped_count"] == 0
+
+
+@pytest.mark.parametrize("retrieved", [True, False])
+def test_superseding_policy_invalidates_fixed_claims(policy_rows, tmp_path, monkeypatch, retrieved):
+    for policy in policy_rows:
+        (tmp_path / policy["doc"]).write_text(policy["chunk"], encoding="utf-8")
+    superseding = {
+        "id": 99,
+        "doc": "west_q3_cancellation.md",
+        "chunk": "This document supersedes west_q3_volume_push.md: the program was cancelled before launch.",
+    }
+    (tmp_path / superseding["doc"]).write_text(superseding["chunk"], encoding="utf-8")
+    monkeypatch.setattr("agent.DOCS", tmp_path)
+    if retrieved:
+        policy_rows.append(superseding)
+
+    result = answer_question("West since July 2025")
+
+    assert not any(claim["kind"] in {"reason", "action"} for claim in result["claims"])
+    assert len([claim for claim in result["claims"] if claim["kind"] == "finding"]) == 3
     assert result["dropped_count"] == 0
 
 
