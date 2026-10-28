@@ -345,6 +345,85 @@ def test_hashing_is_stable_and_normalized():
     assert abs(sum(v*v for v in first) - 1) < 0.000001
 
 
+@pytest.mark.parametrize("attribute", ["INPUT_STRING", "Mixed case's input"])
+def test_policy_embeddings_use_model_input_attribute(attribute, tmp_path, monkeypatch):
+    (tmp_path / "policy.md").write_text("Distinct policy content", encoding="utf-8")
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.__enter__.return_value = cursor
+    rows, lookups, embeddings = [], [], []
+
+    def execute(sql, *args, **params):
+        if "FROM user_mining_models" in sql:
+            cursor.fetchall.return_value = [("GOOD_MODEL", "created", 1, "modified")]
+        elif "FROM user_mining_model_attributes" in sql:
+            lookups.append((sql, params))
+            cursor.fetchone.return_value = (attribute,)
+        elif sql.startswith("SELECT table_name"):
+            cursor.fetchone.return_value = ("POLICY_CHUNKS",)
+        elif sql.startswith("SELECT DISTINCT backend, source_hash"):
+            cursor.fetchall.return_value = [(row["backend"], row["fingerprint"]) for row in rows]
+        elif sql.startswith("SELECT backend FROM policy_chunks"):
+            cursor.fetchone.return_value = (rows[0]["backend"],)
+        elif "VECTOR_EMBEDDING" in sql:
+            embeddings.append((sql, params))
+            if sql != f'SELECT VECTOR_EMBEDDING(GOOD_MODEL USING :text AS "{attribute}") FROM dual':
+                raise oracledb.DatabaseError(SimpleNamespace(code=54421))
+            cursor.fetchone.return_value = (hash_embedding(params["text"]),)
+        elif sql.lstrip().startswith("INSERT INTO policy_chunks"):
+            rows.append(params)
+        elif "VECTOR_DISTANCE" in sql:
+            cursor.fetchall.return_value = []
+        return cursor
+
+    cursor.execute.side_effect = execute
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+    monkeypatch.setattr(tools, "connect", lambda: connection)
+    monkeypatch.setattr("policies._probe_cache", {})
+
+    assert ensure_policies() == "GOOD_MODEL"
+    tools.search_policies("West freight")
+
+    assert [params["text"] for _, params in embeddings] == [
+        "Business policy", "Distinct policy content", "West freight"]
+    assert len(lookups) == 3
+    assert all(params == {"model": "GOOD_MODEL"} for _, params in lookups)
+
+
+@pytest.mark.parametrize("attribute", ['INPUT"NAME', "INPUT\0NAME"])
+@pytest.mark.parametrize("later_model", [None, "GOOD_MODEL"])
+def test_policy_probe_skips_unquotable_input_attributes(attribute, later_model, tmp_path, monkeypatch):
+    (tmp_path / "policy.md").write_text("Business policy", encoding="utf-8")
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
+    models = [("BAD_MODEL", "created", 1, "modified")]
+    if later_model:
+        models.append((later_model, "created", 2, "modified"))
+    cursor.execute.return_value.fetchall.side_effect = [models, []]
+    metadata = MagicMock()
+
+    def execute(sql, **params):
+        if sql.startswith("SELECT attribute_name FROM user_mining_model_attributes"):
+            metadata.fetchone.return_value = (attribute if params["model"] == "BAD_MODEL" else "DATA",)
+            return metadata
+        return cursor.execute.return_value
+
+    cursor.execute.side_effect = execute
+    monkeypatch.setattr("policies.DOCS", tmp_path)
+    monkeypatch.setattr("policies.connect", lambda: connection)
+    monkeypatch.setattr("policies._probe_cache", {})
+
+    assert ensure_policies() == (later_model or "hash-v1-512")
+    embedding_sql = [call.args[0] for call in cursor.execute.call_args_list
+                     if "VECTOR_EMBEDDING" in call.args[0]]
+    assert all("BAD_MODEL" not in sql for sql in embedding_sql)
+    assert len(embedding_sql) == (2 if later_model else 0)
+
+
 @pytest.mark.parametrize("failure_mode", ["incompatible", "null"])
 def test_policy_probe_cache_tracks_model_versions(failure_mode, tmp_path, monkeypatch):
     (tmp_path / "policy.md").write_text("Distinct policy content", encoding="utf-8")
@@ -567,6 +646,11 @@ def test_policy_probe_skips_unsupported_names(unsupported, later_model, tmp_path
     cursor.execute.return_value.fetchone.return_value = ("POLICY_CHUNKS",)
     models = [(unsupported, "created", 1, "modified")] + ([(later_model, "created", 2, "modified")] if later_model else [])
     cursor.execute.return_value.fetchall.side_effect = [models, []]
+    metadata = MagicMock()
+    metadata.fetchone.return_value = ("DATA",)
+    cursor.execute.side_effect = lambda sql, **params: (
+        metadata if sql.startswith("SELECT attribute_name FROM user_mining_model_attributes")
+        else cursor.execute.return_value)
     monkeypatch.setattr("policies.DOCS", tmp_path)
     monkeypatch.setattr("policies.connect", lambda: connection)
     monkeypatch.setattr("policies._probe_cache", {})
@@ -575,7 +659,7 @@ def test_policy_probe_skips_unsupported_names(unsupported, later_model, tmp_path
     assert ensure_policies() == expected
     embedding_sql = [call.args[0] for call in cursor.execute.call_args_list
                      if "VECTOR_EMBEDDING" in call.args[0]]
-    assert embedding_sql == (["SELECT VECTOR_EMBEDDING(GOOD_MODEL USING :text AS DATA) FROM dual"] * 2
+    assert embedding_sql == (['SELECT VECTOR_EMBEDDING(GOOD_MODEL USING :text AS "DATA") FROM dual'] * 2
                              if later_model else [])
     inserted = [call.kwargs for call in cursor.execute.call_args_list
                 if call.args[0].lstrip().startswith("INSERT INTO policy_chunks")]

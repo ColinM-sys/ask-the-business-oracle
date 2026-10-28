@@ -18,6 +18,10 @@ _model_identifier = re.compile(r"[A-Z][A-Z0-9_$#]*")
 _probe_cache = {}
 
 
+class _InvalidModelInput(ValueError):
+    pass
+
+
 def hash_embedding(text, dimensions=512):
     values = [0.0] * dimensions
     for word in re.findall(r"[a-z]+", text.lower()):
@@ -32,8 +36,18 @@ def embed(cursor, text, backend):
         return hash_embedding(text)
     if not _model_identifier.fullmatch(backend):
         raise ValueError("Invalid embedding model name")
+    row = cursor.execute(
+        """SELECT attribute_name FROM user_mining_model_attributes
+            WHERE model_name=:model AND attribute_type='TEXT'
+            AND data_type IN ('VARCHAR2', 'CLOB', 'NVARCHAR2', 'NCLOB')
+            ORDER BY attribute_name FETCH FIRST 1 ROW ONLY""",
+        model=backend,
+    ).fetchone()
+    if not row or not row[0] or '"' in row[0] or "\0" in row[0]:
+        raise _InvalidModelInput("Invalid embedding model input attribute")
+    attribute = row[0]
     return cursor.execute(
-        f"SELECT VECTOR_EMBEDDING({backend} USING :text AS DATA) FROM dual",
+        f'SELECT VECTOR_EMBEDDING({backend} USING :text AS "{attribute}") FROM dual',
         text=text,
     ).fetchone()[0]
 
@@ -82,6 +96,9 @@ def ensure_policies():
                 if model_key not in _probe_cache:
                     try:
                         vector = embed(cur, "Business policy", model)
+                    except _InvalidModelInput:
+                        _logger.warning("Skipping embedding model %r with invalid input attribute", model)
+                        _probe_cache[model_key] = False
                     except oracledb.DatabaseError as exc:
                         code = getattr(exc.args[0], "code", None) if exc.args else None
                         # ORA-40290: the model is incompatible with this SQL operator.
