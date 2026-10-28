@@ -38,6 +38,10 @@ def embed(cursor, text, backend):
     ).fetchone()[0]
 
 
+def model_fingerprint(model_version):
+    return "v" + hashlib.sha256(repr(model_version).encode()).hexdigest()[:31]
+
+
 def ensure_policies():
     """Refresh only on source/model changes; never modify the business tables."""
     with _lock:
@@ -102,7 +106,7 @@ def ensure_policies():
                 _logger.warning("Using hash-v1-512 fallback: no compatible embedding models available")
             # Tag the collection fingerprint with the model revision. The non-hex prefix
             # also invalidates legacy rows, whose model revision was not recorded.
-            version = "v" + hashlib.sha256(repr(model_version).encode()).hexdigest()[:31]
+            version = model_fingerprint(model_version)
             fingerprint = version + source_hash[:32]
             existing = cur.execute("SELECT DISTINCT backend, source_hash FROM policy_chunks").fetchall()
             if existing == [(backend, fingerprint)]:

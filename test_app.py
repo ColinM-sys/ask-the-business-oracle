@@ -1089,6 +1089,173 @@ def test_policy_search_handles_empty_table(monkeypatch):
     embedding.assert_not_called()
 
 
+@pytest.mark.parametrize("replacement", [
+    "after_refresh", "during_embedding", "embedding_error", "embedding_null", "model_during_search",
+    "collection_during_search", "content_during_search", "mislabelled_during_search", "persistent_mismatch",
+])
+@pytest.mark.parametrize("same_dimensions", [True, False])
+def test_policy_search_retries_when_model_is_replaced(replacement, same_dimensions, monkeypatch):
+    from array import array
+
+    old_model = ("SAME_MODEL", "created", 1, "modified")
+    new_model = ("SAME_MODEL", "created", 2, "modified")
+    state = {"model": old_model, "stored": old_model, "vector_model": old_model, "source": "a", "refreshes": 0,
+             "embeddings": 0, "searches": 0}
+    new_vector = [0.0, 1.0] if same_dimensions else [0.0, 1.0, 0.0]
+
+    def fingerprint(model, source):
+        return "v" + hashlib.sha256(repr(model).encode()).hexdigest()[:31] + source * 32
+
+    def refresh():
+        state["refreshes"] += 1
+        state["stored"] = state["model"]
+        state["vector_model"] = state["model"]
+        if replacement == "after_refresh" and state["refreshes"] == 1:
+            state["model"] = new_model
+        elif replacement == "persistent_mismatch":
+            state["model"] = new_model if state["model"] == old_model else old_model
+        return "SAME_MODEL"
+
+    class Connection:
+        def __init__(self):
+            self.snapshot = None
+            self.selected_fingerprint = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def cursor(self):
+            return Cursor(self)
+
+    class Cursor:
+        def __init__(self, connection):
+            self.connection = connection
+            self.rows = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def execute(self, sql, *args, **kwargs):
+            normalized = " ".join(sql.lower().split())
+            if normalized.startswith("set transaction read only"):
+                self.connection.snapshot = (state["model"], state["stored"], state["vector_model"], state["source"])
+            else:
+                model, stored, vector_model, source = self.connection.snapshot or (
+                    state["model"], state["stored"], state["vector_model"], state["source"])
+                if "vector_distance(" in normalized:
+                    params = args[0] if args else kwargs
+                    state["searches"] += 1
+                    if state["searches"] == 1:
+                        if replacement == "model_during_search":
+                            state["model"] = new_model
+                        elif replacement == "collection_during_search":
+                            state["model"] = state["stored"] = state["vector_model"] = new_model
+                        elif replacement == "mislabelled_during_search":
+                            # Another refresh embedded with the replacement after recording the old revision.
+                            state["model"] = state["vector_model"] = new_model
+                        elif replacement == "content_during_search":
+                            state["source"] = "b"
+                        model, stored, vector_model, source = self.connection.snapshot or (
+                            state["model"], state["stored"], state["vector_model"], state["source"])
+                    query_vector = json.loads(params["query_vector"])
+                    stored_vector = [1.0, 0.0] if vector_model == old_model else new_vector
+                    match = re.search(r"source_hash\s*=\s*:(\w+)", normalized)
+                    current_fingerprint = fingerprint(stored, source)
+                    if match and params[match.group(1)] != current_fingerprint:
+                        self.rows = []
+                    else:
+                        if len(query_vector) != len(stored_vector):
+                            raise oracledb.DatabaseError(SimpleNamespace(code=51813, message="Vector dimensions differ"))
+                        valid = query_vector == stored_vector and self.connection.selected_fingerprint == current_fingerprint
+                        doc = "correct" if valid else "incorrect"
+                        self.rows = [(1, doc, "Policy", 0.0)]
+                elif "from policy_chunks" in normalized:
+                    selected = normalized.split("from policy_chunks", 1)[0]
+                    self.connection.selected_fingerprint = fingerprint(stored, source)
+                    self.rows = [(stored[0], self.connection.selected_fingerprint)] if "source_hash" in selected else [(stored[0],)]
+                elif "user_mining_models" in normalized or "user_objects" in normalized:
+                    self.rows = [model]
+                else:
+                    pytest.fail(f"Unexpected SQL: {sql}")
+            return self
+
+        def fetchone(self):
+            return self.rows[0] if self.rows else None
+
+        def fetchall(self):
+            return self.rows
+
+    def embedding(cursor, text, backend):
+        state["embeddings"] += 1
+        if replacement in ("during_embedding", "embedding_error", "embedding_null") and state["embeddings"] == 1:
+            state["model"] = new_model
+            if replacement == "embedding_error":
+                raise oracledb.DatabaseError(SimpleNamespace(code=40284, message="Model replaced"))
+            if replacement == "embedding_null":
+                return None
+        assert backend == "SAME_MODEL"
+        return array("f", [1.0, 0.0] if state["model"] == old_model else new_vector)
+
+    monkeypatch.setattr(tools, "ensure_policies", refresh)
+    monkeypatch.setattr(tools, "connect", Connection)
+    monkeypatch.setattr("policies.connect", Connection)
+    monkeypatch.setattr(tools, "embed", embedding)
+    monkeypatch.setattr("policies.embed", embedding)
+
+    if replacement == "persistent_mismatch":
+        with pytest.raises(RuntimeError, match="changed.*retry"):
+            tools.search_policies("West freight")
+        assert state["refreshes"] == 3
+        assert state["embeddings"] == 0
+        return
+
+    result = tools.search_policies("West freight")
+    assert result["rows"][0]["doc"] == "correct"
+    assert state["stored"] == (old_model if replacement == "content_during_search" else new_model)
+    assert state["refreshes"] >= 2
+
+
+@pytest.mark.parametrize("failure_stage", ["embedding", "retrieval"])
+@pytest.mark.parametrize("recheck_fails", [False, True])
+def test_policy_search_propagates_unrelated_oracle_errors(failure_stage, recheck_fails, monkeypatch):
+    from array import array
+
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value.__enter__.return_value
+    cursor.fetchone.return_value = ("SAME_MODEL", "v" + "a" * 63)
+    failure = oracledb.DatabaseError(SimpleNamespace(code=3113, message="Connection lost"))
+    recheck_failure = oracledb.DatabaseError(SimpleNamespace(code=3114, message="Not connected"))
+
+    def execute(sql, *args, **kwargs):
+        if "VECTOR_DISTANCE" in sql and failure_stage == "retrieval":
+            raise failure
+        return cursor
+
+    cursor.execute.side_effect = execute
+    refresh = MagicMock()
+    monkeypatch.setattr(tools, "ensure_policies", refresh)
+    monkeypatch.setattr(tools, "connect", lambda: connection)
+    recheck = ["v" + "a" * 31] * (2 if failure_stage == "retrieval" else 1)
+    recheck.append(recheck_failure if recheck_fails else "v" + "a" * 31)
+    monkeypatch.setattr(tools, "_model_fingerprint", MagicMock(side_effect=recheck))
+    monkeypatch.setattr(tools, "embed", MagicMock(
+        side_effect=failure if failure_stage == "embedding" else None,
+        return_value=array("f", [1.0, 0.0])))
+
+    with pytest.raises(oracledb.DatabaseError) as caught:
+        tools.search_policies("West freight")
+
+    assert caught.value is failure
+    refresh.assert_called_once()
+
+
 def test_question_scope():
     assert parse_question("East since March 2025") == ("East", "2025-03")
     assert parse_question("West since 2025-07") == ("West", "2025-07")
@@ -2116,7 +2283,7 @@ def test_policy_vector_search_and_idempotent_setup():
     assert policies["rows"] == sorted(policies["rows"], key=lambda r: (r["distance"], r["id"]))
     # Replay the recorded bindings after the same JSON round trip used by the UI.
     params = json.loads(json.dumps(policies["params"]))
-    assert set(params) == {"query_vector", "k"}
+    assert set(params) == {"query_vector", "k", "backend", "fingerprint"}
     with connect() as con, con.cursor() as cur:
         cur.execute("SET TRANSACTION READ ONLY")
         rows = cur.execute(policies["sql"], params).fetchall()

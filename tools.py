@@ -7,7 +7,7 @@ import sqlglot
 from sqlglot import exp
 
 from db import connect
-from policies import embed, ensure_policies
+from policies import embed, ensure_policies, model_fingerprint
 
 TABLES = {"SALES", "COSTS", "CUSTOMERS", "DISCOUNTS", "PRODUCTS", "REGIONS"}
 FUNCTIONS = {"SUM", "MIN", "MAX", "AVG", "COUNT", "ROUND", "NULLIF", "COALESCE", "ABS", "AND", "OR"}
@@ -66,23 +66,60 @@ def run_sql(select, params=None):
                     "rows": [dict(zip(columns, row)) for row in rows]}
 
 
+def _model_fingerprint(cur, backend):
+    if backend == "hash-v1-512":
+        model_version = (backend,)
+    else:
+        model_version = cur.execute(
+            """SELECT m.model_name, m.creation_date, o.object_id, o.last_ddl_time
+                FROM user_mining_models m
+                LEFT JOIN user_objects o ON o.object_name=m.model_name
+                    AND o.object_type='MINING MODEL' AND o.subobject_name IS NULL
+                WHERE m.model_name=:backend AND m.mining_function='EMBEDDING'""",
+            backend=backend,
+        ).fetchone()
+    return model_fingerprint(model_version) if model_version else None
+
+
 def search_policies(text, k=5):
     if not isinstance(k, int) or not 1 <= k <= 20:
         raise ValueError("k must be between one and twenty")
     if not isinstance(text, str) or not text.strip():
         raise ValueError("Search text is required")
-    ensure_policies()
-    with connect() as con, con.cursor() as cur:
-        cur.execute("SET TRANSACTION READ ONLY")
-        row = cur.execute("SELECT backend FROM policy_chunks FETCH FIRST 1 ROW ONLY").fetchone()
-        if row is None:
-            raise RuntimeError("No policy chunks available")
-        backend = row[0]
-        vector = embed(cur, text, backend)
-        # Store the exact vector as JSON; SQL converts it back on execution/replay.
-        params = {"query_vector": json.dumps(vector.tolist()), "k": k}
-        sql = """SELECT id, doc, chunk, VECTOR_DISTANCE(embedding, TO_VECTOR(:query_vector), COSINE) AS distance
-            FROM policy_chunks ORDER BY distance, id FETCH FIRST :k ROWS ONLY"""
-        rows = cur.execute(sql, params).fetchall()
-        return {"sql": sql, "params": params,
-                "rows": [dict(zip(("id", "doc", "chunk", "distance"), row)) for row in rows]}
+    for _ in range(3):
+        ensure_policies()
+        with connect() as con, con.cursor() as cur:
+            # READ COMMITTED lets each metadata query see model replacements. The
+            # fingerprint predicate keeps retrieval tied to the selected collection.
+            row = cur.execute("SELECT backend, source_hash FROM policy_chunks FETCH FIRST 1 ROW ONLY").fetchone()
+            if row is None:
+                raise RuntimeError("No policy chunks available")
+            backend, fingerprint = row
+            revision = fingerprint[:32] if fingerprint else None
+            if not revision or _model_fingerprint(cur, backend) != revision:
+                continue
+            try:
+                vector = embed(cur, text, backend)
+                if _model_fingerprint(cur, backend) != revision:
+                    continue
+                if vector is None:
+                    raise RuntimeError("Embedding model returned no vector")
+                # Store the exact vector as JSON; SQL converts it back on execution/replay.
+                params = {"query_vector": json.dumps(vector.tolist()), "k": k,
+                          "backend": backend, "fingerprint": fingerprint}
+                sql = """SELECT id, doc, chunk, VECTOR_DISTANCE(embedding, TO_VECTOR(:query_vector), COSINE) AS distance
+                    FROM policy_chunks WHERE backend=:backend AND source_hash=:fingerprint
+                    ORDER BY distance, id FETCH FIRST :k ROWS ONLY"""
+                rows = cur.execute(sql, params).fetchall()
+            except oracledb.DatabaseError:
+                try:
+                    if _model_fingerprint(cur, backend) != revision:
+                        continue
+                except oracledb.DatabaseError:
+                    pass  # Preserve the original error if the connection was lost.
+                raise
+            if not rows or _model_fingerprint(cur, backend) != revision:
+                continue
+            return {"sql": sql, "params": params,
+                    "rows": [dict(zip(("id", "doc", "chunk", "distance"), row)) for row in rows]}
+    raise RuntimeError("Policy embeddings changed during search; retry")
