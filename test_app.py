@@ -20,6 +20,34 @@ from critic import critique, supported
 from policies import ensure_policies, hash_embedding
 
 
+def test_readme_documents_fresh_oracle_bootstrap():
+    root = Path(__file__).parent
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    for required in (
+        "docker run", "--name oracle-free", "127.0.0.1:1521:1521",
+        "container-registry.oracle.com/database/free:", "-e ORACLE_PWD",
+        "oracle-free-data:/opt/oracle/oradata", ".State.Health.Status",
+        "ALTER SESSION SET CONTAINER = FREEPDB1", "CREATE USER atb",
+        "GRANT CREATE SESSION, CREATE TABLE TO atb", "QUOTA 100M ON users",
+        "Copy-Item .env.example .env", "ORACLE_PASSWORD", "data/oracle_load.sql",
+        "2024-10", "2025-06", "2025-07", "2026-09", "13.36",
+        "Do not rerun `python load.py`",
+    ):
+        assert required in readme, f"Missing bootstrap instruction: {required}"
+    steps = [readme.index(command) for command in (
+        "docker run", "CREATE USER atb", "Copy-Item .env.example .env",
+        "python db.py", "python load.py", "python policies.py", "python app.py",
+    )]
+    assert steps == sorted(steps)
+    settings = dict(line.split("=", 1) for line in
+                    (root / ".env.example").read_text(encoding="utf-8").splitlines()
+                    if line and not line.startswith("#"))
+    assert settings["ORACLE_USER"] == "atb"
+    assert settings["ORACLE_DSN"] == "localhost:1521/FREEPDB1"
+    for key in ("ORACLE_PASSWORD", "ORACLE_WALLET_DIR", "ORACLE_WALLET_PASSWORD", "OPENAI_API_KEY"):
+        assert settings[key] == ""
+
+
 @pytest.mark.parametrize("sql", [
     "DELETE FROM sales", "DROP TABLE sales", "UPDATE sales SET quantity=0",
     "INSERT INTO sales (sale_id) VALUES (0)", "ALTER TABLE sales ADD x NUMBER",
