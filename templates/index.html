@@ -40,7 +40,7 @@
     .selected { background: #fff1c7; }
     details { margin-top: 18px; }
     summary { cursor: pointer; }
-    :focus-visible { outline: 3px solid #d99c3a; outline-offset: 3px; }
+    :focus-visible { outline: 3px solid #a56708; outline-offset: 3px; }
   </style>
 </head>
 <body>
@@ -59,6 +59,10 @@
   <article class="card" aria-live="polite">
     <div class="eyebrow">Business brief · {{ result.region }}</div>
     <h2>What changed, and what to do</h2>
+    {% set reasons = result.claims | selectattr('kind', 'equalto', 'reason') | list %}
+    {% set actions = result.claims | selectattr('kind', 'equalto', 'action') | list %}
+    {% set policy_reasons = reasons | selectattr('policy_ids') | list %}
+    {% set policy_actions = actions | selectattr('policy_ids') | list %}
     {% if result.dropped_count %}
     <p class="error" role="alert">{{ result.dropped_count }} claim{{ 's' if result.dropped_count != 1 else '' }} {{ 'were' if result.dropped_count != 1 else 'was' }} omitted because they failed verification.</p>
     {% endif %}
@@ -73,8 +77,14 @@
     {% else %}
     <p>No verified claims are available for this brief.</p>
     {% endfor %}
+    {% if not policy_reasons %}
+    <p class="hint">{% if not reasons %}Explanation unavailable: {% endif %}Policy-backed explanation is unavailable for this brief.</p>
+    {% endif %}
+    {% if not policy_actions %}
+    <p class="hint">{% if not actions %}Recommendations unavailable: {% endif %}Policy-backed recommendations are unavailable for this brief.</p>
+    {% endif %}
     {% if result.claims %}
-    <p class="hint">Numbers in retained claims verified against cited SQL cells. Policy citations support the qualitative explanation.</p>
+    <p class="hint">Numbers in retained claims verified against cited SQL cells.{% if policy_reasons %} Policy citations support the qualitative explanation.{% endif %}</p>
     {% endif %}
     <details><summary>Explore all evidence</summary>
       <p>{% for id in result.evidence %}<button type="button" class="citation" data-evidence="{{ id }}"{% if result.evidence[id].kind == 'policy' %} aria-label="{{ id }}: {{ result.evidence[id].rows[0].doc }}"{% endif %}>{{ id }}</button>{% endfor %}</p>
