@@ -55,8 +55,16 @@ were retrieved; West's explanation applies to the default change point.
 `run_sql` parses one SELECT, limits tables and functions to an allowlist, rejects
 writes/locks/sequences/procedural calls, and executes in a read-only transaction.
 It refuses evidence over the row limit instead of silently truncating it.
-Policy setup is the separate write path. The Flask server binds only to localhost
-and runs without debug mode; this demo has no production authentication layer.
+Each `search_policies` call runs `ensure_policies` during analysis. It creates
+`policy_chunks` if absent and transactionally replaces its rows when the table
+is empty or policy documents or the embedding backend change. The server's
+Oracle user needs `CREATE TABLE` and tablespace quota to create the table if
+absent, plus `SELECT`, `DELETE`, and `INSERT` access to `policy_chunks` to read
+and refresh it (the table owner has these privileges). Running `python policies.py`
+once does not make SELECT-only runtime permissions sufficient.
+
+The Flask server binds only to localhost and runs without debug mode; this demo
+has no production authentication layer.
 
 ```powershell
 python -m pytest -q test_app.py
