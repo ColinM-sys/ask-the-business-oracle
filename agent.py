@@ -108,7 +108,14 @@ def parse_question(question):
     matched = date or named
     remaining = question[:matched.start()] + question[matched.end():] if matched else question
     if (re.search(r"\b\d{4}\b|\b\d+[-/]\d+\b", remaining)
-            or re.search(month_pattern, remaining, re.I)):
+            or re.search(month_pattern, remaining, re.I)
+            or re.search(r"\b(?:days?|weeks?|months?|quarters?|years?|decades?|fortnights?|"
+                         r"wks?|mos?|qtrs?|yrs?|morning|afternoon|evening|night|"
+                         r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
+                         r"spring|summer|autumn|winter|today|yesterday|tomorrow|now|ago|"
+                         r"recently|[dwmyq]td)\b|\b(?:(?:last|this|next|past|previous|current)"
+                         r"(?:\s+\w+){0,2}|since(?:\s+the)?)\s+(?:fall|periods?)\b",
+                         remaining, re.I)):
         raise QuestionValidationError("Unsupported date; use YYYY-MM or a month name and four-digit year.")
     return region_matches[0] if region_matches else "West", cutoff
 

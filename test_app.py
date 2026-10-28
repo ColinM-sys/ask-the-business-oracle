@@ -19,7 +19,7 @@ import pytest
 import db
 import tools
 from db import connect
-from agent import answer_question, parse_question, summary_sql
+from agent import QuestionValidationError, answer_question, parse_question, summary_sql
 from app import app
 from critic import critique, supported
 from policies import ensure_policies, hash_embedding
@@ -873,8 +873,30 @@ def test_question_rejects_unsupported_explicit_dates(date):
         parse_question(f"West since {date}")
 
 
+@pytest.mark.parametrize("date", [
+    "last month", "LAST YEAR", "this quarter", "the past 3 months",
+    "the last few weeks", "previous year", "2 months ago", "a year ago",
+    "year to date", "YTD", "yesterday", "recently", "last Monday", "last summer",
+    "last fall", "the fall", "last period", "last fiscal period", "last 2 periods",
+    "last qtr", "this yr", "last fortnight", "this morning", "last night", "last month and July 2025",
+    "July 2025 and last month", "this fiscal quarter",
+])
+def test_question_rejects_relative_dates_before_querying(monkeypatch, date):
+    def forbidden_query(*args, **kwargs):
+        pytest.fail("Relative dates must be rejected before querying")
+
+    monkeypatch.setattr("agent.run_sql", forbidden_query)
+    question = f"West since {date}"
+    with pytest.raises(QuestionValidationError, match="Unsupported date"):
+        answer_question(question)
+    response = app.test_client().post("/", data={"question": question})
+    assert response.status_code == 400
+    assert b"Unsupported date" in response.data
+
+
 def test_question_defaults_only_without_date():
     assert parse_question("Why did West margin fall?") == ("West", "2025-07")
+    assert parse_question("Why did the last freight contract change West monthly margin?") == ("West", "2025-07")
 @pytest.mark.parametrize("region", ["North", "north", "Northeast", "Northwest", "Southeast", "Southwest", "West and North"])
 def test_unsupported_region_is_rejected_before_querying(monkeypatch, region):
     def forbidden_query(*args, **kwargs):
