@@ -162,6 +162,14 @@ def test_question_rejects_unsupported_explicit_dates(date):
 
 def test_question_defaults_only_without_date():
     assert parse_question("Why did West margin fall?") == ("West", "2025-07")
+@pytest.mark.parametrize("region", ["North", "north", "Northeast", "Northwest", "Southeast", "Southwest", "West and North"])
+def test_unsupported_region_is_rejected_before_querying(monkeypatch, region):
+    def forbidden_query(*args, **kwargs):
+        pytest.fail("Unsupported regions must be rejected before querying")
+    monkeypatch.setattr("agent.run_sql", forbidden_query)
+    with pytest.raises(ValueError, match="Unsupported region"):
+        answer_question(f"Why did {region} margin fall since July 2025?")
+    assert parse_question("Why did margin fall since July 2025?") == ("West", "2025-07")
 
 
 @pytest.fixture(scope="module")
